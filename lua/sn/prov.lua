@@ -39,7 +39,7 @@ function M.set_switch(name, on, persist)
     if persist then
         if not fskv then return false, "fskv unavailable" end
         fskv.set("sn_en_" .. name, on and "1" or "0")
-        pcall(fskv.save)
+        if fskv.save then pcall(fskv.save) end
     end
     log.info("prov", "switch", name, tostring(on))
     return true

@@ -95,7 +95,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 - `sys.wait/waitUntil` 只能在 `sys.taskInit` 协程内；定时器/订阅回调内不可用
 - `mqtt.create(nil, host, port, ssl)` → `auth(cid, user, pass, cleanSession)` → `keepalive` → `autoreconn(false)` → `on(cb)` → `connect()`，等 `conack` 事件确认
 - `mqttc:publish(topic, data, qos)` 三参数；模块端无重发，失败只能重连
-- `fskv.set` 后必须 `fskv.save` 才落 flash
+- `fskv.set` 新版自动落盘；旧固件需 `fskv.save`（代码已做存在性判断，两者兼容）
 - 32 位固件：`ts*1000` 回绕、`%.0f` 大数科学计数法 → 数值全部手工拼（int_str/ms_of）
 - `tonumber(nil)` 会崩 VM → 所有外部取值先判 nil
 - 日志：开机不调 `setLevel`；guard 心跳用 `print` 走 stdout

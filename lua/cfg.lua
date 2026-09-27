@@ -29,7 +29,7 @@ end
 local function kv_set(k, s)
     if not fskv then return false end
     fskv.set(k, s)
-    pcall(fskv.save)
+    if fskv.save then pcall(fskv.save) end
     return true
 end
 
@@ -185,7 +185,7 @@ function M.reset()
     for _, k in ipairs({ K_POLL, K_SNIFF, K_SYS }) do
         if fskv then
             pcall(fskv.del, k)
-            pcall(fskv.save)
+            if fskv.save then pcall(fskv.save) end
         end
     end
 end

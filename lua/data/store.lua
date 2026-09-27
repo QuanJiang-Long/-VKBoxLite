@@ -160,7 +160,7 @@ function M.set_enable(on, persist)
     enable = on and true or false
     if persist and fskv then
         fskv.set("ds_enable", enable and "1" or "0")
-        fskv.save()
+        if fskv.save then pcall(fskv.save) end
     end
     return true
 end
@@ -180,7 +180,7 @@ function M.init()
         local b = fskv.get("ds_boots")
         b = num_or(b, 0) + 1
         fskv.set("ds_boots", b)
-        fskv.save()
+        if fskv.save then pcall(fskv.save) end
     end
     load_file()
     if M.depth() > 0 then M.flush() end

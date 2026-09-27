@@ -63,7 +63,7 @@ function M.normalize(c)
 end
 
 local function kv_flush()
-    if fskv then pcall(fskv.save) end
+    if fskv and fskv.save then pcall(fskv.save) end
 end
 
 function M.load()

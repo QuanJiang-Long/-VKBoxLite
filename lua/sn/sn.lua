@@ -20,7 +20,9 @@ local function kv_get(k)
     return nil
 end
 
-local function flush() pcall(fskv.save) end
+local function flush()
+    if fskv and fskv.save then pcall(fskv.save) end
+end
 
 function M.locked()
     return kv_get(K_LOCK) == "1"
