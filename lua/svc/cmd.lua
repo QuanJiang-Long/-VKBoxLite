@@ -213,10 +213,10 @@ local function reg_cmds()
     M.reg("R:MEM", function()
         local st = {}
         if rtos then
-            local ok, mi = pcall(rtos.meminfo, "sys")
-            if ok and type(mi) == "table" then st.sys = mi end
-            local ok2, ml = pcall(rtos.meminfo, "lua")
-            if ok2 and type(ml) == "table" then st.lua = ml end
+            local t1, u1 = rtos.meminfo("sys")
+            local t2, u2 = rtos.meminfo("lua")
+            if type(u1) == "number" then st.sys = { total = t1, used = u1 } end
+            if type(u2) == "number" then st.lua = { total = t2, used = u2 } end
         end
         M.reply("RET:MEM=" .. jencode(st))
     end)

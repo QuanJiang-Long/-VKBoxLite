@@ -96,9 +96,22 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 - `mqtt.create(nil, host, port, ssl)` → `auth(cid, user, pass, cleanSession)` → `keepalive` → `autoreconn(false)` → `on(cb)` → `connect()`，等 `conack` 事件确认
 - `mqttc:publish(topic, data, qos)` 三参数；模块端无重发，失败只能重连
 - `fskv.set` 新版自动落盘；旧固件需 `fskv.save`（代码已做存在性判断，两者兼容）
+- **Air780EP 无软件看门狗**：`wdt.init/setTimeout/close` 均返回 false，AON WDT 由固件托管（固定 28s），只有 `wdt.feed()` 有效——guard 仅负责 feed
+- `rtos.meminfo("sys")` 返回 **3 个 int**（总/已用/历史峰值），不是 table
+- `mobile.imei/csq/rsrp/iccid()` 均为无参函数；`mobile.status()` 不能用于判断联网（以连上目标服务器为准）
+- `json.decode` 返回 obj/result/err 三个值；`json.encode` 第二参为浮点精度模式，缺省 "7f"
+- `rtos.fsinfo` 官方确认不存在（本框架已不依赖）
 - 32 位固件：`ts*1000` 回绕、`%.0f` 大数科学计数法 → 数值全部手工拼（int_str/ms_of）
 - `tonumber(nil)` 会崩 VM → 所有外部取值先判 nil
 - 日志：开机不调 `setLevel`；guard 心跳用 `print` 走 stdout
+
+## fskv 容量约束（Air780EP）
+
+片上 flash 64K 区域（16×4K block），wear-leveling，单 cell 约 10 万次擦写：
+
+- Value ≤255B：最多 **812** 个键值对（本框架全部配置均在此区间，JSON 限 512B 内）
+- Value ≥256B：每个占一个 4K block，最多 **14** 个
+- 当前键用量：`ds_poll`/`ds_sniff`/`ds_sys`/`mqtt_cfg`/`ds_enable`/`ds_boots`/`dev_sn*` 共 4 个 ≈ 10 个，余量充足
 
 ## 与原版（v1）的差异
 

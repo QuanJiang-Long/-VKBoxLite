@@ -12,7 +12,7 @@ local ticks, last_alive = 0, 0
 
 local function wdt_ok()
     if not wdt then return false end
-    return type(wdt.init) == "function" and type(wdt.feed) == "function"
+    return type(wdt.feed) == "function"
 end
 
 function M.alive()
@@ -25,7 +25,6 @@ local function feed_loop()
         if sys then sys.wait(cfg.WDT_FEED_MS) end
     end
 end
-
 local function tick_loop()
     while true do
         ticks = ticks + 1
@@ -53,9 +52,9 @@ local function monitor()
             store.depth(), st.pushed or 0, st.saved or 0, st.dropped or 0, st.failed or 0)
     end
     if rtos then
-        local okm, mi = pcall(rtos.meminfo, "sys")
-        if okm and type(mi) == "table" then
-            parts[#parts + 1] = "mem=" .. tostring(mi.used or mi.total or "?")
+        local total, used = rtos.meminfo("sys")
+        if type(used) == "number" then
+            parts[#parts + 1] = string.format("mem=%d/%d", used, total or 0)
         end
     end
     print("[guard] " .. table.concat(parts, " "))
@@ -76,8 +75,15 @@ end
 
 function M.init()
     if wdt_ok() then
-        pcall(wdt.init, cfg.WDT_TIMEOUT)
-        log.info("guard", "wdt init " .. cfg.WDT_TIMEOUT .. "ms")
+        local ok = false
+        if type(wdt.init) == "function" then
+            ok = pcall(wdt.init, cfg.WDT_TIMEOUT)
+        end
+        if ok then
+            log.info("guard", "wdt init " .. cfg.WDT_TIMEOUT .. "ms")
+        else
+            log.info("guard", "wdt.init 无效(Air780EP 无软件看门狗, AON WDT 由固件托管), 仅 feed 有效")
+        end
     else
         log.warn("guard", "wdt unavailable")
     end
