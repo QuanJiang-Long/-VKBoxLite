@@ -114,9 +114,31 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 - Value ≥256B：每个占一个 4K block，最多 **14** 个
 - 当前键用量：`ds_poll`/`ds_sniff`/`ds_sys`/`mqtt_cfg`/`ds_enable`/`ds_boots`/`dev_sn*` 共 4 个 ≈ 10 个，余量充足
 
+## 485 无响应排查（现场顺序）
+
+日志出现 `round N 无有效响应 timeout=X` 时，按序执行：
+
+1. **`W:RAWTEST`**（最重要，一步定位）
+   - `tx_ok=false` → uart.write 失败，查 UART1 是否被占用/波特率非法
+   - `rx_len=0` → 模块发了但总线上**没有任何回字节**：
+     从机是否上电、A/B 是否接反、从机地址是否真的是配置值、
+     波特率/校验位/停止位是否与从机一致（很多从机默认 **8E1** 而非 8N1）
+   - `rx_len>0` 但 `parsed=false` → 有字节但 CRC 不过：**波特率/校验位/停止位**不匹配
+     （9600 8N1 采到 8E1 的数据会整帧错乱），或 A/B 线序反
+   - `parsed=true` → 物理层通了，问题在配置（地址/count/dtype）
+2. **`R:CFG`** 核对 `slave/baud/databits/stopbits/parity/regs`
+3. **`W:CFG={...}`** 修改后，若改了 baud/parity/slave 会自动重启轮询任务
+4. `parsed=true` 但 `pushed` 不涨 → 查 `R:VAL` 与 `eps`（值变化过滤，`eps=0` 表示不过滤）
+5. DE/RE 接 GPIO8，**高=发送、低=接收**；`W:RAWTEST` 会自动拉高/拉低
+
+协议层已用标准 Modbus 校验值复核：读 slave=1 addr=14 qty=1 的请求帧为
+`01 03 00 0e 00 01 e5 c9`，合法响应形如 `01 03 02 00 64 b9 af`（值 100）。
+
 ## 与原版（v1）的差异
 
-- 24 文件 → 14 文件；删除 fsinfo/bootreason 桩、identity 独立模块、logctl 独立模块
+- 24 文件 → 16 文件；删除 fsinfo/bootreason 桩、identity 独立模块、logctl 独立模块
 - mbus_common → mbus；cfg_store → cfg.lua；collector/data_store 移入 data/
-- vcom → cmd，指令集保留核心 24 条，去掉 TX/FRAMELOG/NETTEST/INFER/PROBE 等诊断指令
+- vcom → cmd，指令集保留核心 26 条（含 W:RAWTEST 裸探针），
+  去掉 TX/FRAMELOG/NETTEST/INFER/PROBE 等诊断指令
 - 看门狗参数、MQTT 用法、启动顺序均对照官方文档核对修正
+- 切帧统一为 CRC 试探法；事务前 drain 清残帧（v1 只在失败后 drain）
