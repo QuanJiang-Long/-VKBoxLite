@@ -197,26 +197,92 @@ def check_undefined_calls(code, path, errors):
         errors.append(f"{path}:{line}: 调用了未定义的 '{name}'(非局部/非内置/非已知全局)")
 
 
-def check_requires(files, errors):
-    """require "x/y" 必须对应存在的 lua/x/y.lua 或 lua/y.lua"""
-    for f, code in files.items():
-        for m in re.finditer(r'require\s*[("]\s*"([^"]+)"', code):
+def strip_comments_only(src):
+    """只剥注释(保留字符串), 用于 require 类检查——注释里提到 require 不算引用"""
+    out = []
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == "\n":
+            out.append(c)
+            i += 1
+            continue
+        if c == "-" and i + 1 < n and src[i + 1] == "-":
+            m = re.match(r"--\[(=*)\[", src[i:])
+            if m:
+                close = "]" + m.group(1) + "]"
+                j = src.find(close, i + len(m.group(0)))
+                if j == -1:
+                    break
+                out.append(" " * (j + len(close) - i))
+                i = j + len(close)
+                continue
+            j = src.find("\n", i)
+            if j == -1:
+                j = n
+            out.append(" " * (j - i))
+            i = j
+            continue
+        if c == '"' or c == "'":
+            q = c
+            j = i + 1
+            while j < n:
+                if src[j] == "\\":
+                    j += 2
+                    continue
+                if src[j] == q:
+                    break
+                j += 1
+            out.append(src[i:j + 1])
+            i = j + 1
+            continue
+        if c == "[" and i + 1 < n and src[i + 1] in "[=":
+            m = re.match(r"\[(=*)\[", src[i:])
+            if m:
+                close = "]" + m.group(1) + "]"
+                j = src.find(close, i + len(m.group(0)))
+                if j == -1:
+                    break
+                out.append(src[i:j + len(close)])
+                i = j + len(close)
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def check_requires(files, raw_files, errors):
+    """require 模块必须对应存在的 lua 文件。
+    覆盖两种写法: require "x/y" 与 pcall(require, "x/y")
+    注意: 必须在原始源码上匹配, 且剥掉注释(注释里提到不算引用)"""
+    for f, src in raw_files.items():
+        code = strip_comments_only(src)
+        for m in re.finditer(r'require\s*,?\s*\(?\s*"([^"]+)"', code):
             mod = m.group(1)
             if "/" not in mod:
                 continue
             p1 = os.path.join(LUA_DIR, mod.replace(".", "/") + ".lua")
             p2 = os.path.join(LUA_DIR, mod.split("/")[-1] + ".lua")
             if not os.path.exists(p1) and not os.path.exists(p2):
-                line = code.count("\n", 0, m.start()) + 1
+                line = src.count("\n", 0, m.start()) + 1
                 errors.append(f"{f}:{line}: require '{mod}' 找不到文件")
 
 
-def check_string_format(code, path, errors):
-    """32 位固件禁用清单：%f / %0Nd / %0Nx"""
-    for m in re.finditer(r'string\.format\(\s*"([^"]*)"', code):
+def check_string_format(src, path, errors):
+    """32 位固件禁用清单: %f / %0Nd / %0Nx 用于数值格式化时有问题。
+    例外: %02x/%04x 等对 0-255 字节做 hex 转义是安全的(hex dump / \\u 转义)"""
+    for m in re.finditer(r'string\.format\(\s*"([^"]*)"', src):
         fmt = m.group(1)
-        if re.search(r"%[-+ #0]*\d*f", fmt) or re.search(r"%[-+ #0]*\d*x", fmt):
-            line = code.count("\n", 0, m.start()) + 1
+        bad = False
+        if re.search(r"%[-+ #0]*\d*f", fmt):
+            bad = True
+        # 先把 \u%04x 这类字节转义抠掉, 剩下的 %0Nx 才是数值场景
+        probe = re.sub(r"\\u%0?\d+x", "", fmt)
+        for wm in re.finditer(r"%[-+ #0]*(\d+)x", probe):
+            if int(wm.group(1)) >= 3:
+                bad = True
+        if bad:
+            line = src.count("\n", 0, m.start()) + 1
             errors.append(f"{path}:{line}: string.format 用了 32 位固件不安全的格式 '{fmt}'")
 
 
@@ -239,8 +305,10 @@ def check_module_names(errors):
                 errors.append(f"{rel}: 模块名 '{base}' 与核心库同名, Luatools 会误判'多余核心库引用', 必须改名(如 {base}cfg.lua)")
 
 
-def check_core_lib_require(code, path, errors):
-    """Luatools 静态扫描: require 核心库(字面量)会被判'多余核心库引用'拒绝烧录"""
+def check_core_lib_require(src, path, errors):
+    """Luatools 静态扫描: require 核心库(字面量)会被判'多余核心库引用'拒绝烧录。
+    注释里的字样同样会被扫到, 故先剥注释"""
+    code = strip_comments_only(src)
     for m in re.finditer(r'require\s*[,(]\s*"([^"]+)"', code):
         mod = m.group(1)
         if mod in CORE_LIBS:
@@ -260,6 +328,7 @@ def main():
     sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     all_errors = []
     files = {}
+    raw_files = {}
     lua_files = []
     for root, _, fs in os.walk(LUA_DIR):
         for f in fs:
@@ -270,16 +339,17 @@ def main():
         rel = os.path.relpath(path, LUA_DIR)
         with open(path, "r", encoding="utf-8") as fh:
             src = fh.read()
+        raw_files[rel] = src
         code, errs = strip_comments_and_strings(src)
         all_errors.extend(f"{rel}: {e}" for e in errs)
         files[rel] = code
         check_balance(code, rel, all_errors)
         check_forward_refs(code, rel, all_errors)
         check_undefined_calls(code, rel, all_errors)
-        check_requires(files, all_errors)
-        check_string_format(code, rel, all_errors)
-        check_tonumber_nil(code, rel, all_errors)
-        check_core_lib_require(code, rel, all_errors)
+        check_requires(files, raw_files, all_errors)
+        check_string_format(src, rel, all_errors)
+        check_tonumber_nil(src, rel, all_errors)
+        check_core_lib_require(src, rel, all_errors)
 
     print(f"检查 {len(lua_files)} 个 Lua 文件")
     check_module_names(all_errors)
