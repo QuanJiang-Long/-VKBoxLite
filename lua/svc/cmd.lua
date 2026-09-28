@@ -173,15 +173,19 @@ local function reg_cmds()
     end)
 
     -- R:STAT: 前端 renderHome 读
-    -- R:STAT: 前端 renderHome 读
-    --   st.poll{running,regs} / d.data{points} / g.guard{wdt_to} / store{rounds,recs,saved,enable}
-    --   ⚠️ 前端读的是顶层 mqtt 段(不是 iot), 少这个键首页 MQTT 状态永远空
+    -- R:STAT: 前端 readHome 读五段 mode/data/guard/store/mqtt
+    --   ⚠️ mode 段必须是【对象】(与 R:MODE 同形: {mode,busy,poll,mon,write}),
+    --     不能是字符串。前端 readHome 里 S.modeStat = r.data.mode 后
+    --     renderMode 会取 st.mode, 字符串没有 .mode -> undefined -> 'idle',
+    --     表现为一切换模式就被打回 idle。
+    --   ⚠️ 段名必须是 data(前端读 full.data.points), 不是 collector
     M.reg("R:STAT", function()
-        local st = ctrl.status()
-        st.collector = collector.stats()
-        st.guard = guard and guard.status() or nil
-        local ss = store.stats()   -- 已含 enable/pushed/saved/dropped/failed/rounds/recs/fs
-        st.store = ss
+        local st = {
+            mode = ctrl.status(),
+            data = collector.stats(),
+            guard = guard and guard.status() or nil,
+            store = store.stats(),
+        }
         local it = iot and iot.status() or nil
         st.iot = it
         st.mqtt = it               -- 前端 readHome 读 r.data.mqtt
