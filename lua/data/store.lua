@@ -114,7 +114,7 @@ function M.flush()
         stats.failed = stats.failed + 1
         return 0
     end
-    stats.saved = #all
+    stats.saved = stats.saved + #all
     pending = 0
     return #all
 end

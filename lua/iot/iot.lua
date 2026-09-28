@@ -117,6 +117,7 @@ M.publish = publish
 local function on_mqtt(cli, event, data, payload)
     if event == "conack" then
         S.connected = true
+        S.subscribed = true
         S.backoff = 1
         if S.sub then
             pcall(function() cli:subscribe(S.sub, mqttcfg.load().qos) end)

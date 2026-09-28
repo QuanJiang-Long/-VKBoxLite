@@ -42,7 +42,7 @@ local function monitor()
     local mode = cur_mode()
     local stall = mode == "poll" and (ticks - last_alive) or nil
     local parts = {
-        string.format("uptime=%ds feed=%d", ticks, cfg.WDT_FEED_MS // 1000),
+        string.format("uptime=%ds mode=%s feed=%d", ticks, mode, cfg.WDT_FEED_MS // 1000),
     }
     if stall then parts[#parts + 1] = string.format("stall=%ds", stall) end
     local ok, store = pcall(require, "data/store")
@@ -75,11 +75,11 @@ end
 
 function M.init()
     if wdt_ok() then
-        local ok = false
+        local pok, ret = false, nil
         if type(wdt.init) == "function" then
-            ok = pcall(wdt.init, cfg.WDT_TIMEOUT)
+            pok, ret = pcall(wdt.init, cfg.WDT_TIMEOUT)
         end
-        if ok then
+        if pok and ret then
             log.info("guard", "wdt init " .. cfg.WDT_TIMEOUT .. "ms")
         else
             log.info("guard", "wdt.init 无效(Air780EP 无软件看门狗, AON WDT 由固件托管), 仅 feed 有效")
