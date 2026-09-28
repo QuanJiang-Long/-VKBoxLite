@@ -1,5 +1,6 @@
 local corelib = require "core/corelib"
 local cfg = require "core/config"
+local rtos = corelib.try("rtos")
 local log = corelib.log()
 
 local sys = corelib.get("sys")
@@ -156,6 +157,18 @@ function M.stats()
     for k, v in pairs(stats) do st[k] = v end
     st.enable = enable
     st.rounds = #rounds
+    st.recs = M.depth()
+    -- 剩余空间(KB): 前端存储空间显示用; fsinfo 不可用时不给这个字段
+    if rtos and rtos.fsinfo then
+        local ok, info = pcall(rtos.fsinfo)
+        if ok and type(info) == "table" then
+            st.fs = {
+                total = math.floor((info.total_block_count * info.block_size or 0) / 1024),
+                free = math.floor((info.free_block_count or 0) * (info.block_size or 0) / 1024),
+                used = math.floor(((info.total_block_count - info.free_block_count) * (info.block_size or 0)) / 1024),
+            }
+        end
+    end
     return st
 end
 

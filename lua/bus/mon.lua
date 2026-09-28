@@ -146,6 +146,84 @@ local function task()
     end
 end
 
+-- 静默侦听总线 ms 毫秒, 返回期间解译出的帧数(前端 R:SNIFF 用)
+-- 若嗅探任务已在跑, 直接统计窗口期内的增量; 否则临时起一个窗口
+-- 从旁听到的 REQ 帧反推轮询表(前端 R:INFER)
+-- 按 slave+addr+qty+fc 聚合命中次数
+function M.infer()
+    local agg = {}
+    local slaves = {}
+    for _, f in ipairs(collector.get_frames()) do
+        if f.kind == "req" and f.addr ~= nil and f.qty then
+            local key = f.slave .. ":" .. f.addr .. ":" .. f.qty .. ":" .. f.fc
+            local a = agg[key]
+            if not a then
+                a = { slave = f.slave, addr = f.addr, count = f.qty, fc = f.fc, hits = 0 }
+                agg[key] = a
+                slaves[f.slave] = true
+            end
+            a.hits = a.hits + 1
+        end
+    end
+    local regs = {}
+    for _, a in pairs(agg) do regs[#regs + 1] = a end
+    table.sort(regs, function(x, y)
+        if x.slave ~= y.slave then return x.slave < y.slave end
+        return x.addr < y.addr
+    end)
+    local sl = {}
+    for s in pairs(slaves) do sl[#sl + 1] = s end
+    table.sort(sl)
+    local st = stat
+    return {
+        regs = regs,
+        slaves = sl,
+        stat = {
+            frames = st.frames, reqs = st.reqs, rsps = st.rsps,
+            errs = st.errs, paired = st.paired, orphans = st.orphans,
+        },
+    }
+end
+
+-- 把推断结果写成轮询配置(前端 W:APPLYINFER)
+function M.apply_infer()
+    local inf = M.infer()
+    if #inf.regs == 0 then return false, "no req frames" end
+    local regs = {}
+    for _, a in ipairs(inf.regs) do
+        regs[#regs + 1] = {
+            name = "s" .. a.slave .. "_r" .. a.addr,
+            alias = "s" .. a.slave .. "_r" .. a.addr,
+            addr = a.addr, count = a.count, dtype = "uint16",
+            byteOrder = "BE", wordOrder = "BE", eps = 0,
+        }
+    end
+    local c = cfgstore.load_poll()
+    c.regs = regs
+    local n, err = cfgstore.normalize_poll(c)
+    if not n then return false, err end
+    local ok, serr = cfgstore.save_poll(c)
+    if not ok then return false, serr end
+    return true, #regs
+end
+
+function M.sniff_count(ms)
+    ms = ms or 3000
+    if ms < 100 then ms = 100 end
+    if ms > 30000 then ms = 30000 end
+    if not running then
+        local ok = M.start()
+        if not ok then return 0 end
+    end
+    local before = stat.frames
+    local waited = 0
+    while waited < ms do
+        if sys then sys.wait(100) end
+        waited = waited + 100
+    end
+    return math.max(0, stat.frames - before)
+end
+
 function M.start(c)
     if running then return true end
     c = c or cfgstore.load_sniff()

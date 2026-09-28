@@ -57,7 +57,7 @@ M.default_poll = {
     parity = cfg.PARITY,
     slave = cfg.SLAVE_ADDR,
     interval_ms = cfg.POLL_INTERVAL_MS,
-    timeout = cfg.TIMEOUT_MS,
+    timeout_ms = cfg.TIMEOUT_MS,
     regs = cfg.REG_DEFAULT,
 }
 
@@ -110,8 +110,15 @@ function M.normalize_poll(c)
     if out.slave < 1 or out.slave > 247 then return nil, "bad slave" end
     out.interval_ms = math.floor(num(c.interval_ms, M.default_poll.interval_ms))
     if out.interval_ms < 100 then return nil, "bad interval" end
-    out.timeout = math.floor(num(c.timeout, M.default_poll.timeout))
-    if out.timeout < 50 or out.timeout > 10000 then return nil, "bad timeout" end
+    -- timeout_ms 允许留空(null)= 早返回模式: 收到响应立刻走下一事务,
+    -- 不等满超时。字段名与前端一致(前端 collectCfg 下发 timeout_ms)
+    if c.timeout_ms == nil then
+        out.timeout_ms = nil
+    else
+        local t = math.floor(num(c.timeout_ms, M.default_poll.timeout_ms))
+        if t < 50 or t > 500 then return nil, "响应上限越界(50~500ms)" end
+        out.timeout_ms = t
+    end
     out.regs = {}
     local regs = c.regs
     if type(regs) == "table" then
@@ -143,6 +150,14 @@ function M.load_poll()
         return M.default_poll
     end
     return c
+end
+
+-- 配置来源: fskv 里从未写过就是 default(前端据此提示"尚未保存过配置")
+function M.poll_src()
+    if not fskv then return "default" end
+    local v = fskv.get(K_POLL)
+    if v == nil or v == "" then return "default" end
+    return "fskv"
 end
 
 function M.load_sniff()
@@ -178,7 +193,9 @@ function M.save_sys(c)
 end
 
 function M.effective_timeout()
-    return M.load_poll().timeout or cfg.TIMEOUT_MS
+    local t = M.load_poll().timeout_ms
+    -- timeout_ms = nil 是早返回模式, 取默认上限兜底
+    return t or cfg.TIMEOUT_MS
 end
 
 function M.reset()

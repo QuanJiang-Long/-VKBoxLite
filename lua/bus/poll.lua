@@ -78,6 +78,9 @@ local function try_resp()
 end
 
 local function do_transaction(frame, timeout_ms, exp_slave, exp_fc)
+    -- timeout_ms 为 nil = 早返回模式: 用默认上限兜底, 收到响应立即返回
+    -- (try_resp 命中就 return, 本来就不会等满)
+    if timeout_ms == nil then timeout_ms = cfg.TIMEOUT_MS end
     drain()                                  -- 先清残留, 避免杂字节顶掉真响应
     respFlag, respData = true, nil
     reqSlave, reqFc = exp_slave, exp_fc
@@ -105,7 +108,7 @@ local function poll_reg(reg)
         log.warn("poll", "build fail", reg.addr, tostring(err))
         return
     end
-    local f = do_transaction(frame, lastCfg and lastCfg.timeout or cfg.TIMEOUT_MS, slave, 3)
+    local f = do_transaction(frame, lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS, slave, 3)
     if not f then
         stat.timeout = stat.timeout + 1
         -- 前若干次超时把原始回字节打出来, 便于区分"完全没回"与"回了但解析不了"
@@ -139,7 +142,7 @@ local function do_write(w)
         wstat.wfail = wstat.wfail + 1
         return false
     end
-    local f = do_transaction(frame, lastCfg and lastCfg.timeout or cfg.TIMEOUT_MS,
+    local f = do_transaction(frame, lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS,
         w.slave, w.values and 16 or 6)
     if not f or f.err then
         wstat.wfail = wstat.wfail + 1
@@ -236,7 +239,7 @@ function M.probe_raw(slave, addr, qty, timeout_ms)
     slave = slave or (lastCfg and lastCfg.slave) or cfg.SLAVE_ADDR
     addr = addr or 0
     qty = qty or 1
-    timeout_ms = timeout_ms or (lastCfg and lastCfg.timeout) or cfg.TIMEOUT_MS
+    timeout_ms = timeout_ms or (lastCfg and lastCfg.timeout_ms) or cfg.TIMEOUT_MS
     local frame, err = mbus.build_read(slave, addr, qty)
     if not frame then return nil, tostring(err) end
     if not running then
@@ -273,6 +276,54 @@ function M.probe_raw(slave, addr, qty, timeout_ms)
         rx_hex = #cap > 0 and (cap:gsub(".", function(c) return string.format("%02x", c:byte()) end)) or "",
         parsed = mbus.parse_frame(cap) ~= nil,
         slave = slave, addr = addr, qty = qty,
+    }
+end
+
+-- 裸发一串 hex 字节(前端 W:TX), 抓回原始响应, 返回 rx_len/rx_hex/parsed
+function M.tx_raw(hex, timeout_ms)
+    if type(hex) ~= "string" then return nil, "bad hex" end
+    local bytes = {}
+    for h in hex:gmatch("%x%x") do
+        local v = tonumber(h, 16)
+        if not v then return nil, "bad hex" end
+        bytes[#bytes + 1] = string.char(v)
+    end
+    if #bytes == 0 then return nil, "empty hex" end
+    local frame = table.concat(bytes)
+    if not running then
+        local ok, e = pcall(uart.setup, mbus.UART_ID, lastCfg and lastCfg.baud or cfg.BAUD,
+            lastCfg and lastCfg.databits or cfg.DATABITS,
+            lastCfg and lastCfg.stopbits or cfg.STOPBITS,
+            mbus.parity_to_uart(lastCfg and lastCfg.parity or cfg.PARITY))
+        if not ok then return nil, "uart setup fail: " .. tostring(e) end
+        if gpio then pcall(gpio.setup, mbus.DE_PIN, 0) end
+    end
+    drain()
+    rawCap = ""
+    pcall(uart.on, mbus.UART_ID, "receive", raw_on_receive)
+    local txok, txerr = pcall(uart.write, mbus.UART_ID, frame)
+    txok = txok and true or false
+    de_high()
+    local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD)
+    if sys then sys.wait(hold) end
+    de_low()
+    timeout_ms = timeout_ms or (lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS)
+    local waited = 0
+    while waited < timeout_ms do
+        if #rawCap > 0 and mbus.parse_frame(rawCap) then break end
+        if sys then sys.wait(5) end
+        waited = waited + 5
+    end
+    local cap = rawCap or ""
+    rawCap = nil
+    if running then pcall(uart.on, mbus.UART_ID, "receive", on_receive) end
+    return {
+        tx_ok = txok,
+        tx_err = txok and "" or tostring(txerr),
+        tx_hex = hex,
+        rx_len = #cap,
+        rx_hex = #cap > 0 and (cap:gsub(".", function(c) return string.format("%02x", c:byte()) end)) or "",
+        parsed = mbus.parse_frame(cap) ~= nil,
     }
 end
 
@@ -361,7 +412,7 @@ function M.start()
     log.info("poll", string.format("started, regs=%d slave=%d baud=%d parity=%d timeout=%dms",
         #regs, lastCfg and lastCfg.slave or cfg.SLAVE_ADDR,
         lastCfg and lastCfg.baud or cfg.BAUD, lastCfg and lastCfg.parity or cfg.PARITY,
-        lastCfg and lastCfg.timeout or cfg.TIMEOUT_MS))
+        lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS))
     return true
 end
 

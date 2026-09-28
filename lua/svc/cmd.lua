@@ -64,22 +64,43 @@ end
 local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
 
 local function reg_cmds()
+    -- R:INFO: 前端打开串口读设备信息用的第一条指令
+    -- ⚠️ mobile.iccid / mobile.csq / mobile.rsrp 是【函数】, 必须调用取号,
+    --    直接塞函数引用会让 json.encode 整表失败 -> 返回 "{}" -> 前端全空
     M.reg("R:INFO", function()
+        local function mval(k)
+            if not mobile then return nil end
+            local v = mobile[k]
+            if type(v) == "function" then
+                local ok, r = pcall(v)
+                return ok and r or nil
+            end
+            return v
+        end
+        local okc, c = pcall(cfgstore.load_poll)
+        local pc = okc and c or nil
+        local okm, mc = pcall(mqtt_cfg.load)
+        local mq = okm and mc or nil
         M.reply("RET:INFO=" .. jencode({
             project = _G.PROJECT,
             version = _G.VERSION,
-            imei = sn.imei(),
-            chip_uid = sn.chip_uid(),
             sn = _G.get_device_sn and _G.get_device_sn(),
             sn_state = sn.state(),
-            locked = sn.locked(),
-            iccid = mobile and mobile.iccid,
-            csq = mobile and mobile.csq,
+            lock = sn.locked() and 1 or 0,
+            imei = sn.imei(),
+            iccid = mval("iccid"),
+            csq = mval("csq"),
+            rsrp = mval("rsrp"),
+            server = mq and mq.host or nil,
+            baud = pc and pc.baud or cfg.BAUD,
+            slave = pc and pc.slave or cfg.SLAVE_ADDR,
+            regs = pc and #(pc.regs or {}) or 0,
         }))
     end)
 
+    -- R:MODE: 前端 renderHome 读 st.mode/st.busy/st.poll/st.mon
     M.reg("R:MODE", function()
-        M.reply("RET:MODE=" .. ctrl.get_mode())
+        M.reply("RET:MODE=" .. jencode(ctrl.status()))
     end)
 
     M.reg("W:MODE", function(arg)
@@ -90,7 +111,7 @@ local function reg_cmds()
     end)
 
     M.reg("R:CFG", function()
-        M.reply("RET:CFG=" .. jencode(cfgstore.load_poll()))
+        M.reply("RET:CFG=" .. jencode({ cfg = cfgstore.load_poll(), src = cfgstore.poll_src() }))
     end)
 
     M.reg("W:CFG", function(arg)
@@ -115,7 +136,7 @@ local function reg_cmds()
     end)
 
     M.reg("R:SNIFFCFG", function()
-        M.reply("RET:SNIFFCFG=" .. jencode(cfgstore.load_sniff()))
+        M.reply("RET:SNIFFCFG=" .. jencode({ cfg = cfgstore.load_sniff(), src = "fskv" }))
     end)
 
     M.reg("W:SNIFFCFG", function(arg)
@@ -151,12 +172,16 @@ local function reg_cmds()
         M.reply("RET:VAL=" .. jencode(collector.snapshot()))
     end)
 
+    -- R:STAT: 前端 renderHome 读
+    --   st.poll{running,regs} / d.data{points} / g.guard{wdt_to} / store{rounds,recs,saved,enable}
     M.reg("R:STAT", function()
         local st = ctrl.status()
         st.collector = collector.stats()
         st.guard = guard and guard.status() or nil
-        st.store = store.stats()
+        local ss = store.stats()   -- 已含 enable/pushed/saved/dropped/failed/rounds
+        st.store = ss
         st.iot = iot and iot.status() or nil
+        -- 前端 store 段用 saved/rounds/recs/enable, 已由 store.stats() 提供
         M.reply("RET:STAT=" .. jencode(st))
     end)
 
@@ -190,8 +215,17 @@ local function reg_cmds()
         M.reply(string.format("RET:WRITEJ=OK:%d:%d", nok, nfail))
     end)
 
+    -- R:MQTT: 前端读 r.cfg / r.pub / r.sub / r.ready / r.err / r.stat
     M.reg("R:MQTT", function()
-        M.reply("RET:MQTT=" .. jencode(mqtt_cfg.effective(device_id_str())))
+        local e = mqtt_cfg.effective(device_id_str())
+        M.reply("RET:MQTT=" .. jencode({
+            cfg = e.cfg,
+            pub = e.pub,
+            sub = e.sub,
+            ready = e.ready,
+            err = e.err,
+            stat = iot and iot.status() or nil,
+        }))
     end)
 
     M.reg("W:MQTT", function(arg)
@@ -208,6 +242,22 @@ local function reg_cmds()
         M.reply("RET:REPORT=OK")
     end)
 
+    -- R:IOTSTAT: 前端 MQTT 页读 connected/published/failed/last_err
+    M.reg("R:IOTSTAT", function()
+        if not iot then return M.reply("RET:FAIL:IOTSTAT:no iot") end
+        local s = iot.status()
+        M.reply("RET:IOTSTAT=" .. jencode({
+            connected = s.connected,
+            published = s.published,
+            failed = s.failed,
+            last_err = s.last_err,
+            last_pub = s.last_pub,
+            subscribed = s.subscribed,
+            backoff = s.backoff,
+        }))
+    end)
+
+    -- R:NET / R:MEM: 网络与内存诊断(并入 R:STAT, 保留独立指令便于现场排查)
     M.reg("R:NET", function()
         M.reply("RET:NET=" .. jencode(iot and iot.net_state() or {}))
     end)
@@ -241,7 +291,6 @@ local function reg_cmds()
         end
         M.reply(string.format("RET:DISK=file=%s bytes=%d", cfg.DATA_FILE, size))
     end)
-
     M.reg("W:STORE", function(arg)
         local v, persist = arg:match("^%s*([01])%s*,?%s*(%a*)%s*$")
         if not v then return M.reply("RET:FAIL:STORE:use 0|1[,P]") end
@@ -278,6 +327,38 @@ local function reg_cmds()
         if n < 1 then n = 1 end
         if n > 50 then n = 50 end
         M.reply("RET:FRAMES=" .. jencode(mon.recent_frames(n)))
+    end)
+
+    -- R:INFER: 从旁听帧反推轮询表
+    M.reg("R:INFER", function()
+        M.reply("RET:INFER=" .. jencode(mon.infer()))
+    end)
+
+    -- W:APPLYINFER: 把推断结果写入 poll 配置
+    M.reg("W:APPLYINFER", function()
+        local ok, err = mon.apply_infer()
+        if ok then M.reply("RET:APPLYINFER=OK") else M.reply("RET:FAIL:APPLYINFER:" .. tostring(err)) end
+    end)
+
+    -- R:SNIFF=ms: 静默侦听总线 ms 毫秒, 返回帧数
+    M.reg("R:SNIFF", function(arg)
+        local ms = 3000
+        if arg then
+            local v = tonumber(arg)
+            if v then ms = math.floor(v) end
+        end
+        local n = mon.sniff_count(ms)
+        M.reply("RET:SNIFF=" .. tostring(n))
+    end)
+
+    -- W:TX=hex: 裸发一串字节(前端总线诊断)
+    M.reg("W:TX", function(arg)
+        if not arg or arg == "" then return M.reply("RET:FAIL:TX:empty hex") end
+        local r, err = poll.tx_raw(arg)
+        if not r then return M.reply("RET:FAIL:TX:" .. tostring(err)) end
+        M.reply(string.format("RET:TX=OK tx_ok=%s rx_len=%d parsed=%s rx=%s",
+            tostring(r.tx_ok), r.rx_len, tostring(r.parsed),
+            r.rx_hex == "" and "(空)" or r.rx_hex))
     end)
 
     M.reg("R:POLL", function()
