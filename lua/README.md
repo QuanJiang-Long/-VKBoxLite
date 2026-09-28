@@ -225,6 +225,21 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 非法条目不整包失败：跳过并记入 `skipped`，前端提示"已忽略 N 条"。
 寄存器数超过 `MAX_REGS=128` 截断。`interval_ms`/`timeout_ms` 沿用设备当前值，不随平台变更。
 
+### 日志（`I/iot`）
+
+点「拉取配置」后 OS log 里依次出现：
+
+```
+I/iot: conack ok, subscribed=true, topics=[vkbox/11802026092600016/down /sys/thing/gw/config/get/11802026092600016]
+I/iot: pullcfg hello topic=/sys/thing/gw/config/hello/11802026092600016 sn=11802026092600016 imei=86xxxxxxxxxxxxx body={"vendor":"VKBoxLite",...}
+I/iot: pullcfg recv topic=/sys/thing/gw/config/get/11802026092600016 len=812
+I/iot: pullcfg done 已忽略 0 条
+```
+
+topic 里的 `{SN}` 取的是**烧号的 SN**（`_G.get_device_sn()`），与 payload 里的
+`deviceId`（IMEI）**不是同一个标识**。三个 topic（hello / config/get / property/post）
+用的都是同一个 SN，对不上时先看这行日志确认。
+
 ## 本地落盘（已移除）
 
 按需求，poll 模式**不做本地保存**，采集数据只走两条路：

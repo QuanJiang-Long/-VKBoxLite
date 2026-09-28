@@ -148,7 +148,8 @@ local function on_mqtt(cli, event, data, payload)
             if not sok then log.warn("iot", "subscribe fail:", t, tostring(serr)) end
             S.subscribed = S.subscribed or sok
         end
-        log.info("iot", "conack ok, subscribed=" .. tostring(S.subscribed))
+        log.info("iot", string.format("conack ok, subscribed=%s, topics=[%s]",
+            tostring(S.subscribed), table.concat(subs, " ")))
     elseif event == "recv" then
         S.recv_pending = { topic = data, payload = payload }
     elseif event == "disconnect" or event == "error" then
@@ -315,6 +316,7 @@ end
 function M.handle_downlink(topic, payload)
     -- 平台配置下发: 与指令下行共用 recv 通道, 按 topic 前缀区分
     if type(topic) == "string" and topic:find("/gw/config/get/", 1, true) then
+        log.info("iot", string.format("pullcfg recv topic=%s len=%d", topic, #tostring(payload)))
         if S.pull.state == "waiting" then S.pull_payload = payload end
         return
     end
@@ -377,11 +379,13 @@ end
 local function pull_step()
     local p = S.pull
     if p.state == "helloing" then
+        local did = device_id()
+        local topic = string.format(cfg.PLATFORM_HELLO_TOPIC, did)
         local body = string.format('{"vendor":%s,"model":%s,"fwVersion":%s,"deviceId":%s}',
             jstr(cfg.PLATFORM_VENDOR), jstr(cfg.PLATFORM_MODEL), jstr(_G.VERSION or "0.0.0"), jstr(imei()))
-        local ok, err = pcall(function()
-            S.client:publish(string.format(cfg.PLATFORM_HELLO_TOPIC, device_id()), body, 1)
-        end)
+        log.info("iot", string.format("pullcfg hello topic=%s sn=%s imei=%s body=%s",
+            topic, tostring(did), imei(), body))
+        local ok, err = pcall(function() S.client:publish(topic, body, 1) end)
         if not ok then return pull_finish("fail", "hello 发送失败: " .. tostring(err)) end
         p.state = "waiting"
         p.deadline = os.time() + math.floor(cfg.PULL_TIMEOUT_MS / 1000)
