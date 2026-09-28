@@ -3,7 +3,6 @@ local cfg = require "core/config"
 local log = corelib.log()
 
 local uart = corelib.get("uart")
-local gpio = corelib.try("gpio")
 local json = corelib.try("json")
 local rtos = corelib.try("rtos")
 local mobile = corelib.try("mobile")
@@ -12,7 +11,6 @@ local sn = require "sn/sn"
 local ctrl = require "bus/ctrl"
 local poll = require "bus/poll"
 local mon = require "bus/mon"
-local mbus = require "bus/mbus"
 local collector = require "data/collector"
 local cfgstore = require "cfg"
 local mqtt_cfg = require "iot/mqttcfg"
@@ -40,13 +38,6 @@ local function device_id_str()
 end
 
 function M.reg(cmd, fn) g_cmds[cmd] = fn end
-
-function M.uart_id() return UART_ID end
-
-local function num(v, d)
-    if v == nil then return d end
-    return tonumber(v) or d
-end
 
 local function jencode(t)
     if not json then return "{}" end

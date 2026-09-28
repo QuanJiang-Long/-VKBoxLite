@@ -10,7 +10,6 @@ local mbus = require "bus/mbus"
 local collector = require "data/collector"
 local cfgstore = require "cfg"
 local guard = corelib.try("svc/guard")
-local logctl = corelib.try("svc/logctl")
 
 local M = {}
 
@@ -351,10 +350,7 @@ function M.apply_cfg(c)
     return true
 end
 
-function M.set_regs(r) regs = r or {} end
-function M.set_interval(ms) interval = ms or cfg.POLL_INTERVAL_MS end
 function M.get_regs() return regs end
-function M.get_cfg() return lastCfg end
 
 function M.needs_restart(c)
     if not lastCfg then return true end
@@ -371,10 +367,6 @@ function M.enqueue_write(w)
     return true
 end
 
-function M.enqueue_write_multi(w)
-    return M.enqueue_write(w)
-end
-
 function M.write_status()
     local st = {}
     st.queued = #writeQ                  -- 队列里待写的条数
@@ -383,12 +375,6 @@ function M.write_status()
     st.fail = wstat.wfail                -- 前端读 w.fail
     return st
 end
-
-function M.set_frame_log(on)
-    M.frame_log = on and true or false
-end
-
-function M.frame_log_status() return M.frame_log end
 
 function M.status()
     local st = {}
@@ -439,6 +425,5 @@ function M.stop()
 end
 
 function M.is_running() return running end
-function M.get_gen() return gen end
 
 return M

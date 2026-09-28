@@ -1,12 +1,10 @@
 local M = {}
 
 -- 485 串口
-M.UART_ID = 1
 M.BAUD = 9600
 M.DATABITS = 8
 M.STOPBITS = 1
 M.PARITY = 0
-M.DE_PIN = 8
 
 -- 轮询
 M.SLAVE_ADDR = 1

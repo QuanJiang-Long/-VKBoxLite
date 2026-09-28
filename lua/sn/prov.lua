@@ -1,5 +1,4 @@
 local corelib = require "core/corelib"
-local cfg = require "core/config"
 local log = corelib.log()
 
 local uart = corelib.get("uart")

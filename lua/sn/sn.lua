@@ -92,10 +92,6 @@ function M.on_change(cb) changeCbs[#changeCbs + 1] = cb end
 
 function M.state() return state end
 
-function M.report_status()
-    return state == M.STATE.READY and "normal" or "unset"
-end
-
 function M.init()
     if fskv.init then pcall(fskv.init) end
     local sn = M.load()
@@ -174,7 +170,6 @@ local function try_identity()
 end
 
 function M.imei() return imei_cache end
-function M.chip_uid() return uid_cache end
 
 function M.identity_init()
     try_identity()

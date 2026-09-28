@@ -192,12 +192,6 @@ function M.save_sys(c)
     return save_json(K_SYS, n)
 end
 
-function M.effective_timeout()
-    local t = M.load_poll().timeout_ms
-    -- timeout_ms = nil 是早返回模式, 取默认上限兜底
-    return t or cfg.TIMEOUT_MS
-end
-
 function M.reset()
     for _, k in ipairs({ K_POLL, K_SNIFF, K_SYS }) do
         if fskv then

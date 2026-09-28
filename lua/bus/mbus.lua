@@ -302,8 +302,4 @@ function M.parity_to_uart(p)
     return uart.NONE or uart.None
 end
 
-function M.to_hex(s)
-    return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end))
-end
-
 return M

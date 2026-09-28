@@ -257,7 +257,6 @@ function M.stop()
 end
 
 function M.is_running() return running end
-function M.get_gen() return gen end
 
 function M.status()
     local st = {}
