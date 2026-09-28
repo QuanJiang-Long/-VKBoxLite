@@ -190,6 +190,20 @@ local function reg_cmds()
         M.reply("RET:STAT=" .. jencode(st))
     end)
 
+    -- 平台配置拉取: W 发起(立即应答), R 轮询状态。
+    -- 握手在 iot 的 task_main 协程里跑, 这里不能阻塞等待 MQTT 回包。
+    M.reg("W:PULLCFG", function()
+        if not iot then return M.reply("RET:FAIL:PULLCFG:iot 不可用") end
+        local ok, err = iot.pull_start()
+        if not ok then return M.reply("RET:FAIL:PULLCFG:" .. tostring(err)) end
+        M.reply("RET:PULLCFG=started")
+    end)
+
+    M.reg("R:PULLCFG", function()
+        if not iot then return M.reply("RET:FAIL:PULLCFG:iot 不可用") end
+        M.reply("RET:PULLCFG=" .. jencode(iot.pull_status()))
+    end)
+
     M.reg("W:WRITE", function(arg)
         local slave, addr, value = arg:match("^%s*(%d+)%s*,%s*(%d+)%s*,%s*(%-?%d+)%s*$")
         if not slave then return M.reply("RET:FAIL:WRITE:use <slave>,<addr>,<value>") end

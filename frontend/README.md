@@ -77,7 +77,9 @@ mklink /J D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules D:\VKBox_Lite\VKBo
 | 首页无"本地落盘"一栏、poll模式无"本地存储"面板 | **本地落盘功能已整体移除**（按需求，poll 模式不做本地保存）。设备端 `data/store.lua`、`R:DISK`、`W:STORE`、`R:STAT.store` 段及寄存器"落盘阈值"列均已删除。采集数据只走内存最新值（R:VAL）与 MQTT 上报 |
 | 标签页只有 4 个 | poll模式 / sniff模式 是合并后的结果：原「串口配置」改名 **poll模式**，原「实时报文」改名 **sniff模式**，原「MQTT上报」页取消 |
 | poll模式内有两个子标签 | 「串口1（485总线）」+「MQTT配置」，MQTT 内容已从串口1下面移到独立的「MQTT配置」子标签 |
-| poll模式有"读取配置"和"拉取配置"两个按钮 | 「读取配置」= R:CFG + R:REG 回填表单；「拉取配置」= 读取配置 + 立即读一次实时值（R:VAL），用于确认寄存器真的采到数 |
+| poll模式有"读取配置"和"拉取配置"两个按钮 | 「读取配置」= R:CFG + R:REG 回填表单；「拉取配置」= 通过 MQTT 从平台拉配置并回填表单（需先连上 MQTT），同样不自动保存 |
+| 点「拉取配置」提示"MQTT 未连接" | 正常。拉取走 MQTT，设备须先连上 broker（首页 MQTT 显示"已连接"） |
+| 点「拉取配置」提示"平台未下发配置(超时)" | 设备已发 hello 但平台 15s 内没回。检查平台是否在线、topic 是否匹配、SN 是否已烧 |
 | 下拉框没有 COM32 | USB 未插好/未上电；或设备日志停在 `VUART task: 等待 USB 枚举...`，等 2~3 秒再刷新 |
 | 串口被占用 | Luatools / ssCOM 正开着同一 COM 口，先关掉 |
 | 打开白屏 | junction 断了，按上文重连或 `npm install` |
@@ -107,8 +109,7 @@ frontend/
 |---|---|
 | **首页** | 运行状态总览 + 快速操作 |
 | **运行模式** | idle / poll / sniff 三卡片切换（互斥）+ 开机默认模式 + 当前运行详情 |
-| **poll模式** | 两个子标签：**串口1（485总线）**（串口参数 + 参数列表）、**MQTT配置**（MQTT 连接参数 + 连接与上报状态） |
-| **sniff模式** | 总线报文实时视图（REQ/RSP/ERR/配对标注 + 类型筛选）+ 轮询表推断 + 总线诊断 |
+| **poll模式** | 两个子标签：**串口1（485总线）**（串口参数 + 参数列表）、**MQTT配置**（MQTT 连接参数 + 连接与上报状态） || **sniff模式** | 总线报文实时视图（REQ/RSP/ERR/配对标注 + 类型筛选）+ 轮询表推断 + 总线诊断 |
 
 > 原「串口配置」「MQTT上报」「实时报文」三个页已合并/改名：poll模式内用子标签区分
 > 「串口1（485总线）」与「MQTT配置」，「实时报文」改名为 sniff模式。
@@ -146,9 +147,8 @@ npm run dist:portable   # 或输出绿色单文件 exe
 |---|---|
 | **首页** | 运行状态总览（模式/轮询任务/数据点/MQTT/看门狗/报文）+ 快速操作 |
 | **运行模式** | idle / poll / sniff 三卡片切换（互斥）+ 开机默认模式 + 当前运行详情 |
-| **poll模式** | 485 串口参数（从机地址/波特率/数据位/校验/停止位/轮询间隔/响应超时）+ 寄存器表 |
-| **sniff模式** | 总线报文实时视图 + 轮询表推断 + 总线诊断 |
-| **实时报文** | 总线报文实时视图（REQ/RSP/ERR/配对标注 + 类型筛选）+ 轮询表推断 + 总线诊断 |
+| **poll模式** | 两个子标签：**串口1（485总线）**（485 串口参数 + 参数列表）、**MQTT配置**（MQTT 连接参数 + 连接与上报状态） |
+| **sniff模式** | 总线报文实时视图（REQ/RSP/ERR/配对标注 + 类型筛选）+ 轮询表推断 + 总线诊断 |
 
 > **485 模式互斥**：UART1 是 485 总线唯一物理口，poll（主机，要发帧控 DE）和
 > sniff（旁听，只收不发）一次只能跑一个。开机默认 **idle**（不主动驱动总线），
@@ -175,6 +175,20 @@ npm run dist:portable   # 或输出绿色单文件 exe
 | 读实时值 | `R:VAL` | `RET:VAL=[json]` | `[{name,addr,value,hex,ts,dtype}]`，设备已解好值 |
 | 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,mqtt}` 全量状态 |
 | 恢复默认配置 | `W:RST` | `RET:RST=OK` | 清除设备保存的 485/MQTT 配置 |
+
+### 平台配置拉取
+
+| 前端动作 | 指令 | 应答 | 说明 |
+|---|---|---|---|
+| 发起拉取 | `W:PULLCFG` | `RET:PULLCFG=started` | 设备向平台发 hello 并等配置下发；未连 MQTT 直接回 `RET:FAIL:PULLCFG:原因` |
+| 查拉取状态 | `R:PULLCFG` | `RET:PULLCFG={json}` | `{state,msg,poll,skipped,mqtt}`；`state` = `helloing`/`waiting`/`done`/`fail` |
+
+拉取流程与字段映射详见 `../lua/README.md` 的「平台配置拉取」章节。要点：
+
+- 设备 publish `hello` 到 `/sys/thing/gw/config/hello/{SN}`，订阅 `/sys/thing/gw/config/get/{SN}`
+- 只提取 `commInterfaces`（串口参数）与 `tsl.properties`（寄存器表），其余全部丢弃
+- 上报 topic 自动拼成 `/sys/thing/node/property/post/{SN}-1`，下行 topic 为 `/sys/thing/gw/function/get/{SN}`
+- **拉取只回填表单，不自动保存**：需用户点「保存配置」「保存并重连」才写入设备
 
 ### 模式控制
 

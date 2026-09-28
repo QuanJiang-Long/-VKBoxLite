@@ -12,6 +12,7 @@ local socket = corelib.try("socket")
 local mqttcfg = require "iot/mqttcfg"
 local collector = require "data/collector"
 local cfgstore = require "cfg"
+local pullcfg = require "iot/pullcfg"
 
 local M = {}
 
@@ -24,6 +25,8 @@ local function reset_state()
         published = 0, failed = 0, kick_flag = false,
         recv_pending = nil, pub = nil, sub = nil, device_id = nil,
         last_pub = 0, last_err = nil, client_id = nil,
+        pull = { state = "idle", msg = "", result = nil, deadline = 0 },
+        pull_payload = nil,
     }
 end
 
@@ -33,6 +36,20 @@ local function device_id()
         return _G.get_device_sn and _G.get_device_sn()
     end
     return nil
+end
+
+local function get_topic()
+    local did = device_id()
+    if not did or did == "" then return nil end
+    return string.format(cfg.PLATFORM_GET_TOPIC, did)
+end
+
+local function imei()
+    if not mobile then return "" end
+    local f = mobile.imei
+    if type(f) ~= "function" then return "" end
+    local ok, v = pcall(f)
+    return ok and tostring(v) or ""
 end
 
 local function alias_map()
@@ -120,13 +137,16 @@ local function on_mqtt(cli, event, data, payload)
     if event == "conack" then
         S.connected = true
         S.backoff = 1
-        if S.sub then
-            local sok, serr = pcall(function() cli:subscribe(S.sub, mqttcfg.load().qos) end)
+        local subs = {}
+        if S.sub then subs[#subs + 1] = S.sub end
+        local gtopic = get_topic()
+        if gtopic then subs[#subs + 1] = gtopic end
+        S.subscribed = false
+        for _, t in ipairs(subs) do
+            local sok, serr = pcall(function() cli:subscribe(t, mqttcfg.load().qos) end)
             -- 订阅成功才算已订阅, 否则 status 失真
-            S.subscribed = sok and true or false
-            if not sok then log.warn("iot", "subscribe fail:", tostring(serr)) end
-        else
-            S.subscribed = false
+            if not sok then log.warn("iot", "subscribe fail:", t, tostring(serr)) end
+            S.subscribed = S.subscribed or sok
         end
         log.info("iot", "conack ok, subscribed=" .. tostring(S.subscribed))
     elseif event == "recv" then
@@ -293,6 +313,11 @@ local function downlink_write(items)
 end
 
 function M.handle_downlink(topic, payload)
+    -- 平台配置下发: 与指令下行共用 recv 通道, 按 topic 前缀区分
+    if type(topic) == "string" and topic:find("/gw/config/get/", 1, true) then
+        if S.pull.state == "waiting" then S.pull_payload = payload end
+        return
+    end
     if not json then return end
     local ok, t = pcall(json.decode, payload)
     if not ok or type(t) ~= "table" then return end
@@ -315,6 +340,60 @@ function M.handle_downlink(topic, payload)
     end
     if t.value or t.values or t.val or t.data then
         downlink_write({ t })
+    end
+end
+
+-- 平台配置拉取状态机。
+-- W:PULLCFG 只置状态并立即应答; 握手跑在 task_main 协程里(那里才能 sys.wait)。
+function M.pull_start()
+    if S.pull.state == "helloing" or S.pull.state == "waiting" then
+        return false, "正在拉取中"
+    end
+    if not S.client or not S.connected then return false, "MQTT 未连接" end
+    if not get_topic() then return false, "无 SN" end
+    S.pull = { state = "helloing", msg = "", result = nil, deadline = 0 }
+    return true
+end
+
+function M.pull_status()
+    local p = S.pull
+    local r = { state = p.state, msg = p.msg }
+    if p.result then
+        r.poll = p.result.poll
+        r.skipped = p.result.skipped
+        local pub, sub = pullcfg.topics(device_id())
+        r.mqtt = { pub = pub, sub = sub }
+    end
+    return r
+end
+
+local function pull_finish(state, msg, result)
+    S.pull.state = state
+    S.pull.msg = msg
+    S.pull.result = result
+    log.info("iot", "pullcfg", state, msg)
+end
+
+local function pull_step()
+    local p = S.pull
+    if p.state == "helloing" then
+        local body = string.format('{"vendor":%s,"model":%s,"fwVersion":%s,"deviceId":%s}',
+            jstr(cfg.PLATFORM_VENDOR), jstr(cfg.PLATFORM_MODEL), jstr(_G.VERSION or "0.0.0"), jstr(imei()))
+        local ok, err = pcall(function()
+            S.client:publish(string.format(cfg.PLATFORM_HELLO_TOPIC, device_id()), body, 1)
+        end)
+        if not ok then return pull_finish("fail", "hello 发送失败: " .. tostring(err)) end
+        p.state = "waiting"
+        p.deadline = os.time() + math.floor(cfg.PULL_TIMEOUT_MS / 1000)
+    elseif p.state == "waiting" then
+        if S.pull_payload then
+            local payload = S.pull_payload
+            S.pull_payload = nil
+            local r, err = pullcfg.parse(payload)
+            if not r then return pull_finish("fail", tostring(err)) end
+            return pull_finish("done", #r.skipped > 0 and ("已忽略 " .. #r.skipped .. " 条") or "", r)
+        end
+        if os.time() >= p.deadline then pull_finish("fail", "平台未下发配置(超时)") end
     end
 end
 
@@ -348,6 +427,9 @@ local function task_main()
                 wait_kickable(10000)
             end
         else
+            if S.pull.state == "helloing" or S.pull.state == "waiting" then
+                pcall(pull_step)
+            end
             if S.recv_pending then
                 local rp = S.recv_pending
                 S.recv_pending = nil

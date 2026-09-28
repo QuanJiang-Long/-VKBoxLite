@@ -123,6 +123,7 @@ function M.normalize_poll(c)
         for _, r in ipairs(regs) do
             local nr, err = normalize_reg(r)
             if not nr then return nil, err end
+            if #out.regs >= cfg.MAX_REGS then return nil, "too many regs" end
             out.regs[#out.regs + 1] = nr
         end
     end

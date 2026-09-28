@@ -31,6 +31,7 @@ const S = {
   sniffCfg: null,      // R:SNIFFCFG 返回的配置
   frames: [],          // 最近解译帧
   infer: null,         // R:INFER 返回的推断结果
+  pullBusy: false,     // 拉取配置进行中（防连点）
   mock: !window.serial // 浏览器预览模式
 };
 
@@ -320,21 +321,59 @@ async function readCfg() {
   }
 }
 
-// 拉取配置 = 读取配置 + 立即读一次实时值。
-//   比"读取配置"多一步 R:VAL：配置回填后马上能看到寄存器是否真的采到数，
-//   新设备接线对不对、从机地址/寄存器地址配没配错，一眼就能确认。
+// 拉取配置：从平台拉 485 配置并回填表单（不自动保存，由用户点保存生效）
+//   ① W:PULLCFG 发起，设备回 started
+//   ② 轮询 R:PULLCFG 直到 done/fail（设备与平台握手，可能要几秒）
+//   ③ done 后回填 串口参数 + 寄存器表 + MQTT 上报/下行 topic
 async function pullCfg() {
-  await readCfg();
-  if (!S.regs || S.regs.length === 0) {
-    status('拉取完成：设备没有配置寄存器', true);
-    return;
-  }
+  if (S.pullBusy) return;
+  S.pullBusy = true;
+  const btn = el.btnPullCfg;
+  const oldText = btn ? btn.textContent : '';
+  if (btn) { btn.textContent = '拉取中…'; btn.disabled = true; }
+  const restore = () => {
+    S.pullBusy = false;
+    if (btn) { btn.textContent = oldText; btn.disabled = !S.open; }
+  };
   try {
-    await readVal();
-    status('拉取完成：' + S.regs.length + ' 个寄存器的配置与实时值已获取', true);
+    await sendCmd(Protocol.Enc.pullCfg(), 'PULLCFG', 8000);
+    let r = null;
+    for (let i = 0; i < 16; i++) {
+      r = await sendCmd(Protocol.Enc.pullCfgStat(), 'PULLCFG', 5000);
+      if (r.data && r.data.state !== 'helloing' && r.data.state !== 'waiting') break;
+      await new Promise(res => setTimeout(res, 1000));
+    }
+    const d = r && r.data;
+    if (!d || d.state !== 'done') {
+      status('拉取失败：' + ((d && d.msg) || '未知原因'), false);
+      toast('拉取失败：' + ((d && d.msg) || '未知原因'));
+      return;
+    }
+    fillFormFromPlatform(d);
+    const skipped = (d.skipped || []).length;
+    const n = (d.poll && d.poll.regs ? d.poll.regs.length : 0);
+    status('已拉取 ' + n + ' 个寄存器' + (skipped ? '，忽略 ' + skipped + ' 条' : '') + '，请检查后保存', true);
+    toast('配置已拉取，点「保存配置」生效');
   } catch (e) {
-    // 配置已经拉到了，只是实时值读失败；不该报成整体失败
-    status('配置已拉取，但实时值读取失败：' + e.message, false);
+    status('拉取失败：' + e.message, false);
+    toast('拉取失败：' + e.message);
+  } finally {
+    restore();
+  }
+}
+
+// 把平台拉回的配置填进表单。只填不存：W:CFG/W:REG/W:MQTT 全由用户点保存触发
+function fillFormFromPlatform(d) {
+  const p = d.poll || {};
+  if (p.baud) el.selBaud.value = String(p.baud);
+  if (p.databits) setRadio('databits', String(p.databits));
+  if (p.parity != null) setRadio('parity', String(p.parity));
+  if (p.stopbits) setRadio('stopbits', String(p.stopbits));
+  if (p.slave) el.inpSlave.value = p.slave;
+  if (p.regs) { S.regs = p.regs; renderRegTable(); }
+  if (d.mqtt) {
+    if (d.mqtt.pub) el.mqPub.value = d.mqtt.pub;
+    if (d.mqtt.sub) el.mqSub.value = d.mqtt.sub;
   }
 }
 
@@ -1219,8 +1258,30 @@ function mockReply(line) {
     });
     resp = 'RET:VAL=' + JSON.stringify(list);
   }
-  else if (line === 'R:MODE') resp = 'RET:MODE=' + JSON.stringify(mockModeStat());
-  else if (line === 'R:SNIFFCFG') resp = 'RET:SNIFFCFG=' + JSON.stringify({
+  // 平台配置拉取 mock：发起后前两次查状态返回 waiting，第三次给 done
+  else if (line === 'W:PULLCFG') { MOCK.pullN = 0; resp = 'RET:PULLCFG=started'; }
+  else if (line === 'R:PULLCFG') {
+    MOCK.pullN = (MOCK.pullN || 0) + 1;
+    if (MOCK.pullN < 3) {
+      resp = 'RET:PULLCFG=' + JSON.stringify({ state: 'waiting', msg: '' });
+    } else {
+      const regs = [
+        { addr: 16, count: 1, name: 'Ua', alias: '电压', dtype: 'uint16', byteOrder: 'BE', wordOrder: 'BE' },
+        { addr: 15, count: 1, name: 'PT', alias: 'PT1', dtype: 'uint16', byteOrder: 'BE', wordOrder: 'BE' },
+        { addr: 14, count: 1, name: 'CT', alias: 'CT1', dtype: 'uint16', byteOrder: 'BE', wordOrder: 'BE' }
+      ];
+      resp = 'RET:PULLCFG=' + JSON.stringify({
+        state: 'done', msg: '',
+        poll: { baud: 9600, databits: 8, stopbits: 1, parity: 0, slave: 1, regs: regs },
+        skipped: [],
+        mqtt: {
+          pub: '/sys/thing/node/property/post/' + (MOCK.sn || '11802026092600016') + '-1',
+          sub: '/sys/thing/gw/function/get/' + (MOCK.sn || '11802026092600016')
+        }
+      });
+    }
+  }
+  else if (line === 'R:MODE') resp = 'RET:MODE=' + JSON.stringify(mockModeStat());  else if (line === 'R:SNIFFCFG') resp = 'RET:SNIFFCFG=' + JSON.stringify({
     cfg: { baud: MOCK.cfg.baud, databits: MOCK.cfg.databits,
            parity: MOCK.cfg.parity, stopbits: MOCK.cfg.stopbits }, src: 'fskv'
   });

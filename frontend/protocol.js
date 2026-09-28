@@ -35,6 +35,10 @@
     val:  () => 'R:VAL',                    // 实时值快照
     stat: () => 'R:STAT',                   // 全量运行状态
 
+    // ---- 平台配置拉取 ----
+    pullCfg:     ()  => 'W:PULLCFG',        // 发起拉取（立即应答 started）
+    pullCfgStat: ()  => 'R:PULLCFG',        // 查拉取状态
+
     // ---- 写寄存器（经设备写事务队列注入 poll 任务）----
     write:   (slave, addr, value) => 'W:WRITE=' + slave + ',' + addr + ',' + value,
     writeJ:  (o) => 'W:WRITEJ=' + JSON.stringify(o),

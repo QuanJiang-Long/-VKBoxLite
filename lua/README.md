@@ -32,7 +32,8 @@ lua/
 ├── cfg.lua             配置中心（poll/sniff/sys 三类，fskv 持久化）
 ├── iot/
 │   ├── mqttcfg.lua     MQTT 配置（{id} 占位 + normalize）
-│   └── iot.lua         连接编排 + 上报 + 下行
+│   ├── pullcfg.lua     平台配置下发解析（只提取，无副作用）
+│   └── iot.lua         连接编排 + 上报 + 下行 + 配置拉取状态机
 └── svc/
     ├── guard.lua       看门狗喂狗 + 运行监控
     └── cmd.lua         前端指令层（R:/W: 指令）
@@ -74,6 +75,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:REG / W:REG=[json] | 寄存器表读写 |
 | R:VAL | 实时值快照 |
 | R:STAT | 运行状态汇总（mode/data/guard/mqtt） |
+| W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt}`） |
 | W:WRITE=slave,addr,value / W:WRITEJ={json} | 写寄存器（idle 也可写，经写事务队列在安全点注入） |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配” |
 | R:MQTT / W:MQTT={json} | MQTT 配置读写，读返回 `{cfg,pub,sub,ready,err,stat}` |
@@ -160,6 +162,69 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 失败时的三种日志：`Rx timeout addr=14 CT rx=00ea39cb`（收到字节但组不成帧）、
 `Rx timeout ... rx=-`（一个字节都没收到）、`Rx err fc=83 code=2 ...`（从机返异常码）。
 
+## 平台配置拉取（W:PULLCFG）
+
+前端点「拉取配置」→ 设备与平台握手拿配置 → **只回填表单，不自动落盘**，用户点「保存配置」才生效。
+
+### 时序
+
+```
+前端  ──W:PULLCFG──────────▶  设备  立即回 RET:PULLCFG=started
+前端  ──R:PULLCFG(每1s)────▶  设备  回 {state:"helloing"|"waiting", msg}
+                                    │
+设备  ──publish────────────────▶  平台  /sys/thing/gw/config/hello/{SN}
+                                    {"vendor":"VKBoxLite","model":"VKBox-Lite",
+                                     "fwVersion":"<VERSION>","deviceId":"<IMEI>"}
+平台  ──publish────────────────▶  设备  /sys/thing/gw/config/get/{SN}  （连上即订阅）
+                                    │
+前端  ──R:PULLCFG──────────▶  设备  回 {state:"done", poll:{...}, skipped:[...],
+                                        mqtt:{pub,sub}}
+前端  回填 485 表单 + 寄存器表 + MQTT pub/sub 输入框
+用户  点「保存配置」/「保存并重连」→ W:CFG / W:REG / W:MQTT
+```
+
+> `W:PULLCFG` 处理器在 VUART 回调上下文，**不能 `sys.wait`**，所以握手跑在
+> `iot.task_main` 协程里；指令只置状态并立即应答，前端轮询拿结果。
+> 超时 `PULL_TIMEOUT_MS=15s`，前端最多轮询 16 次（≈19s），不会早于设备放弃。
+
+### topic
+
+| 用途 | topic | 说明 |
+|---|---|---|
+| hello | `/sys/thing/gw/config/hello/{SN}` | `{SN}` = 设备 SN |
+| 配置下发 | `/sys/thing/gw/config/get/{SN}` | conack 时与下行 topic 一起订阅 |
+| 上报 | `/sys/thing/node/property/post/{SN}-1` | `{n}` 固定为 1 |
+| 下行命令 | `/sys/thing/gw/function/get/{SN}` | |
+
+### 字段提取（`lua/iot/pullcfg.lua`）
+
+**commInterfaces → 串口参数**（取 `type=="mbRTUClient"` 且 `enable==true` 的那条）
+
+| 平台字段 | 设备字段 | 转换 |
+|---|---|---|
+| `param.baudRate` | `baud` | 原值 |
+| `param.dataBits` | `databits` | 仅接受 7/8 |
+| `param.stopBits` | `stopbits` | 仅接受 1/2 |
+| `param.parity` | `parity` | `none`→0、`even`→1、`odd`→2 |
+
+**devices[0].addr → `slave`**（字符串转数字，须在 1~247）
+
+**tsl.properties → 寄存器表**
+
+| 平台字段 | 寄存器字段 | 说明 |
+|---|---|---|
+| `id` | `name` | 须匹配 `^%w+$` 且 ≤16 字符 |
+| `name` | `alias` | 为空则退化为 `id` |
+| `modbus.address` | `addr` | 0~65535 |
+| `modbus.quantity` | `count` | **地址长度取这个字段**，1~125 |
+| `modbus.dataType` | `dtype` | `ushort`→uint16、`short`→int16、`ulong`→uint32、`long`→int32、`float`→float32、`double`→float64 |
+
+**丢弃**：`msgId`、`ts`、`mqttPlatform`（保持现有 broker）、`tslName`、
+`devices[].name/protocol/comm`、`modbus.type`、`modbus.slave`、外层 `dataType`。
+
+非法条目不整包失败：跳过并记入 `skipped`，前端提示"已忽略 N 条"。
+寄存器数超过 `MAX_REGS=128` 截断。`interval_ms`/`timeout_ms` 沿用设备当前值，不随平台变更。
+
 ## 本地落盘（已移除）
 
 按需求，poll 模式**不做本地保存**，采集数据只走两条路：
@@ -174,9 +239,9 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 
 ## 与原版（v1）的差异
 
-- 24 文件 → 15 文件；删除 fsinfo/bootreason 桩、identity 独立模块、logctl 独立模块
+- 24 文件 → 16 文件；删除 fsinfo/bootreason 桩、identity 独立模块、logctl 独立模块、本地落盘模块
 - mbus_common → mbus；cfg_store → cfg.lua；collector/data_store 移入 data/
-- vcom → cmd，指令集按 `frontend/protocol.js` 全量对齐（cmd.lua 29 条 + SN 产线 8 条），
+- vcom → cmd，指令集按 `frontend/protocol.js` 全量对齐（cmd.lua 31 条 + SN 产线 8 条），
   恢复 v1 删掉的 TX/INFER/APPLYINFER/SNIFF/IOTSTAT，新增 W:RAWTEST 裸探针
 - 应答结构按前端读取方式修正：R:MODE 返回状态对象而非裸字符串；R:CFG/R:SNIFFCFG 包
   `{cfg, src}`；R:MQTT 补 `stat`；R:INFO 补 server/baud/slave/regs 并修复
