@@ -132,6 +132,18 @@ function setKv(id, text, bad) {
   n.textContent = (text === null || text === undefined || text === '') ? '--' : String(text);
   n.className = bad ? 'bad' : '';
 }
+// 回填输入框前的占位判断：这个值现在能不能写进去。
+// 焦点在它上面 → 不能（会冲掉正打的字）；
+// 它所在的标签页不可见 → 也不能（切走时浏览器已 blur，activeElement 不再是它，
+// 只判焦点会漏；而且用户看不见，写了也白写，等切回来发现"编辑的内容没了"）。
+function fillOk(e) {
+  if (!e) return false;
+  if (document.activeElement === e) return false;
+  const tp = e.closest && e.closest('.tab-pane');
+  if (tp && !tp.classList.contains('active')) return false;
+  const sp = e.closest && e.closest('.serial-pane');
+  return !(sp && !sp.classList.contains('active'));
+}
 function esc(s) {
   return String(s === null || s === undefined ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -303,7 +315,9 @@ async function readCfg() {
     const c = (payload && payload.cfg) ? payload.cfg : payload;
     if (c && typeof c === 'object') {
       S.cfg = c;
-      el.selBaud.value = String(c.baud || 9600);
+      // 正在编辑的表单项不能抢：用户可能在从站地址/间隔/超时里打字，
+      // 读配置应答一到就把字冲掉，表现为"输入框改不动"。
+      if (fillOk(el.selBaud)) el.selBaud.value = String(c.baud || 9600);
       setRadio('databits', String(c.databits || 8));
       setRadio('parity', String(c.parity != null ? c.parity : 0));
       setRadio('stopbits', String(c.stopbits || 1));
@@ -312,9 +326,9 @@ async function readCfg() {
       // ⚠️ 千万不要在这里给已删除的控件赋值：el 取不到会是 null，
       //    整个 readCfg 抛 TypeError 被下面的 catch 吞掉，
       //    后面所有表单项都不回填，表现为"读配置后表单全空"。
-      el.inpRound.value = c.interval_ms || 3000;
-      el.inpSlave.value = c.slave || 1;
-      el.inpTimeout.value = (c.timeout_ms == null) ? '' : c.timeout_ms;
+      if (fillOk(el.inpRound)) el.inpRound.value = c.interval_ms || 3000;
+      if (fillOk(el.inpSlave)) el.inpSlave.value = c.slave || 1;
+      if (fillOk(el.inpTimeout)) el.inpTimeout.value = (c.timeout_ms == null) ? '' : c.timeout_ms;
       if (payload && payload.src === 'default') {
         toast('设备尚未保存过配置，当前为默认值');
       }
@@ -456,7 +470,7 @@ function collectRegs() {
     const dtype = tr.querySelector('.c-type').value;
     const name = tr.querySelector('.c-name').value.trim();
     const count = parseInt(tr.querySelector('.c-count').value, 10);
-    // 上报别名：MQTT 的 name 字段。空串照样下发，设备端会退回用标识符
+    // 参数名称：MQTT 的 name 字段。空串照样下发，设备端会退回用标识符
     // name 合法性由 badRegRow() 提前逐行校验，这里只做最基本的结构过滤
     const alias = tr.querySelector('.c-alias').value.trim();
     if (!isNaN(addr) && dtype && count > 0 && name) {
@@ -471,7 +485,7 @@ const CFG_ERR = {
   'bad addr': '寄存器地址越界(0~65535)',
   'bad count': '寄存器个数越界(1~125)',
   'bad dtype': '数据类型不合法',
-  'bad name': '物理标识符为空/超16字符/含非法字符(只能字母数字下划线)',
+  'bad name': '标识符为空/超16字符/含非法字符(只能字母数字下划线)',
   'bad byteOrder': '字节序不合法',
   'bad wordOrder': '字序不合法',
   'bad slave': '从机地址越界(1~247)',
@@ -548,9 +562,9 @@ function badRegRow() {
     if (isNaN(addr) || addr < 0 || addr > 65535) return '第 ' + n + ' 行：寄存器地址越界(0~65535)';
     if (!dtype) return '第 ' + n + ' 行：未选择数据类型';
     if (!count || count < 1 || count > 125) return '第 ' + n + ' 行：寄存器个数越界(1~125)';
-    if (!name) return '第 ' + n + ' 行：物理标识符不能为空';
-    if (name.length > 16) return '第 ' + n + ' 行：物理标识符超 16 字符';
-    if (!/^\w+$/.test(name)) return '第 ' + n + ' 行：物理标识符只能含字母、数字、下划线';
+    if (!name) return '第 ' + n + ' 行：标识符不能为空';
+    if (name.length > 16) return '第 ' + n + ' 行：标识符超 16 字符';
+    if (!/^\w+$/.test(name)) return '第 ' + n + ' 行：标识符只能含字母、数字、下划线';
     const w = ({ uint32: 2, int32: 2, float32: 2, uint64: 4, int64: 4, float64: 4 })[dtype] || 1;
     if (count % w !== 0) return '第 ' + n + ' 行：' + dtype + ' 占 ' + w + ' 个寄存器，个数需为 ' + w + ' 的整数倍';
   }
@@ -623,10 +637,17 @@ async function readVal() {
 const ALL_TYPES = ['uint16', 'int16', 'uint32', 'int32', 'float32', 'uint64', 'int64', 'float64'];
 
 function renderRegTable() {
-  // 正在编辑参数表时不要重建 DOM：重建会让焦点丢失、刚打的字被冲掉，
-  // 表现为"输入框突然不能编辑了"。此时保留现状，等下一次刷新再同步。
+  // 两种情况都不重建 DOM：
+  // ① 焦点正在参数表里 —— 重建会丢焦点、冲掉刚打的字；
+  // ② poll 标签页不可见且表里已有真实数据行 —— 切走时浏览器会把焦点里的
+  //    输入框 blur 掉，activeElement 变成 <body>，只判焦点会漏。此时用户
+  //    看不见表格，重建只会悄悄丢数据，等切回来发现"编辑的内容没了"。
+  //    ⚠️ 必须确认表里真的有 .c-addr 行才跳过：空表/占位行时该渲染，
+  //    否则首次进入（首页默认激活）连"暂无寄存器"都画不出来。
   const ae = document.activeElement;
   if (ae && ae.closest && el.paramTbody.contains(ae)) return;
+  const pane = $('tabPoll');
+  if (pane && !pane.classList.contains('active') && el.paramTbody.querySelector('.c-addr')) return;
   el.paramTbody.innerHTML = '';
   const rows = (S.regs && S.regs.length) ? S.regs : [];
   if (rows.length === 0) {
@@ -817,11 +838,11 @@ function renderHome() {
 
 function fillMqHome(mq) {
   if (!el.hMqHost) return;
-  if (document.activeElement !== el.hMqHost) el.hMqHost.value = mq.host || '';
-  if (document.activeElement !== el.hMqPort) el.hMqPort.value = mq.port != null ? mq.port : 1883;
+  if (fillOk(el.hMqHost)) el.hMqHost.value = mq.host || '';
+  if (fillOk(el.hMqPort)) el.hMqPort.value = mq.port != null ? mq.port : 1883;
   // client_id 只在 R:MQTT 的 cfg 段有, R:STAT 的 mqtt 段没有; 没有就不动输入框
   const c = (S.mqtt && S.mqtt.cfg) || {};
-  if (el.hMqClientId && document.activeElement !== el.hMqClientId) {
+  if (el.hMqClientId && fillOk(el.hMqClientId)) {
     el.hMqClientId.value = c.client_id || '';
   }
   if (el.hMqErr) {
@@ -883,15 +904,17 @@ function renderMqtt() {
   const r = S.mqtt || {};
   const c = r.cfg || {};
   if (c.host !== undefined) {
-    el.mqHost.value = c.host || '';
-    el.mqPort.value = c.port != null ? c.port : 1883;
+    // 正在输入的框不能抢：readMqtt 会在点"MQTT配置"子标签/刷新时触发，
+    // 应答落地时把用户打到一半的字冲掉，表现为"输入框改不动"。
+    if (fillOk(el.mqHost)) el.mqHost.value = c.host || '';
+    if (fillOk(el.mqPort)) el.mqPort.value = c.port != null ? c.port : 1883;
     el.mqSsl.checked = !!c.ssl;
-    el.mqUser.value = c.user || '';
-    el.mqPass.value = c.pass || '';
-    el.mqClientId.value = c.client_id || '';
-    el.mqPub.value = c.pub_topic || '';
-    el.mqSub.value = c.sub_topic || '';
-    el.mqInterval.value = c.interval_s != null ? c.interval_s : 60;
+    if (fillOk(el.mqUser)) el.mqUser.value = c.user || '';
+    if (fillOk(el.mqPass)) el.mqPass.value = c.pass || '';
+    if (fillOk(el.mqClientId)) el.mqClientId.value = c.client_id || '';
+    if (fillOk(el.mqPub)) el.mqPub.value = c.pub_topic || '';
+    if (fillOk(el.mqSub)) el.mqSub.value = c.sub_topic || '';
+    if (fillOk(el.mqInterval)) el.mqInterval.value = c.interval_s != null ? c.interval_s : 60;
     // QoS 已从界面移除：设备端发布/订阅固定用 QoS 1，
     // 这里不再显示也不再下发（设备 normalize 会退回默认值 1）。
     el.mqAllowNoSn.checked = !!c.allow_no_sn;

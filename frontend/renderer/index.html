@@ -113,15 +113,18 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .modal-close{position:absolute;right:20px;top:16px;font-size:24px;cursor:pointer;color:#999;}
 .modal-form{display:grid;grid-template-columns:130px 1fr;gap:14px;align-items:center;}
 .modal-form input,.modal-form select{padding:8px;width:100%;border:1px solid #dcdfe6;border-radius:4px;}
-.modal-footer{margin-top:24px;display:flex;gap:12px;}
+/* 取消/确定 靠右；justify-content:flex-end 把两个按钮推到行尾 */
+.modal-footer{margin-top:24px;display:flex;gap:12px;justify-content:flex-end;}
 .modal-footer button:nth-child(2){background:#409eff;color:#fff;border:none;}
 /* 状态栏 */
 .status-bar{grid-column:1/-1;background:#fff;border-top:1px solid #ddd;padding:6px 10px;font-size:12px;color:#666;display:flex;gap:18px;border-radius:4px;flex-wrap:wrap;}
 .status-bar .ok{color:#0a7d2c;}
 .status-bar .err{color:#c0392b;}
-/* 提示 toast */
+/* 提示 toast。pointer-events:none 是关键：toast 是 position:fixed + z-index:1999，
+   会盖在正常流内容之上。模式切换/保存成功后它会显示 2.6s，正好压在页面顶部，
+   若不排除指针事件，用户这时点输入框点的其实是 toast，表现为"输入框点不动/无法进入编辑" */
 #toast{position:fixed;top:14px;left:50%;transform:translateX(-50%);background:#323232;color:#fff;
-  padding:8px 18px;border-radius:4px;font-size:13px;display:none;z-index:1999;max-width:70%;}
+  padding:8px 18px;border-radius:4px;font-size:13px;display:none;z-index:1999;max-width:70%;pointer-events:none;}
 /* 开关 */
 .switch{position:relative;display:inline-block;width:42px;height:22px;}
 .switch input{opacity:0;width:0;height:0;}
@@ -296,7 +299,6 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                 <div class="form-row">
                     <label>从站地址</label>
                     <input id="inpSlave" type="number" value="1" min="1" max="247">
-                    <span class="hint">轮询模式下要访问的 Modbus 从机地址 1~247</span>
                 </div>
                 <div class="form-row">
                     <label>串口1波特率</label>
@@ -331,12 +333,10 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                 <div class="form-row">
                     <label>轮询间隔(ms)</label>
                     <input id="inpRound" type="number" value="3000" min="200" step="100">
-                    <span class="hint">一轮全部寄存器采集完后的间隔</span>
                 </div>
                 <div class="form-row">
                     <label>响应超时(ms)</label>
                     <input id="inpTimeout" type="number" value="500" min="50" max="500" step="50">
-                    <span class="hint">等从机响应的最长时长；超时算这轮读失败，不会干等满整个时长</span>
                 </div>
 
                 <!-- 参数列表 -->
@@ -352,9 +352,9 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                                 <th style="width:100px;">寄存器地址</th>
                                 <th style="width:130px;">数据类型</th>
                                 <th style="width:100px;">寄存器个数</th>
-                                <th>物理标识符</th>
-                                <th style="width:110px;">上报别名
-                                    <span class="th-help" title="MQTT 上报里 name 字段显示的中文名，如「电压」。留空则用物理标识符。限 16 字节。">?</span>
+                                <th>标识符</th>
+                                <th style="width:110px;">参数名称
+                                    <span class="th-help" title="MQTT 上报里 name 字段显示的中文名，如「电压」。留空则用标识符。限 16 字节。">?</span>
                                 </th>
                                 <th style="width:170px;">值</th>
                                 <th style="width:100px;">时间</th>
@@ -363,12 +363,6 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                         </thead>
                         <tbody id="paramTbody"></tbody>
                     </table>
-                    <p style="color:#999;font-size:12px;margin-top:8px;line-height:1.6;">
-                        32/64 位类型会占用 2/4 个寄存器，所以"寄存器个数"需为类型宽度的整数倍。
-                        float32/float64 按 IEEE754 大端解析（Modbus 标准）。<br>
-                        上报别名：填中文名（如「电压」），MQTT 上报的 <code>name</code> 字段用它，
-                        <code>id</code> 字段仍用物理标识符；留空则 <code>name</code> 等于 <code>id</code>。
-                    </p>
                 </div>
                 </div>
 
@@ -498,7 +492,7 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                     <table class="param-table">
                         <thead>
                             <tr>
-                                <th>从机地址</th><th>寄存器地址</th><th>数量</th><th>功能码</th><th>出现次数</th><th>建议物理标识符</th>
+                                <th>从机地址</th><th>寄存器地址</th><th>数量</th><th>功能码</th><th>出现次数</th><th>建议标识符</th>
                             </tr>
                         </thead>
                         <tbody id="inferTbody">
@@ -555,10 +549,10 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                 <option>int64</option>
                 <option>float64</option>
             </select>
-            <label>物理标识符</label>
-            <input id="regId" type="text" placeholder="如 A1 / 温度 / 压力">
-            <label>上报别名</label>
-            <input id="regAlias" type="text" placeholder="如 电压 / A相电流，留空则用标识符">
+            <label>标识符</label>
+            <input id="regId" type="text" placeholder="如A1/B1/C1">
+            <label>参数名称</label>
+            <input id="regAlias" type="text" placeholder="如电压/A相电流">
             <label>寄存器个数</label>
             <input id="regCount" type="number" value="1" min="1" max="125">
         </div>
