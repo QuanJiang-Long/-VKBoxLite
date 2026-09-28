@@ -23,6 +23,7 @@ local function reset_state()
         client = nil, dirty = false, backoff = 1,
         published = 0, failed = 0, kick_flag = false,
         recv_pending = nil, pub = nil, sub = nil, device_id = nil,
+        last_pub = 0,
     }
 end
 
@@ -106,6 +107,7 @@ local function publish(force)
     if ok then
         S.published = S.published + 1
         S.dirty = false
+        S.last_pub = os.time()
         return true
     end
     S.failed = S.failed + 1
@@ -296,9 +298,14 @@ local function task_main()
                 pcall(M.handle_downlink, rp.topic, rp.payload)
             end
             local c = mqttcfg.load()
-            if S.dirty or (c.interval_s > 0 and (os.time() % math.max(c.interval_s, 1)) == 0) then
-                publish(S.dirty)
+            local due = false
+            if c.interval_s > 0 then
+                due = (os.time() - S.last_pub) >= c.interval_s
+            else
+                due = S.dirty
             end
+            if S.dirty then due = true end
+            if due then publish(false) end
             if sys then sys.wait(1000) end
         end
     end
