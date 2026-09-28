@@ -320,10 +320,18 @@ async function readCfg() {
       }
     }
     const rr = await sendCmd(Protocol.Enc.reg(), 'REG');
-    if (Array.isArray(rr.data)) {
-      S.regs = rr.data;
+    // 设备端 regs 为空时回 {}（Lua 空表编码成对象而非数组），
+    // 不能只判 Array.isArray，否则空配置时 renderRegTable 不会被调用，
+    // 参数表停留在上一次的内容/占位行上
+    const d = rr.data;
+    if (Array.isArray(d)) {
+      S.regs = d;
       renderRegTable();
       status('配置已读取：' + S.regs.length + ' 个寄存器', true);
+    } else if (d && typeof d === 'object') {
+      S.regs = [];
+      renderRegTable();
+      status('配置已读取：0 个寄存器', true);
     } else {
       status('配置已读取', true);
     }
@@ -433,6 +441,11 @@ function collectCfg() {
 function collectRegs() {
   const out = [];
   el.paramTbody.querySelectorAll('tr').forEach(tr => {
+    // 空表提示行没有 .c-addr，必须先判空。
+    // 少了这道判断，空表时点保存配置会在这里抛 TypeError，
+    // 而 collectRegs 在 saveCfg 的 try 之外，异常直接冲出 onclick，
+    // 界面不弹任何提示 -> 表现为"点了没反应"
+    if (!tr.querySelector('.c-addr')) return;
     const addr = parseInt(tr.querySelector('.c-addr').value, 10);
     const dtype = tr.querySelector('.c-type').value;
     const name = tr.querySelector('.c-name').value.trim();
@@ -475,35 +488,42 @@ function cfgErr(raw) {
 }
 
 async function saveCfg() {
-  const c = collectCfg();
-  if (!c.ok) { toast(c.err); status('配置无效：' + c.err, false); return; }
-  const cfg = c.cfg;
-  const bad = badRegRow();
-  if (bad) { toast(bad); status('配置无效：' + bad, false); return; }
-  const regs = collectRegs();
-  if (regs.length === 0) { toast('参数列表为空，请先添加寄存器'); return; }
-  const dup = regs.some((r, i) => regs.findIndex(x => x.addr === r.addr && x.name === r.name) !== i);
-  if (dup) { toast('存在重复的寄存器标识符，请检查'); return; }
-  // 32/64 位类型：寄存器个数必须是宽度的整数倍
-  const W = { uint32: 2, int32: 2, float32: 2, uint64: 4, int64: 4, float64: 4 };
-  for (const r of regs) {
-    const w = W[r.dtype] || 1;
-    if (r.count % w !== 0) {
-      toast('「' + (r.name || r.addr) + '」' + r.dtype + ' 占 ' + w + ' 个寄存器，个数需为 ' + w + ' 的整数倍');
-      return;
-    }
-  }
+  // 兜底：前置校验任何意外都必须留下痕迹。否则异常会直接冲出 onclick，
+  // 界面不弹 toast 也不改 status，用户看到的就是"点了没反应"
   try {
-    cfg.regs = regs;
-    await sendCmd(Protocol.Enc.writeCfg(cfg), 'CFG', 5000);
-    S.cfg = cfg; S.regs = regs;
-    status('配置已保存（串口参数变化时设备会自动重启轮询任务）', true);
-    toast('保存成功');
-    await readMode();
+    const c = collectCfg();
+    if (!c.ok) { toast(c.err); status('配置无效：' + c.err, false); return; }
+    const cfg = c.cfg;
+    const bad = badRegRow();
+    if (bad) { toast(bad); status('配置无效：' + bad, false); return; }
+    const regs = collectRegs();
+    if (regs.length === 0) { toast('参数列表为空，请先添加寄存器'); return; }
+    const dup = regs.some((r, i) => regs.findIndex(x => x.addr === r.addr && x.name === r.name) !== i);
+    if (dup) { toast('存在重复的寄存器标识符，请检查'); return; }
+    // 32/64 位类型：寄存器个数必须是宽度的整数倍
+    const W = { uint32: 2, int32: 2, float32: 2, uint64: 4, int64: 4, float64: 4 };
+    for (const r of regs) {
+      const w = W[r.dtype] || 1;
+      if (r.count % w !== 0) {
+        toast('「' + (r.name || r.addr) + '」' + r.dtype + ' 占 ' + w + ' 个寄存器，个数需为 ' + w + ' 的整数倍');
+        return;
+      }
+    }
+    try {
+      cfg.regs = regs;
+      await sendCmd(Protocol.Enc.writeCfg(cfg), 'CFG', 5000);
+      S.cfg = cfg; S.regs = regs;
+      status('配置已保存（串口参数变化时设备会自动重启轮询任务）', true);
+      toast('保存成功');
+      await readMode();
+    } catch (e) {
+      const msg = cfgErr(e.message);
+      status('保存失败：' + msg, false);
+      toast('保存失败：' + msg);
+    }
   } catch (e) {
-    const msg = cfgErr(e.message);
-    status('保存失败：' + msg, false);
-    toast('保存失败：' + msg);
+    status('保存失败：' + e.message, false);
+    toast('保存失败：' + e.message);
   }
 }
 
@@ -618,6 +638,10 @@ function addRegRow(addr, type, name, alias, count) {
     '<td class="val-cell"><input class="c-val" type="text" value="" readonly></td>' +
     '<td class="ts-cell"><input class="c-ts" type="text" value="" readonly></td>' +
     '<td><button class="btn-del" onclick="deleteRow(this)">删除</button></td>';
+  // 空表提示行没有 .c-addr，新增第一行前先删掉，否则它会和真实数据行并存，
+  // 界面同时显示"暂无寄存器"和一个寄存器，自相矛盾
+  const ph = el.paramTbody.querySelector('tr td[colspan]');
+  if (ph) ph.parentNode.removeChild(ph);
   el.paramTbody.appendChild(tr);
 }
 
