@@ -73,9 +73,11 @@ mklink /J D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules D:\VKBox_Lite\VKBo
 
 | 现象 | 说明 |
 |---|---|
-| 首页无"存储空间"一栏 | 已移除。Air780EP base 25.11 实测 `type(rtos.fsinfo) ~= "function"` 且无 `fs` 库，取不到剩余空间。落盘是否正常看 `R:STAT.store.saved` 是否持续增长 |
+| 首页无"存储空间"一栏 | 已移除。Air780EP base 25.11 实测 `type(rtos.fsinfo) ~= "function"` 且无 `fs` 库，取不到剩余空间 |
+| 首页无"本地落盘"一栏、poll模式无"本地存储"面板 | **本地落盘功能已整体移除**（按需求，poll 模式不做本地保存）。设备端 `data/store.lua`、`R:DISK`、`W:STORE`、`R:STAT.store` 段及寄存器"落盘阈值"列均已删除。采集数据只走内存最新值（R:VAL）与 MQTT 上报 |
 | 标签页只有 4 个 | poll模式 / sniff模式 是合并后的结果：原「串口配置」改名 **poll模式**，原「实时报文」改名 **sniff模式**，原「MQTT上报」页取消 |
 | poll模式内有两个子标签 | 「串口1（485总线）」+「MQTT配置」，MQTT 内容已从串口1下面移到独立的「MQTT配置」子标签 |
+| poll模式有"读取配置"和"拉取配置"两个按钮 | 「读取配置」= R:CFG + R:REG 回填表单；「拉取配置」= 读取配置 + 立即读一次实时值（R:VAL），用于确认寄存器真的采到数 |
 | 下拉框没有 COM32 | USB 未插好/未上电；或设备日志停在 `VUART task: 等待 USB 枚举...`，等 2~3 秒再刷新 |
 | 串口被占用 | Luatools / ssCOM 正开着同一 COM 口，先关掉 |
 | 打开白屏 | junction 断了，按上文重连或 `npm install` |
@@ -142,10 +144,10 @@ npm run dist:portable   # 或输出绿色单文件 exe
 
 | 标签页 | 用途 |
 |---|---|
-| **首页** | 运行状态总览（模式/轮询任务/数据点/MQTT/看门狗/落盘/报文）+ 快速操作 |
+| **首页** | 运行状态总览（模式/轮询任务/数据点/MQTT/看门狗/报文）+ 快速操作 |
 | **运行模式** | idle / poll / sniff 三卡片切换（互斥）+ 开机默认模式 + 当前运行详情 |
-| **串口配置** | 485 串口参数（从机地址/波特率/数据位/校验/停止位/轮询间隔/响应超时）+ 寄存器表 |
-| **MQTT上报** | MQTT 服务器地址/端口/TLS/账号密码/发布订阅 Topic/周期/会话管理 + 连接与上报状态 |
+| **poll模式** | 485 串口参数（从机地址/波特率/数据位/校验/停止位/轮询间隔/响应超时）+ 寄存器表 |
+| **sniff模式** | 总线报文实时视图 + 轮询表推断 + 总线诊断 |
 | **实时报文** | 总线报文实时视图（REQ/RSP/ERR/配对标注 + 类型筛选）+ 轮询表推断 + 总线诊断 |
 
 > **485 模式互斥**：UART1 是 485 总线唯一物理口，poll（主机，要发帧控 DE）和
@@ -171,8 +173,8 @@ npm run dist:portable   # 或输出绿色单文件 exe
 | 读 sniff 配置 | `R:SNIFFCFG` | `RET:SNIFFCFG={json}` | 旁听模式的串口参数 |
 | 保存 sniff 配置 | `W:SNIFFCFG={json}` | `RET:SNIFFCFG=OK` | 旁听运行中会自动重启生效 |
 | 读实时值 | `R:VAL` | `RET:VAL=[json]` | `[{name,addr,value,hex,ts,dtype}]`，设备已解好值 |
-| 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,store,mqtt}` 全量状态 |
-| 恢复默认配置 | `W:RST` | `RET:RST=OK` | 清除设备保存的 485/MQTT 配置和本地缓存 |
+| 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,mqtt}` 全量状态 |
+| 恢复默认配置 | `W:RST` | `RET:RST=OK` | 清除设备保存的 485/MQTT 配置 |
 
 ### 模式控制
 

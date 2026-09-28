@@ -24,9 +24,9 @@ const S = {
   modeStat: null,      // R:MODE 返回的完整状态
   modePending: null,   // 用户已选但设备尚未确认的模式；null = 无待应用选择
   modeSwitching: false,// 是否正在切换模式（防连点）
-  stat: null,          // R:STAT 的完整负载 {mode,data,guard,store,mqtt} 五段平级。
-                       // ⚠️ 不能只存 r.data.mode：data/guard/store 三段会被丢掉，
-                       //    首页"看门狗/数据点数/本地落盘"会永远显示未启用/--。
+  stat: null,          // R:STAT 的完整负载 {mode,data,guard,mqtt} 四段平级。
+                       // ⚠️ 不能只存 r.data.mode：data/guard 两段会被丢掉，
+                       //    首页"看门狗/数据点数"会永远显示未启用/--。
   mqtt: null,          // R:MQTT 返回的状态
   sniffCfg: null,      // R:SNIFFCFG 返回的配置
   frames: [],          // 最近解译帧
@@ -66,7 +66,7 @@ const el = new Proxy({
   btnImport: $('btnImport'), btnExport: $('btnExport'), btnReadInfo: $('btnReadInfo'),
   fSn: $('fSn'), fImei: $('fImei'), fIccid: $('fIccid'), fCsq: $('fCsq'),
   fVer: $('fVer'), fProj: $('fProj'), fUrl: $('fUrl'),
-  btnReadCfg: $('btnReadCfg'), btnSaveCfg: $('btnSaveCfg'),
+  btnReadCfg: $('btnReadCfg'), btnSaveCfg: $('btnSaveCfg'), btnPullCfg: $('btnPullCfg'),
   selBaud: $('selBaud'), inpRound: $('inpRound'),
   inpSlave: $('inpSlave'), inpTimeout: $('inpTimeout'),
   btnReadVal: $('btnReadVal'), btnAddReg: $('btnAddReg'), paramTbody: $('paramTbody'),
@@ -77,7 +77,6 @@ const el = new Proxy({
   selBootMode: $('selBootMode'), btnSaveBoot: $('btnSaveBoot'),
   // 首页
   btnHomeRefresh: $('btnHomeRefresh'), homeKv: $('homeKv'),
-  swStoreOn: $('swStoreOn'), btnStoreSave: $('btnStoreSave'),
   btnQuickPoll: $('btnQuickPoll'), btnQuickSniff: $('btnQuickSniff'),
   btnQuickStop: $('btnQuickStop'), btnQuickReport: $('btnQuickReport'), btnQuickRst: $('btnQuickRst'),
   // MQTT 页
@@ -97,7 +96,7 @@ const el = new Proxy({
   btnBusSniff: $('btnBusSniff'), busSniffMs: $('busSniffMs'),
   txHex: $('txHex'), btnTx: $('btnTx')
 }, {
-  // 未在表里列出的 id 走 $() 现取（如 hStore 等只读展示字段），
+  // 未在表里列出的 id 走 $() 现取（如只读展示字段），
   // 取不到返回 null，由调用方判空
   get(t, k) { return t[k] !== undefined ? t[k] : $(k); }
 });
@@ -181,7 +180,7 @@ async function togglePort() {
   //    立刻以"上一条指令尚未返回"失败，且 Promise.all 会吞掉这个错
   await readInfo();
   await readMode();
-  await readHome();      // R:STAT 五段全量；少了它，首页看门狗/点数/落盘要等 5s 定时器
+  await readHome();      // R:STAT 四段全量；少了它，首页看门狗/点数要等 5s 定时器
   await readMqtt();
   startAutoRefresh();
 }
@@ -191,7 +190,7 @@ function setPortState(open, path) {
   el.btnOpen.textContent = open ? '关闭串口' : '打开串口';
   el.stPort.textContent = open ? (path || S.port) : '未连接';
   el.stPort.style.color = open ? '#0a7d2c' : '#666';
-  [el.btnReadInfo, el.btnReadCfg, el.btnSaveCfg, el.btnReadVal].forEach(b => b.disabled = !open);
+  [el.btnReadInfo, el.btnReadCfg, el.btnPullCfg, el.btnSaveCfg, el.btnReadVal].forEach(b => b.disabled = !open);
 }
 
 //---------------------------------------------------------------------
@@ -321,6 +320,24 @@ async function readCfg() {
   }
 }
 
+// 拉取配置 = 读取配置 + 立即读一次实时值。
+//   比"读取配置"多一步 R:VAL：配置回填后马上能看到寄存器是否真的采到数，
+//   新设备接线对不对、从机地址/寄存器地址配没配错，一眼就能确认。
+async function pullCfg() {
+  await readCfg();
+  if (!S.regs || S.regs.length === 0) {
+    status('拉取完成：设备没有配置寄存器', true);
+    return;
+  }
+  try {
+    await readVal();
+    status('拉取完成：' + S.regs.length + ' 个寄存器的配置与实时值已获取', true);
+  } catch (e) {
+    // 配置已经拉到了，只是实时值读失败；不该报成整体失败
+    status('配置已拉取，但实时值读取失败：' + e.message, false);
+  }
+}
+
 // 收集串口配置。返回 { ok, cfg } 或 { ok:false, err }
 // 单选钮没选中时 parseInt('') = NaN，绝不能让 NaN/null 流到设备端
 // （设备 normalize 会整条拒绝，用户只看到一句"保存失败"却不知道原因）
@@ -369,11 +386,8 @@ function collectRegs() {
     const wordOrder = tr.querySelector('.c-wo').value;
     // 上报别名：MQTT 的 name 字段。空串照样下发，设备端会退回用标识符
     const alias = tr.querySelector('.c-alias').value.trim();
-    // 落盘阈值：空/NaN 当 0（每轮都存）；负数拒绝（设备端会判越界）
-    let eps = parseFloat(tr.querySelector('.c-eps').value);
-    if (isNaN(eps) || eps < 0) eps = 0;
     if (!isNaN(addr) && dtype && count > 0) {
-      out.push({ addr, count, name, alias, dtype, byteOrder, wordOrder, eps });
+      out.push({ addr, count, name, alias, dtype, byteOrder, wordOrder });
     }
   });
   return out;
@@ -475,10 +489,10 @@ function renderRegTable() {
     return;
   }
   rows.forEach(r => addRegRow(r.addr, r.dtype || r.type, r.name, r.alias, r.count,
-                              r.byteOrder, r.wordOrder, r.eps));
+                              r.byteOrder, r.wordOrder));
 }
 
-function addRegRow(addr, type, name, alias, count, byteOrder, wordOrder, eps) {
+function addRegRow(addr, type, name, alias, count, byteOrder, wordOrder) {
   const tr = document.createElement('tr');
   const opts = ALL_TYPES
     .map(t => '<option' + (t === type ? ' selected' : '') + '>' + t + '</option>').join('');
@@ -486,9 +500,7 @@ function addRegRow(addr, type, name, alias, count, byteOrder, wordOrder, eps) {
     .map(t => '<option' + (t === (byteOrder || 'BE') ? ' selected' : '') + '>' + t + '</option>').join('');
   const woOpts = ['BE', 'LE']
     .map(t => '<option' + (t === (wordOrder || 'BE') ? ' selected' : '') + '>' + t + '</option>').join('');
-  // 落盘阈值：0 / 空 = 每轮都存。只影响本地写入量，不影响实时值和上报
-  const epsVal = (eps != null && !isNaN(eps)) ? eps : 0;
-  tr.innerHTML =
+    tr.innerHTML =
     '<td><input class="c-addr" type="number" value="' + addr + '"></td>' +
     '<td><select class="c-type">' + opts + '</select></td>' +
     '<td><input class="c-count" type="number" value="' + (count || 1) + '" min="1" max="125"></td>' +
@@ -497,8 +509,6 @@ function addRegRow(addr, type, name, alias, count, byteOrder, wordOrder, eps) {
     'title="MQTT 上报 name 字段的中文名，留空则用标识符"></td>' +
     '<td><select class="c-bo">' + boOpts + '</select></td>' +
     '<td><select class="c-wo">' + woOpts + '</select></td>' +
-    '<td><input class="c-eps" type="number" value="' + epsVal + '" min="0" step="any" ' +
-    'title="值变化超过该值才写本地文件，0=每轮都存"></td>' +
     '<td class="val-cell"><input class="c-val" type="text" value="" readonly></td>' +
     '<td><button class="btn-del" onclick="deleteRow(this)">删除</button></td>';
   el.paramTbody.appendChild(tr);
@@ -513,7 +523,6 @@ function addParamRow() {
   $('regCount').value = 1;
   $('regByteOrder').value = 'BE';
   $('regWordOrder').value = 'BE';
-  $('regEps').value = 0;
   $('modalAddReg').style.display = 'flex';
 }
 function closeModal() { $('modalAddReg').style.display = 'none'; }
@@ -525,14 +534,12 @@ function confirmAddReg() {
   const cnt = parseInt($('regCount').value, 10);
   const bo = $('regByteOrder').value;
   const wo = $('regWordOrder').value;
-  let eps = parseFloat($('regEps').value);
-  if (isNaN(eps) || eps < 0) eps = 0;
   if (!type) { alert('请选择数据类型'); return; }
   if (!addr || !cnt) { alert('寄存器地址、寄存器个数不能为空'); return; }
   const W = { uint32: 2, int32: 2, float32: 2, uint64: 4, int64: 4, float64: 4 };
   const w = W[type] || 1;
   if (cnt % w !== 0) { alert(type + ' 占 ' + w + ' 个寄存器，个数需为 ' + w + ' 的整数倍'); return; }
-  addRegRow(parseInt(addr, 10), type, phyId, alias, cnt, bo, wo, eps);
+  addRegRow(parseInt(addr, 10), type, phyId, alias, cnt, bo, wo);
   closeModal();
 }
 
@@ -645,7 +652,7 @@ async function saveBootMode() {
 //=====================================================================
 function renderHome() {
   // mode 段（mode/busy/poll/mon）来自 R:MODE 或 R:STAT.mode；
-  // data/guard/store 三段只在 R:STAT 顶层，R:MODE 不返回，必须从 S.stat 取。
+  // data/guard 两段只在 R:STAT 顶层，R:MODE 不返回，必须从 S.stat 取。
   const st   = S.modeStat || {};
   const full = S.stat || {};
   const p = st.poll || {}, m = st.mon || {}, d = full.data || {}, g = full.guard || {};
@@ -659,22 +666,6 @@ function renderHome() {
   setKv('hWdt', g.wdt_to ? (wdtStalled(g, !!p.running).stalled ? '停滞!' : '正常') : '未启用',
         wdtStalled(g, !!p.running).stalled);
   setKv('hPub', mq.published);
-  // 本地落盘：累计写入条数 + 当前保留轮数；关开关时明确告知
-  // ⚠️ 变量名不能用 st：上面已有 const st = S.modeStat || {}，同名会
-  //    "Identifier 'st' has already been declared" 直接语法错误
-  const stStore = full.store || {};
-  if (stStore.saved != null) {
-    const extra = (stStore.rounds != null)
-      ? '（保留 ' + stStore.rounds + ' 轮 / ' + stStore.recs + ' 条）' : '';
-    setKv('hStore', stStore.saved + ' 条' + (stStore.enable === false ? '（已暂停）' : extra),
-          stStore.enable === false);
-  } else {
-    setKv('hStore', '');
-  }
-  // 落盘开关复选框：以设备返回的 enable 为准（避免前端猜）
-  if (typeof stStore.enable === 'boolean' && el.swStoreOn) {
-    el.swStoreOn.checked = stStore.enable;
-  }
   setKv('hFrames', m.frames);
   el.stMqtt.textContent = mq.connected ? '已连接' : '未连接';
   el.stMqtt.style.color = mq.connected ? '#0a7d2c' : '#999';
@@ -683,11 +674,11 @@ function renderHome() {
 async function readHome() {
   try {
     const r = await sendCmd(Protocol.Enc.stat(), 'STAT', 4000);
-    // R:STAT 一次性返回 mode/data/guard/store/mqtt 五个平级段。
-    // ⚠️ 以前这里只 S.modeStat = r.data.mode，把 data/guard/store 全丢了，
-    //    导致首页"看门狗"永远显示未启用、"数据点数"永远 --、"本地落盘"永远空。
+    // R:STAT 一次性返回 mode/data/guard/mqtt 四个平级段。
+    // ⚠️ 以前这里只 S.modeStat = r.data.mode，把 data/guard 全丢了，
+    //    导致首页"看门狗"永远显示未启用、"数据点数"永远 --。
     if (r.data) {
-      S.stat = r.data;                                   // 完整五段，首页要用
+      S.stat = r.data;                                   // 完整四段，首页要用
       if (r.data.mode) {
         S.modeStat = r.data.mode;                        // mode 段单独给 renderMode 用
       }
@@ -1037,6 +1028,7 @@ el.btnRefresh.onclick = refreshPorts;
 el.btnOpen.onclick = togglePort;
 el.btnReadInfo.onclick = readInfo;
 el.btnReadCfg.onclick = readCfg;
+el.btnPullCfg.onclick = pullCfg;
 el.btnSaveCfg.onclick = saveCfg;
 el.btnReadVal.onclick = readVal;
 el.btnAddReg.onclick = addParamRow;
@@ -1051,32 +1043,8 @@ el.btnQuickSniff.onclick = () => applyMode('sniff');
 el.btnQuickStop.onclick = () => applyMode('stop');
 el.btnQuickReport.onclick = reportNow;
 
-// 本地存储开关：运行时立即生效；"保存"才写 fskv 重启后仍生效
-//   store_enable 由 R:STAT.store 带回来（设备端 stats 里没有单独字段，
-//   所以在 readHome 里从 R:DISK 之外的来源拿不到时保持复选框不动）
-el.swStoreOn.onchange = async () => {
-  const on = el.swStoreOn.checked;
-  try {
-    await sendCmd(Protocol.Enc.store(on, false), 'STORE', 4000);
-    status('本地落盘已' + (on ? '开启' : '关闭') + '（重启后恢复默认，需点保存才持久化）', true);
-    await readHome();
-  } catch (e) {
-    el.swStoreOn.checked = !on;      // 失败回滚勾选
-    status('切换落盘开关失败：' + e.message, false);
-  }
-};
-el.btnStoreSave.onclick = async () => {
-  const on = el.swStoreOn.checked;
-  try {
-    await sendCmd(Protocol.Enc.store(on, true), 'STORE', 4000);
-    status('本地落盘设置已保存（重启仍生效）', true);
-    toast('落盘开关已持久化：' + (on ? '开' : '关'));
-  } catch (e) {
-    status('保存失败：' + e.message, false);
-  }
-};
 el.btnQuickRst.onclick = async () => {
-  if (!confirm('确定恢复默认配置？\n将清空设备保存的 485 配置、MQTT 配置和本地缓存数据。')) return;
+  if (!confirm('确定恢复默认配置？\n将清空设备保存的 485 配置和 MQTT 配置。')) return;
   try {
     await sendCmd(Protocol.Enc.rst(), 'RST', 6000);
     status('已恢复默认配置', true);
@@ -1271,7 +1239,6 @@ function mockReply(line) {
     mode: mockModeStat(),
     data: { pushed: MOCK.cfg.regs.length, frames: 24, raw: 24, points: MOCK.cfg.regs.length, ring: 50 },
     guard: { uptime: 42, feed: 7, stall: false, wdt_to: 9000 },
-    store: { pushed: 12, popped: 12, dropped: 0, saved: 12, failed: 0, boots: 1 },
     mqtt: { connected: true, published: MOCK.published, failed: 0, last_err: '' }
   });
   else if (line === 'R:FRAMES' || line.indexOf('R:FRAMES=') === 0) resp = 'RET:FRAMES=' + JSON.stringify([

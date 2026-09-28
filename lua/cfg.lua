@@ -86,11 +86,9 @@ local function normalize_reg(r)
     local wo = str(r.wordOrder, "BE")
     if bo ~= "BE" and bo ~= "LE" then return nil, "bad byteOrder" end
     if wo ~= "BE" and wo ~= "LE" then return nil, "bad wordOrder" end
-    local eps = num(r.eps, 0)
-    if eps < 0 then return nil, "bad eps" end
     return {
         addr = addr, count = count, dtype = dtype, name = name,
-        alias = str(r.alias, name), byteOrder = bo, wordOrder = wo, eps = eps,
+        alias = str(r.alias, name), byteOrder = bo, wordOrder = wo,
     }
 end
 

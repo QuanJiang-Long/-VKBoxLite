@@ -35,10 +35,6 @@
     val:  () => 'R:VAL',                    // 实时值快照
     stat: () => 'R:STAT',                   // 全量运行状态
 
-    // ---- 存储 ----
-    disk:  ()       => 'R:DISK',                       // 文件系统剩余空间
-    store: (on, p)  => 'W:STORE=' + (on ? 1 : 0) + (p ? ',P' : ''),  // 落盘开关
-
     // ---- 写寄存器（经设备写事务队列注入 poll 任务）----
     write:   (slave, addr, value) => 'W:WRITE=' + slave + ',' + addr + ',' + value,
     writeJ:  (o) => 'W:WRITEJ=' + JSON.stringify(o),

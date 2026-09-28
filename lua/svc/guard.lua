@@ -54,12 +54,6 @@ local function monitor()
                 ps.rounds or 0, ps.ok or 0, ps.timeout or 0, ps.werr or 0)
         end
     end
-    local ok, store = pcall(require, "data/store")
-    if ok and store then
-        local st = store.stats()
-        parts[#parts + 1] = string.format("queue=%d pushed=%d saved=%d dropped=%d failed=%d",
-            store.depth(), st.pushed or 0, st.saved or 0, st.dropped or 0, st.failed or 0)
-    end
     if rtos then
         local total, used = rtos.meminfo("sys")
         if type(used) == "number" then

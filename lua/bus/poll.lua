@@ -10,7 +10,6 @@ local mbus = require "bus/mbus"
 local collector = require "data/collector"
 local cfgstore = require "cfg"
 local guard = corelib.try("svc/guard")
-local store = corelib.try("data/store")
 local logctl = corelib.try("svc/logctl")
 
 local M = {}
@@ -135,7 +134,7 @@ local function poll_reg(reg)
     log.info("poll", string.format("Rx s%d addr=%d len=%d %s hex=%s val=%s",
         slave, reg.addr, cnt, alias, hex, table.concat(vals, ",")))
     for i, v in ipairs(vals) do
-        collector.push_data(reg.addr + i - 1, reg.name or ("r" .. reg.addr), hex, v, nil, reg.dtype, reg.eps)
+        collector.push_data(reg.addr + i - 1, reg.name or ("r" .. reg.addr), hex, v, nil, reg.dtype)
     end
 end
 
@@ -201,7 +200,6 @@ local function poll_task()
     local mygen = gen
     local okBefore = stat.ok
     while gen == mygen and running do
-        if store then store.begin_round() end
         for _, reg in ipairs(regs) do
             if gen ~= mygen or not running then break end
             if #writeQ > 0 then drain_write_queue(mygen) end

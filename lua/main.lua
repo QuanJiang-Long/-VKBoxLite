@@ -81,16 +81,6 @@ end
 log.info("main", "[3/6] bus/data/cfg")
 local collector = mod("data/collector", pcall(require, "data/collector"))
 local cfgstore = mod("cfg", pcall(require, "cfg"))
-local store = mod("data/store", pcall(require, "data/store"))
-if store and collector then
-    local ok, err = pcall(store.init)
-    if not ok then
-        log.warn("main", "  store init: " .. tostring(err))
-    else
-        collector.on_store(function(rec) store.push(rec) end)
-        log.info("main", "  collector -> store 已挂接")
-    end
-end
 
 -- stage 4: 485 子系统(默认 idle)
 log.info("main", "[4/6] 485")

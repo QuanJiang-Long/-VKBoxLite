@@ -9,7 +9,6 @@ local sys = corelib.try("sys")
 local mbus = require "bus/mbus"
 local collector = require "data/collector"
 local cfgstore = require "cfg"
-local store = corelib.try("data/store")
 
 local M = {}
 
@@ -91,7 +90,6 @@ local function process_frame(s)
     f.pair_state = pair_state
     f.paired_addr = paired_addr
     f.paired_qty = f.qty
-    if store then store.begin_round() end
     collector.push_raw_rx(f.hex)
     collector.push_frame(f)
     pcall(uart.write, mbus.VUART_DEBUG, "RX485:" .. f.hex .. "\r\n")
@@ -195,7 +193,7 @@ function M.apply_infer()
             name = "s" .. a.slave .. "_r" .. a.addr,
             alias = "s" .. a.slave .. "_r" .. a.addr,
             addr = a.addr, count = a.count, dtype = "uint16",
-            byteOrder = "BE", wordOrder = "BE", eps = 0,
+            byteOrder = "BE", wordOrder = "BE",
         }
     end
     local c = cfgstore.load_poll()

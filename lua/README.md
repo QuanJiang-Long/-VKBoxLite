@@ -28,8 +28,7 @@ lua/
 │   ├── mon.lua         Q3 旁听
 │   └── ctrl.lua        模式仲裁（poll/sniff/idle 互斥）
 ├── data/
-│   ├── collector.lua   数据层（最新值 + 帧缓存 + 回调）
-│   └── store.lua       本地落盘（按轮环形 + 整文件重写 + eps 过滤）
+│   └── collector.lua   数据层（最新值 + 帧缓存 + 回调）
 ├── cfg.lua             配置中心（poll/sniff/sys 三类，fskv 持久化）
 ├── iot/
 │   ├── mqttcfg.lua     MQTT 配置（{id} 占位 + normalize）
@@ -45,7 +44,7 @@ lua/
 |---|---|
 | 1 | `guard.init()` 看门狗 9s 超时 / 3s 喂狗 |
 | 2 | `sn.init()` 三态机 + 身份；on_change 烧号成功自动补启 MQTT |
-| 3 | collector / cfg / store；collector.on_store → store.push |
+| 3 | collector / cfg |
 | 4 | poll / mon / ctrl；GPIO8 预置低电平；boot_mode 决定是否自动起 |
 | 5 | iot.init + start（未烧 SN 不建连） |
 | 6 | cmd.init（注册指令）+ prov.init（VUART_0 产线通道） |
@@ -54,8 +53,6 @@ lua/
 
 ```
 Q2: W:MODE=poll → ctrl → poll(总线唯一主人) → parse_frame/parse_value → collector
-       ├─ on_update → iot → build_payload → MQTT 上行
-       └─ on_store  → store → 整文件重写（仅存最近 10 轮）
 
 Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配对 → push_frame
 
@@ -71,13 +68,12 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | 指令 | 用途 |
 |---|---|
 | R:INFO | 设备信息（SN/IMEI/ICCID/CSQ/RSRP/版本/项目/服务器/波特率/从机/寄存器数/锁状态） |
-| R:SN / R:ID | SN / 芯片身份（imei;uid;sn;state;lock 的 k:v 形式） |
 | R:MODE / W:MODE=idle\|poll\|sniff | 模式查询（返回 {mode,busy,poll,mon,write}）/ 切换 |
 | R:CFG / W:CFG={json} | 轮询配置读写，读返回 `{cfg, src}`，src=default 表示 fskv 里没写过 |
 | R:SNIFFCFG / W:SNIFFCFG={json} | 旁听配置读写，读返回 `{cfg, src}` |
 | R:REG / W:REG=[json] | 寄存器表读写 |
 | R:VAL | 实时值快照 |
-| R:STAT | 运行状态汇总（mode/data/guard/store/iot；store 段含 recs/fs） |
+| R:STAT | 运行状态汇总（mode/data/guard/mqtt） |
 | W:WRITE=slave,addr,value / W:WRITEJ={json} | 写寄存器（idle 也可写，经写事务队列在安全点注入） |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配” |
 | R:MQTT / W:MQTT={json} | MQTT 配置读写，读返回 `{cfg,pub,sub,ready,err,stat}` |
@@ -85,8 +81,6 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:IOTSTAT | MQTT 运行态（connected/subscribed/published/failed/last_err/last_pub/backoff） |
 | R:NET / R:MEM | 网络/内存诊断 |
 | W:GC | 强制 GC + 重连 |
-| R:DISK | 数据文件大小（`file=` + `bytes=`） |
-| W:STORE=0\|1[,P] | 落盘开关（P=持久化到 fskv） |
 | R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20） |
 | R:POLL | 轮询状态（rounds/ok/timeout/werr/regs/interval） |
 | R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits}], slaves, stat}` |
@@ -138,7 +132,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
    - `parsed=true` → 物理层通了，问题在配置（地址/count/dtype）
 2. **`R:CFG`** 核对 `slave/baud/databits/stopbits/parity/regs`
 3. **`W:CFG={...}`** 修改后，若改了 baud/parity/slave 会自动重启轮询任务
-4. `parsed=true` 但 `pushed` 不涨 → 查 `R:VAL` 与 `eps`（值变化过滤，`eps=0` 表示不过滤）
+4. `parsed=true` 但 `R:VAL` 取不到值 → 查 name/alias 是否填错、count 是否为类型宽度整数倍
 5. DE/RE 接 GPIO8，**高=发送、低=接收**；`W:RAWTEST` 会自动拉高/拉低
 
 协议层已用标准 Modbus 校验值复核：读 slave=1 addr=14 qty=1 的请求帧为
@@ -166,35 +160,34 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 失败时的三种日志：`Rx timeout addr=14 CT rx=00ea39cb`（收到字节但组不成帧）、
 `Rx timeout ... rx=-`（一个字节都没收到）、`Rx err fc=83 code=2 ...`（从机返异常码）。
 
-## 本地落盘
+## 本地落盘（已移除）
 
-`STORE_ENABLE` 默认 **true**，插电即存，无需手动开启。写入文件 `/collect_data.jsonl`。
+按需求，poll 模式**不做本地保存**，采集数据只走两条路：
 
-| 参数 | 值 | 作用 |
-|---|---|---|
-| `CHANGE_EPS` | 0 | 值变化阈值，0 = 不过滤，每轮都存 |
-| `FLUSH_EVERY` | 20 | pending 累积到此条数立即落盘 |
-| `FLUSH_MS` | 5000 | 定时兜底：pending>0 就落盘 |
-| `FLUSH_BATCH` | 30 | 单轮记录上限，超出丢最旧并计 `dropped` |
-| `KEEP_ROUNDS` | 10 | 内存/文件只保留最近 10 轮（滚动窗口） |
+- `collector.dataCache` 内存最新值 → `R:VAL` 实时查询
+- `on_update` → iot → MQTT 上行
 
-`stats.saved` 远大于 `stats.pushed` 是**设计使然**：flush 采用整文件重写，
-每次把当前保留的所有轮全部重写一遍，不是"新增多少写多少"。
+已删除：`data/store.lua` 整个模块、`collector.on_store`、`main.lua` 里的挂接、
+`R:DISK` / `W:STORE` 两条指令、`R:STAT` 的 store 段、`guard` 心跳里的 queue/saved 字段，
+以及配置里的 `DATA_FILE` / `KEEP_ROUNDS` / `STORE_ENABLE` / `CHANGE_EPS` /
+`FLUSH_MS` / `FLUSH_EVERY` / `FLUSH_BATCH` 和寄存器的 `eps` 字段。
 
 ## 与原版（v1）的差异
 
-- 24 文件 → 16 文件；删除 fsinfo/bootreason 桩、identity 独立模块、logctl 独立模块
+- 24 文件 → 15 文件；删除 fsinfo/bootreason 桩、identity 独立模块、logctl 独立模块
 - mbus_common → mbus；cfg_store → cfg.lua；collector/data_store 移入 data/
-- vcom → cmd，指令集按 `frontend/protocol.js` 全量对齐（32 条，含 SN 产线 7 条），
+- vcom → cmd，指令集按 `frontend/protocol.js` 全量对齐（cmd.lua 29 条 + SN 产线 8 条），
   恢复 v1 删掉的 TX/INFER/APPLYINFER/SNIFF/IOTSTAT，新增 W:RAWTEST 裸探针
 - 应答结构按前端读取方式修正：R:MODE 返回状态对象而非裸字符串；R:CFG/R:SNIFFCFG 包
   `{cfg, src}`；R:MQTT 补 `stat`；R:INFO 补 server/baud/slave/regs 并修复
   mobile.iccid/csq 未调用导致 json.encode 失败返回 `{}` 的问题
 - 配置字段名 `timeout` → `timeout_ms`（与前端 collectCfg 一致），范围 50~500，
   允许 null = 早返回模式
+- **本地落盘功能已整体移除**（按需求，poll 模式不做本地保存）：删除 `data/store.lua`、
+  `collector.on_store`、`R:DISK`/`W:STORE`、`R:STAT` 的 store 段、配置里的
+  `DATA_FILE`/`KEEP_ROUNDS`/`STORE_ENABLE`/`CHANGE_EPS`/`FLUSH_*` 及寄存器的 `eps` 字段
 - **存储空间功能已整体移除**：本固件 `rtos.fsinfo` 与 `fs` 库均不存在，
   前端首页"存储空间"栏、store.stats 的 `fs` 段、R:DISK 的探测字段全部删除
 - 看门狗参数、MQTT 用法、启动顺序均对照官方文档核对修正
 - 切帧统一为 CRC 试探法（每个候选长度都验 CRC，fc15/16 用 byte(7)=bc）；事务前 drain 清残帧（v1 只在失败后 drain）
-- 配置校验与原工程对齐：串口参数范围 / MAX_REGS=128 / 标识符去重 / count%width / eps 上限，save 上限 2048
-- 落盘 schema 与原工程一致：`{ts,kind,slave,fc,mkind,addr,qty,hex}`（帧）、`{ts,name,addr,value,hex,dtype,eps}`（数据）
+- 配置校验与原工程对齐：串口参数范围 / MAX_REGS=128 / 标识符去重 / count%width，save 上限 2048

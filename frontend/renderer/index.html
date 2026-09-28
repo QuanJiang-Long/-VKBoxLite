@@ -192,25 +192,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                         <div class="kv"><b>设备编号</b><span id="hDevId">--</span></div>
                         <div class="kv"><b>看门狗</b><span id="hWdt">--</span></div>
                         <div class="kv"><b>已上报</b><span id="hPub">--</span></div>
-                        <div class="kv"><b>本地落盘</b><span id="hStore">--</span></div>
                         <div class="kv"><b>总线报文</b><span id="hFrames">--</span></div>
                     </div>
-                </div>
-                <div class="panel">
-                    <div class="panel-title">本地存储</div>
-                    <div class="form-row">
-                        <label class="switch">
-                            <input type="checkbox" id="swStoreOn">
-                            <span class="slider"></span>
-                        </label>
-                        <span style="font-size:13px;">采集数据写入本地文件</span>
-                        <div class="spacer"></div>
-                        <button class="sm" id="btnStoreSave">保存（重启仍生效）</button>
-                    </div>
-                    <p style="color:#999;font-size:12px;margin-top:6px;line-height:1.6;">
-                        本地只保留最近 <b>10 轮</b>记录（poll=轮 / sniff=帧），旧记录自动删除，文件约 1.6KB 不再增长。
-                        关闭后文件保持原样不清空，仅暂停写入；关掉可省 Flash 擦写。
-                    </p>
                 </div>
                 <div class="panel">
                     <div class="panel-title">快速操作</div>
@@ -299,6 +282,7 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                 <div class="serial-pane active" id="sp-s1">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:4px 0;">
                     <button id="btnReadCfg">读取配置</button>
+                    <button id="btnPullCfg">拉取配置</button>
                     <div style="margin-left: auto;"></div>
                     <button id="btnSaveCfg" class="primary">保存配置</button>
                 </div>
@@ -372,9 +356,6 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                                 <th style="width:100px;">字序
                                     <span class="th-help" title="多个寄存器之间谁在前，只影响 32/64 位类型。BE=大端(标准)，LE=小端">?</span>
                                 </th>
-                                <th style="width:110px;">落盘阈值
-                                    <span class="th-help" title="值变化超过该阈值才写入本地文件，用于减少写入量。0 或留空 = 每轮都存。不影响实时值和 MQTT 上报。">?</span>
-                                </th>
                                 <th style="width:170px;">值</th>
                                 <th style="width:60px;">操作</th>
                             </tr>
@@ -385,10 +366,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                         字节序：同一寄存器内部两个字节是否交换；字序：多个寄存器之间是否交换。
                         默认都是 BE（大端，Modbus 标准）。float32/float64 按 IEEE754 解析。
                         32/64 位类型会占用 2/4 个寄存器，所以"寄存器个数"需为类型宽度的整数倍。<br>
-                        落盘阈值：电压、电流这类变化慢的数据，设个死区（如电压 0.5、电流 0.1），
-                        值没动就不写文件，可把本地写入量降 90% 以上；0 = 每轮都存。<br>
-                         上报别名：填中文名（如「电压」），MQTT 上报的 <code>name</code> 字段用它，
-                         <code>id</code> 字段仍用物理标识符；留空则 <code>name</code> 等于 <code>id</code>。
+                        上报别名：填中文名（如「电压」），MQTT 上报的 <code>name</code> 字段用它，
+                        <code>id</code> 字段仍用物理标识符；留空则 <code>name</code> 等于 <code>id</code>。
                     </p>
                 </div>
                 </div>
@@ -594,11 +573,6 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                 <option value="BE" selected>BE 大端（标准）</option>
                 <option value="LE">LE 小端（多寄存器间交换）</option>
             </select>
-            <label>落盘阈值</label>
-            <input id="regEps" type="number" value="0" min="0" step="any">
-            <span class="hint">值变化超过该值才写入本地文件，0 = 每轮都存。
-                电压、电流这类变化慢的数据设个死区（如 0.5 / 0.1）可大幅减少写入量，
-                不影响实时值和 MQTT 上报</span>
             <div class="order-help">
                 <div class="oh-title">字节序 / 字序 怎么选</div>
                 <div class="oh-row"><b>字节序</b>：同一个寄存器内部，高低两个字节谁在前。<br>

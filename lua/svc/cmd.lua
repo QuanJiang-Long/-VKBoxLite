@@ -14,7 +14,6 @@ local poll = require "bus/poll"
 local mon = require "bus/mon"
 local mbus = require "bus/mbus"
 local collector = require "data/collector"
-local store = require "data/store"
 local cfgstore = require "cfg"
 local mqtt_cfg = require "iot/mqttcfg"
 local iot = corelib.try("iot/iot")
@@ -173,7 +172,7 @@ local function reg_cmds()
     end)
 
     -- R:STAT: 前端 renderHome 读
-    -- R:STAT: 前端 readHome 读五段 mode/data/guard/store/mqtt
+    -- R:STAT: 前端 readHome 读四段 mode/data/guard/mqtt
     --   ⚠️ mode 段必须是【对象】(与 R:MODE 同形: {mode,busy,poll,mon,write}),
     --     不能是字符串。前端 readHome 里 S.modeStat = r.data.mode 后
     --     renderMode 会取 st.mode, 字符串没有 .mode -> undefined -> 'idle',
@@ -184,7 +183,6 @@ local function reg_cmds()
             mode = ctrl.status(),
             data = collector.stats(),
             guard = guard and guard.status() or nil,
-            store = store.stats(),
         }
         local it = iot and iot.status() or nil
         st.iot = it
@@ -288,23 +286,6 @@ local function reg_cmds()
         M.reply("RET:GC=OK")
     end)
 
-    M.reg("R:DISK", function()
-        local ok, f = pcall(io.open, cfg.DATA_FILE, "r")
-        local size = 0
-        if ok and f then
-            local rok, d = pcall(function() return f:read("*a") end)
-            if rok and type(d) == "string" then size = #d end
-            pcall(f.close, f)
-        end
-        M.reply(string.format("RET:DISK=file=%s bytes=%d", cfg.DATA_FILE, size))
-    end)
-    M.reg("W:STORE", function(arg)
-        local v, persist = arg:match("^%s*([01])%s*,?%s*(%a*)%s*$")
-        if not v then return M.reply("RET:FAIL:STORE:use 0|1[,P]") end
-        store.set_enable(v == "1", trim(persist):upper() == "P")
-        M.reply("RET:STORE=OK")
-    end)
-
     M.reg("W:RAWTEST", function(arg)
         local a, b, c = arg:match("^%s*(%d*)%s*,?%s*(%d*)%s*,?%s*(%d*)%s*$")
         local r, err = poll.probe_raw(
@@ -383,7 +364,6 @@ local function reg_cmds()
         cfgstore.reset()
         mqtt_cfg.reset()
         collector.clear()
-        store.clear()
         if poll.is_running() then
             poll.stop()
             poll.start()
