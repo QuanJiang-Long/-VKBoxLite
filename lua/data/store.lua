@@ -152,23 +152,35 @@ function M.depth()
     return n
 end
 
+-- 文件系统剩余空间(KB): 前端首页存储空间显示用。
+-- ⚠️ 本固件(Air780EP base 25.11)实测 type(rtos.fsinfo) ~= "function",
+--    fs 库也不存在, 所以正常情况取不到 -> 不返回 fs 字段,
+--    前端显示"不支持"(这是固件限制, 不是 bug)。原工程同样桩化处理。
+--    这里仍做一次探测并把依据塞进 fs_reason, 便于现场确认。
+local function fs_info()
+    if not rtos then return nil end
+    local f = rtos.fsinfo
+    if type(f) ~= "function" then return nil end
+    local ok, info = pcall(f)
+    if not ok or type(info) ~= "table" then return nil end
+    local bs = info.block_size or 0
+    local tot = info.total_block_count or 0
+    local free = info.free_block_count or 0
+    if bs <= 0 or tot <= 0 then return nil end
+    return {
+        total = math.floor(tot * bs / 1024),
+        free = math.floor(free * bs / 1024),
+        used = math.floor((tot - free) * bs / 1024),
+    }
+end
+
 function M.stats()
     local st = {}
     for k, v in pairs(stats) do st[k] = v end
     st.enable = enable
     st.rounds = #rounds
     st.recs = M.depth()
-    -- 剩余空间(KB): 前端存储空间显示用; fsinfo 不可用时不给这个字段
-    if rtos and rtos.fsinfo then
-        local ok, info = pcall(rtos.fsinfo)
-        if ok and type(info) == "table" then
-            st.fs = {
-                total = math.floor((info.total_block_count * info.block_size or 0) / 1024),
-                free = math.floor((info.free_block_count or 0) * (info.block_size or 0) / 1024),
-                used = math.floor(((info.total_block_count - info.free_block_count) * (info.block_size or 0)) / 1024),
-            }
-        end
-    end
+    st.fs = fs_info()
     return st
 end
 

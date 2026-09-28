@@ -173,15 +173,18 @@ local function reg_cmds()
     end)
 
     -- R:STAT: 前端 renderHome 读
+    -- R:STAT: 前端 renderHome 读
     --   st.poll{running,regs} / d.data{points} / g.guard{wdt_to} / store{rounds,recs,saved,enable}
+    --   ⚠️ 前端读的是顶层 mqtt 段(不是 iot), 少这个键首页 MQTT 状态永远空
     M.reg("R:STAT", function()
         local st = ctrl.status()
         st.collector = collector.stats()
         st.guard = guard and guard.status() or nil
-        local ss = store.stats()   -- 已含 enable/pushed/saved/dropped/failed/rounds
+        local ss = store.stats()   -- 已含 enable/pushed/saved/dropped/failed/rounds/recs/fs
         st.store = ss
-        st.iot = iot and iot.status() or nil
-        -- 前端 store 段用 saved/rounds/recs/enable, 已由 store.stats() 提供
+        local it = iot and iot.status() or nil
+        st.iot = it
+        st.mqtt = it               -- 前端 readHome 读 r.data.mqtt
         M.reply("RET:STAT=" .. jencode(st))
     end)
 
@@ -289,7 +292,18 @@ local function reg_cmds()
             if rok and type(d) == "string" then size = #d end
             pcall(f.close, f)
         end
-        M.reply(string.format("RET:DISK=file=%s bytes=%d", cfg.DATA_FILE, size))
+        -- fsinfo 探测依据: 区分"rtos 库整个没有"和"rtos 没有 fsinfo 函数"
+        -- 本固件(Air780EP base 25.11)实测两者都取不到 -> 前端显示"不支持"
+        local probe = {
+            file = cfg.DATA_FILE,
+            bytes = size,
+            available = false,
+            rtos_type = rtos and type(rtos) or "nil",
+            rtos_fsinfo = rtos and type(rtos.fsinfo) == "function" or false,
+            fs_type = type(_G.fs) == "table" and "table" or type(_G.fs),
+            fs_fsinfo = _G.fs and type(_G.fs.fsinfo) == "function" or false,
+        }
+        M.reply("RET:DISK=" .. jencode(probe))
     end)
     M.reg("W:STORE", function(arg)
         local v, persist = arg:match("^%s*([01])%s*,?%s*(%a*)%s*$")

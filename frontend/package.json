@@ -1,0 +1,46 @@
+{
+  "name": "vkbox-config-tool",
+  "version": "1.0.0",
+  "description": "VKBox Lite 网关配置工具 - Air780EP 485 采集设备配置软件",
+  "main": "main.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win --x64",
+    "dist:portable": "electron-builder --win portable --x64",
+    "postinstall": "node -e \"try{require('electron')}catch(e){console.log('electron binary pending, run: npx electron-rebuild or re-install')}\""
+  },
+  "build": {
+    "appId": "com.vkbox.configtool",
+    "productName": "VKBox配置工具",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "protocol.js",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "dependencies": {
+    "serialport": "^12.0.0"
+  }
+}

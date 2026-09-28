@@ -371,8 +371,10 @@ end
 
 function M.write_status()
     local st = {}
-    for k, v in pairs(wstat) do st[k] = v end
-    st.queue = #writeQ
+    st.queued = #writeQ                  -- 队列里待写的条数
+    st.qmax = cfg.WRITEQ_MAX
+    st.done = wstat.done
+    st.fail = wstat.wfail                -- 前端读 w.fail
     return st
 end
 
@@ -385,8 +387,13 @@ function M.frame_log_status() return M.frame_log end
 function M.status()
     local st = {}
     for k, v in pairs(stat) do st[k] = v end
+    st.running = running
+    st.gen = gen
     st.regs = #regs
     st.interval = interval
+    st.slave = lastCfg and lastCfg.slave or cfg.SLAVE_ADDR
+    st.baud = lastCfg and lastCfg.baud or cfg.BAUD
+    st.timeout_ms = lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS
     return st
 end
 
