@@ -59,6 +59,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .serial-tabs{display:flex;border-bottom:1px solid #ddd;margin-bottom:10px;}
 .serial-tab{padding:6px 10px;border:1px solid #ddd;border-bottom:none;margin-right:4px;cursor:pointer;background:#f3f5f8;}
 .serial-tab.active{background:#fff;color:#0066cc;}
+.serial-pane{display:none;}
+.serial-pane.active{display:block;}
 /* 参数列表表格 */
 .param-table{width:100%;border-collapse:collapse;margin-top:10px;}
 .param-table th,.param-table td{border:1px solid #ddd;padding:6px;text-align:center;font-size:13px;}
@@ -292,7 +294,9 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
             <div class="tab-pane" id="tabPoll">
                 <div class="serial-tabs">
                     <div class="serial-tab active" data-serial="s1">串口1（485总线）</div>
+                    <div class="serial-tab" data-serial="s2">MQTT配置</div>
                 </div>
+                <div class="serial-pane active" id="sp-s1">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:4px 0;">
                     <button id="btnReadCfg">读取配置</button>
                     <div style="margin-left: auto;"></div>
@@ -387,8 +391,9 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                          <code>id</code> 字段仍用物理标识符；留空则 <code>name</code> 等于 <code>id</code>。
                     </p>
                 </div>
+                </div>
 
-                <!-- MQTT 上报（并入 poll模式） -->
+                <div class="serial-pane" id="sp-s2">
                 <div class="panel">
                     <div class="panel-title">MQTT 连接
                         <div class="spacer"></div>
@@ -473,6 +478,7 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                         只上报 value 非空的点，读失败的点不会当成 0 上报。<br>
                         下行支持：<code>{"cmd":"REPORT"}</code> 触发立即上报；<code>{"cmd":"WRITE","items":[{"slave":1,"addr":100,"value":2201}]}</code> 写寄存器（经设备写事务队列注入轮询任务）。
                     </p>
+                </div>
                 </div>
             </div>
 

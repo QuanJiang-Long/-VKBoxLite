@@ -1155,12 +1155,18 @@ tabItems.forEach(item => {
   };
 });
 
-// 串口1子标签切换
+// poll模式子标签切换：串口1（485总线）/ MQTT配置
 const serialTabs = document.querySelectorAll('.serial-tab');
 serialTabs.forEach(tab => {
   tab.onclick = () => {
     serialTabs.forEach(s => s.classList.remove('active'));
     tab.classList.add('active');
+    const key = tab.getAttribute('data-serial');   // s1 / s2
+    document.querySelectorAll('.serial-pane').forEach(p => p.classList.remove('active'));
+    const pane = document.getElementById('sp-' + key);
+    if (pane) pane.classList.add('active');
+    // 切到 MQTT配置 时拉一次，避免刚切过去是空的
+    if (key === 's2' && S.open) readMqtt();
   };
 });
 
