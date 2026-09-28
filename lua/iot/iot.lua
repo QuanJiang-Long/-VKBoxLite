@@ -347,13 +347,25 @@ end
 
 -- 平台配置拉取状态机。
 -- W:PULLCFG 只置状态并立即应答; 握手跑在 task_main 协程里(那里才能 sys.wait)。
+local function pull_active()
+    local st = S.pull.state
+    return st == "connecting" or st == "helloing" or st == "waiting"
+end
+
+-- 不要求 MQTT 已连上: 只要配好服务器地址/端口, 设备自己去连, 连上再握手。
+-- 这是新设备首次使用的正常顺序(先配 MQTT, 再拉配置)。
 function M.pull_start()
-    if S.pull.state == "helloing" or S.pull.state == "waiting" then
-        return false, "正在拉取中"
-    end
-    if not S.client or not S.connected then return false, "MQTT 未连接" end
+    if pull_active() then return false, "正在拉取中" end
     if not get_topic() then return false, "无 SN" end
-    S.pull = { state = "helloing", msg = "", result = nil, deadline = 0 }
+    local c = mqttcfg.load()
+    if not c.host or c.host == "" then return false, "请先配置 MQTT 服务器地址" end
+    if not c.port or c.port < 1 or c.port > 65535 then return false, "请先配置 MQTT 端口" end
+    S.pull = {
+        state = "connecting", msg = "", result = nil,
+        deadline = os.time() + math.floor(cfg.PULL_CONNECT_MS / 1000),
+    }
+    -- 未连上时打断退避等待, 让 task_main 立刻重连, 不必等下一个周期
+    if not S.connected then M.kick() end
     return true
 end
 
@@ -378,7 +390,15 @@ end
 
 local function pull_step()
     local p = S.pull
-    if p.state == "helloing" then
+    if p.state == "connecting" then
+        -- 实际建连由 task_main 的常规连接分支做, 这里只等, 避免两处同时
+        -- 建连建出两个 client 互相覆盖
+        if S.connected then
+            p.state = "helloing"
+        elseif os.time() >= p.deadline then
+            pull_finish("fail", "MQTT 连接失败: " .. tostring(S.last_err or "超时"))
+        end
+    elseif p.state == "helloing" then
         local did = device_id()
         local topic = string.format(cfg.PLATFORM_HELLO_TOPIC, did)
         local body = string.format('{"vendor":%s,"model":%s,"fwVersion":%s,"deviceId":%s}',
@@ -404,6 +424,8 @@ end
 local function task_main()
     S.want_run = true
     while S.want_run do
+        -- 拉取状态机要在未连接时也能跑(connecting 态就是等连接), 所以放分支外
+        if pull_active() then pcall(pull_step) end
         if not S.connected then
             if net_ready() then
                 local ok, err = try_connect()
@@ -431,9 +453,6 @@ local function task_main()
                 wait_kickable(10000)
             end
         else
-            if S.pull.state == "helloing" or S.pull.state == "waiting" then
-                pcall(pull_step)
-            end
             if S.recv_pending then
                 local rp = S.recv_pending
                 S.recv_pending = nil

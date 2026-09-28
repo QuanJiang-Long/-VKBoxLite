@@ -337,10 +337,14 @@ async function pullCfg() {
   };
   try {
     await sendCmd(Protocol.Enc.pullCfg(), 'PULLCFG', 8000);
+    // 设备端要先连 MQTT(PULL_CONNECT_MS=20s)再等平台下发(PULL_TIMEOUT_MS=15s),
+    // 所以这里按总时长轮询, 不能用固定次数
     let r = null;
-    for (let i = 0; i < 16; i++) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < 55000) {
       r = await sendCmd(Protocol.Enc.pullCfgStat(), 'PULLCFG', 5000);
-      if (r.data && r.data.state !== 'helloing' && r.data.state !== 'waiting') break;
+      if (r.data && r.data.state !== 'connecting' && r.data.state !== 'helloing'
+          && r.data.state !== 'waiting') break;
       await new Promise(res => setTimeout(res, 1000));
     }
     const d = r && r.data;
@@ -1258,11 +1262,13 @@ function mockReply(line) {
     });
     resp = 'RET:VAL=' + JSON.stringify(list);
   }
-  // 平台配置拉取 mock：发起后前两次查状态返回 waiting，第三次给 done
+  // 平台配置拉取 mock：发起后先 connecting，再 waiting，最后 done
   else if (line === 'W:PULLCFG') { MOCK.pullN = 0; resp = 'RET:PULLCFG=started'; }
   else if (line === 'R:PULLCFG') {
     MOCK.pullN = (MOCK.pullN || 0) + 1;
     if (MOCK.pullN < 3) {
+      resp = 'RET:PULLCFG=' + JSON.stringify({ state: 'connecting', msg: '' });
+    } else if (MOCK.pullN < 5) {
       resp = 'RET:PULLCFG=' + JSON.stringify({ state: 'waiting', msg: '' });
     } else {
       const regs = [

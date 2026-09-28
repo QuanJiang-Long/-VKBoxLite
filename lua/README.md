@@ -75,7 +75,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:REG / W:REG=[json] | 寄存器表读写 |
 | R:VAL | 实时值快照 |
 | R:STAT | 运行状态汇总（mode/data/guard/mqtt） |
-| W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt}`） |
+| W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt}`）。前提只需配好 MQTT 服务器地址和端口，设备会自己连 |
 | W:WRITE=slave,addr,value / W:WRITEJ={json} | 写寄存器（idle 也可写，经写事务队列在安全点注入） |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配” |
 | R:MQTT / W:MQTT={json} | MQTT 配置读写，读返回 `{cfg,pub,sub,ready,err,stat}` |
@@ -166,26 +166,35 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 
 前端点「拉取配置」→ 设备与平台握手拿配置 → **只回填表单，不自动落盘**，用户点「保存配置」才生效。
 
+**前提只需配好 MQTT 服务器地址和端口**，不要求 MQTT 已连上：设备会自己先去连
+（`PULL_CONNECT_MS=20s`），连上再发 hello。这是新设备首次使用的正常顺序——
+先配 MQTT，再拉配置。
+
 ### 时序
 
 ```
 前端  ──W:PULLCFG──────────▶  设备  立即回 RET:PULLCFG=started
-前端  ──R:PULLCFG(每1s)────▶  设备  回 {state:"helloing"|"waiting", msg}
-                                    │
-设备  ──publish────────────────▶  平台  /sys/thing/gw/config/hello/{SN}
-                                    {"vendor":"VKBoxLite","model":"VKBox-Lite",
-                                     "fwVersion":"<VERSION>","deviceId":"<IMEI>"}
+前端  ──R:PULLCFG(每1s)────▶  设备  回 {state, msg}
+
+设备  ① 未连 MQTT? 先自己连(最多 20s)      state=connecting
+      ② publish hello                      state=helloing
+      ③ 等平台下发(15s 超时)                state=waiting
+      ④ 解析 → 回结果                       state=done / fail
+
 平台  ──publish────────────────▶  设备  /sys/thing/gw/config/get/{SN}  （连上即订阅）
-                                    │
-前端  ──R:PULLCFG──────────▶  设备  回 {state:"done", poll:{...}, skipped:[...],
-                                        mqtt:{pub,sub}}
+
 前端  回填 485 表单 + 寄存器表 + MQTT pub/sub 输入框
 用户  点「保存配置」/「保存并重连」→ W:CFG / W:REG / W:MQTT
 ```
 
 > `W:PULLCFG` 处理器在 VUART 回调上下文，**不能 `sys.wait`**，所以握手跑在
 > `iot.task_main` 协程里；指令只置状态并立即应答，前端轮询拿结果。
-> 超时 `PULL_TIMEOUT_MS=15s`，前端最多轮询 16 次（≈19s），不会早于设备放弃。
+>
+> `connecting` 态**只等不连**：实际建连由 `task_main` 的常规连接分支做，
+> 避免两处同时 `try_connect` 建出两个 client 互相覆盖。`pull_start` 里对未连上的
+> 情况调 `M.kick()` 打断退避等待，让重连立刻发生。
+>
+> 前端按总时长轮询 55s，覆盖 20s 连接 + 15s 等下发 + 余量。
 
 ### topic
 
@@ -235,6 +244,8 @@ I/iot: pullcfg hello topic=/sys/thing/gw/config/hello/11802026092600016 sn=11802
 I/iot: pullcfg recv topic=/sys/thing/gw/config/get/11802026092600016 len=812
 I/iot: pullcfg done 已忽略 0 条
 ```
+
+连不上 MQTT 时是 `pullcfg fail MQTT 连接失败: <原因>`（等 20s）。
 
 topic 里的 `{SN}` 取的是**烧号的 SN**（`_G.get_device_sn()`），与 payload 里的
 `deviceId`（IMEI）**不是同一个标识**。三个 topic（hello / config/get / property/post）
