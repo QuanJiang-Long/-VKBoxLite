@@ -241,7 +241,8 @@ function M.probe_raw(slave, addr, qty, timeout_ms)
     drain()
     rawCap = ""
     pcall(uart.on, mbus.UART_ID, "receive", raw_on_receive)
-    local txok = pcall(uart.write, mbus.UART_ID, frame)
+    local txok, txerr = pcall(uart.write, mbus.UART_ID, frame)
+    txok = txok and true or false
     de_high()
     local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD)
     if sys then sys.wait(hold) end
@@ -256,7 +257,8 @@ function M.probe_raw(slave, addr, qty, timeout_ms)
     rawCap = nil
     if running then pcall(uart.on, mbus.UART_ID, "receive", on_receive) end
     return {
-        tx_ok = txok and true or false,
+        tx_ok = txok,
+        tx_err = txok and "" or tostring(txerr),
         tx_hex = (frame:gsub(".", function(c) return string.format("%02x", c:byte()) end)),
         rx_len = #cap,
         rx_hex = #cap > 0 and (cap:gsub(".", function(c) return string.format("%02x", c:byte()) end)) or "",

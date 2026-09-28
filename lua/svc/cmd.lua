@@ -256,9 +256,12 @@ local function reg_cmds()
             b ~= "" and tonumber(b) or nil,
             c ~= "" and tonumber(c) or nil)
         if not r then return M.reply("RET:FAIL:RAWTEST:" .. tostring(err)) end
-        M.reply(string.format("RET:RAWTEST tx=%s rx_len=%d parsed=%s rx=%s",
-            r.tx_hex, r.rx_len, tostring(r.parsed), r.rx_hex == "" and "(空)" or r.rx_hex))
-        if r.rx_len == 0 then
+        M.reply(string.format("RET:RAWTEST tx_ok=%s tx=%s rx_len=%d parsed=%s rx=%s",
+            tostring(r.tx_ok), r.tx_hex, r.rx_len, tostring(r.parsed),
+            r.rx_hex == "" and "(空)" or r.rx_hex))
+        if not r.tx_ok then
+            log.warn("cmd", "RAWTEST uart.write 失败:", r.tx_err)
+        elseif r.rx_len == 0 then
             log.warn("cmd", "RAWTEST 无任何回字节: 查 AB线/从机地址/波特率/DE极性/从机是否上电")
         elseif not r.parsed then
             log.warn("cmd", "RAWTEST 有字节但 CRC 不过: 查 波特率/校验位/停止位/AB线序")
