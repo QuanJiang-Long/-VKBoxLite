@@ -101,6 +101,12 @@ local function poll_reg(reg)
     local f = do_transaction(frame, lastCfg and lastCfg.timeout or cfg.TIMEOUT_MS)
     if not f then
         stat.timeout = stat.timeout + 1
+        -- 前若干次超时把原始回字节打出来, 便于区分"完全没回"与"回了但解析不了"
+        if stat.timeout <= 3 then
+            local hex = respData or ""
+            hex = #hex > 0 and (hex:gsub(".", function(c) return string.format("%02x", c:byte()) end)) or "(无字节)"
+            log.warn("poll", string.format("timeout #%d addr=%d rx=%s", stat.timeout, reg.addr, hex))
+        end
         return
     end
     if f.err then
@@ -198,6 +204,65 @@ local function poll_task()
         okBefore = stat.ok
         if sys then sys.wait(interval) end
     end
+end
+
+-- 总线裸探针: 发一帧原始请求, 抓回所有原始字节(不做 CRC 判定),
+-- 用于现场区分"没发出去/从机没回"与"回了但参数不匹配"
+local rawCap = nil
+local function raw_on_receive(id, len)
+    if id ~= mbus.UART_ID then return end
+    if type(len) ~= "number" or len <= 0 then return end
+    while true do
+        local ok, data = pcall(uart.read, id, 512)
+        if not ok then return end
+        if type(data) ~= "string" or #data == 0 then break end
+        if rawCap then
+            rawCap = rawCap .. data
+            if #rawCap > 256 then rawCap = rawCap:sub(1, 256) end
+        end
+    end
+end
+
+function M.probe_raw(slave, addr, qty, timeout_ms)
+    slave = slave or (lastCfg and lastCfg.slave) or cfg.SLAVE_ADDR
+    addr = addr or 0
+    qty = qty or 1
+    timeout_ms = timeout_ms or (lastCfg and lastCfg.timeout) or cfg.TIMEOUT_MS
+    local frame, err = mbus.build_read(slave, addr, qty)
+    if not frame then return nil, tostring(err) end
+    if not running then
+        local ok, e = pcall(uart.setup, mbus.UART_ID, lastCfg and lastCfg.baud or cfg.BAUD,
+            lastCfg and lastCfg.databits or cfg.DATABITS,
+            lastCfg and lastCfg.stopbits or cfg.STOPBITS,
+            mbus.parity_to_uart(lastCfg and lastCfg.parity or cfg.PARITY))
+        if not ok then return nil, "uart setup fail: " .. tostring(e) end
+        if gpio then pcall(gpio.setup, mbus.DE_PIN, 0) end
+    end
+    drain()
+    rawCap = ""
+    pcall(uart.on, mbus.UART_ID, "receive", raw_on_receive)
+    local txok = pcall(uart.write, mbus.UART_ID, frame)
+    de_high()
+    local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD)
+    if sys then sys.wait(hold) end
+    de_low()
+    local waited = 0
+    while waited < timeout_ms do
+        if #rawCap > 0 and mbus.parse_frame(rawCap) then break end
+        if sys then sys.wait(5) end
+        waited = waited + 5
+    end
+    local cap = rawCap or ""
+    rawCap = nil
+    if running then pcall(uart.on, mbus.UART_ID, "receive", on_receive) end
+    return {
+        tx_ok = txok and true or false,
+        tx_hex = (frame:gsub(".", function(c) return string.format("%02x", c:byte()) end)),
+        rx_len = #cap,
+        rx_hex = #cap > 0 and (cap:gsub(".", function(c) return string.format("%02x", c:byte()) end)) or "",
+        parsed = mbus.parse_frame(cap) ~= nil,
+        slave = slave, addr = addr, qty = qty,
+    }
 end
 
 function M.reload_cfg()

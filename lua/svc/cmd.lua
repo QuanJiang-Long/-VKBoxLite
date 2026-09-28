@@ -249,6 +249,22 @@ local function reg_cmds()
         M.reply("RET:STORE=OK")
     end)
 
+    M.reg("W:RAWTEST", function(arg)
+        local a, b, c = arg:match("^%s*(%d*)%s*,?%s*(%d*)%s*,?%s*(%d*)%s*$")
+        local r, err = poll.probe_raw(
+            a ~= "" and tonumber(a) or nil,
+            b ~= "" and tonumber(b) or nil,
+            c ~= "" and tonumber(c) or nil)
+        if not r then return M.reply("RET:FAIL:RAWTEST:" .. tostring(err)) end
+        M.reply(string.format("RET:RAWTEST tx=%s rx_len=%d parsed=%s rx=%s",
+            r.tx_hex, r.rx_len, tostring(r.parsed), r.rx_hex == "" and "(空)" or r.rx_hex))
+        if r.rx_len == 0 then
+            log.warn("cmd", "RAWTEST 无任何回字节: 查 AB线/从机地址/波特率/DE极性/从机是否上电")
+        elseif not r.parsed then
+            log.warn("cmd", "RAWTEST 有字节但 CRC 不过: 查 波特率/校验位/停止位/AB线序")
+        end
+    end)
+
     M.reg("R:FRAMES", function()
         M.reply("RET:FRAMES=" .. jencode(mon.recent_frames(10)))
     end)

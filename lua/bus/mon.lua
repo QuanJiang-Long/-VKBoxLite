@@ -16,30 +16,45 @@ local M = {}
 local running, gen = false, 0
 local rxbuf = ""
 local pendingReqs, lastReqs = {}, {}
+local MAX_PENDING_PER_FC = 4
+local PAIR_TIMEOUT_MS = 250
 local stat = { frames = 0, reqs = 0, rsps = 0, errs = 0, paired = 0, orphans = 0 }
 
-local function key(slave, qty) return slave .. ":" .. tostring(qty) end
+local function key(slave, qty) return tostring(slave) .. ":" .. tostring(qty) end
 
-local function pending_push(f)
+local function push_req(f)
     local q = pendingReqs[f.fc]
     if not q then q = {}; pendingReqs[f.fc] = q end
-    while #q >= 4 do table.remove(q, 1) end
-    q[#q + 1] = { slave = f.slave, addr = f.addr, qty = f.qty or 1, t = os.time() }
+    q[#q + 1] = { fc = f.fc, slave = f.slave, addr = f.addr, qty = f.qty, ts = os.clock() }
+    while #q > MAX_PENDING_PER_FC do table.remove(q, 1) end
+    lastReqs[key(f.slave, f.qty)] = { fc = f.fc, slave = f.slave, addr = f.addr, qty = f.qty, ts = os.clock() }
 end
 
-local function pending_pop(f)
-    local q = pendingReqs[f.fc]
+local function guess_last_req(fc, slave, qty)
+    if not qty then return nil end
+    local r = lastReqs[key(slave, qty)]
+    if not r or r.fc ~= fc then return nil end
+    if (os.clock() - r.ts) > 10 then return nil end
+    return r
+end
+
+local function pop_req(fc, slave, qty, now)
+    local q = pendingReqs[fc]
     if not q or #q == 0 then return nil end
-    local now = os.time()
-    while #q > 0 and now - q[1].t > 1 do table.remove(q, 1) end
+    while #q > 0 do
+        if (now - q[1].ts) <= (PAIR_TIMEOUT_MS / 1000) then break end
+        table.remove(q, 1)
+    end
+    if #q == 0 then return nil end
     for i = #q, 1, -1 do
-        local p = q[i]
-        if p.slave == f.slave and (p.qty == f.qty or f.qty == nil) then
-            table.remove(q, i)
-            return p
+        local r = q[i]
+        table.remove(q, i)
+        if fc >= 3 then
+            if r.qty == qty then return r end
+        else
+            return r
         end
     end
-    table.remove(q, 1)
     return nil
 end
 
@@ -50,27 +65,21 @@ local function process_frame(s)
         stat.errs = stat.errs + 1
     elseif f.kind == "rsp" then
         stat.rsps = stat.rsps + 1
-        if not pending_pop(f) then
-            local k = key(f.slave, f.qty or 1)
-            local p = lastReqs[k]
-            if p and os.time() - p.t < 10 then
-                stat.paired = stat.paired + 1
-            else
-                stat.orphans = stat.orphans + 1
-            end
-        else
+        local now = os.clock()
+        if pop_req(f.fc, f.slave, f.qty, now) then
             stat.paired = stat.paired + 1
+        else
+            local g = guess_last_req(f.fc, f.slave, f.qty)
+            if g then stat.paired = stat.paired + 1 else stat.orphans = stat.orphans + 1 end
         end
     elseif f.kind == "req" then
         stat.reqs = stat.reqs + 1
-        pending_push(f)
-        lastReqs[key(f.slave, f.qty or 1)] = { t = os.time() }
+        push_req(f)
     end
     if store then store.begin_round() end
     collector.push_frame(f)
     pcall(uart.write, mbus.VUART_DEBUG, "RX485:" .. f.hex)
 end
-
 local function on_receive(id, len)
     if id ~= mbus.UART_ID then return end
     if type(len) ~= "number" or len <= 0 then return end
@@ -83,12 +92,27 @@ local function on_receive(id, len)
     end
 end
 
+-- CRC 试探法切帧: 逐个偏移找第一个 CRC 合法且长度自洽的帧,
+-- 与 poll 同一套策略; 找不到才丢 1 字节继续找
+local function next_frame()
+    for off = 1, #rxbuf do
+        local s = rxbuf:sub(off)
+        local n = mbus.try_extract_len(s)
+        if n and #s >= n then
+            local f = mbus.parse_frame(s:sub(1, n))
+            if f then
+                rxbuf = s:sub(n + 1)
+                return s:sub(1, n)
+            end
+        end
+    end
+    return nil
+end
+
 local function task()
     while running do
-        local n = mbus.try_extract_len(rxbuf)
-        if n and #rxbuf >= n then
-            local s = rxbuf:sub(1, n)
-            rxbuf = rxbuf:sub(n + 1)
+        local s = next_frame()
+        if s then
             process_frame(s)
         elseif #rxbuf > 0 then
             rxbuf = rxbuf:sub(2)
