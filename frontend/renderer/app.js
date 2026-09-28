@@ -563,8 +563,13 @@ async function readVal() {
       if (it.name) byName[it.name] = it;
       if (it.addr != null) byAddr[String(it.addr)] = it;
     });
-    let hit = 0;
+    let hit = 0, total = 0;
     el.paramTbody.querySelectorAll('tr').forEach(tr => {
+      // 空表提示行没有这些 class，必须先判空。
+      // 少了这道判断，占位行会让 querySelector(...).value 抛 TypeError，
+      // 被下面的 catch 吞成一句英文 "Cannot read properties of null"
+      if (!tr.querySelector('.c-addr')) return;
+      total++;
       const name = tr.querySelector('.c-name').value.trim();
       const addr = parseInt(tr.querySelector('.c-addr').value, 10);
       const type = tr.querySelector('.c-type').value;
@@ -591,15 +596,18 @@ async function readVal() {
         cell.value = '';
       }
     });
-    if (hit === 0 && list.length === 0) {
+    if (total === 0) {
+      status('参数列表为空，请先添加寄存器', false);
+      toast('参数列表为空，请先添加寄存器');
+    } else if (hit === 0 && list.length === 0) {
       status('暂无数据：设备可能未进入轮询模式', false);
       toast('没有读到数据，请先在「运行模式」页进入轮询模式');
     } else {
-      status('实时值已刷新（' + hit + '/' + S.regs.length + ' 点有值）', true);
+      status('实时值已刷新（' + hit + '/' + total + ' 点有值）', true);
     }
   } catch (e) {
-    status('读取实时值失败：' + e.message, false);
-    toast('读取实时值失败：' + e.message);
+    status('读取实时值失败：' + cfgErr(e.message), false);
+    toast('读取实时值失败：' + cfgErr(e.message));
   }
 }
 
