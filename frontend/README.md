@@ -109,7 +109,7 @@ frontend/
 
 | 标签页 | 内容 |
 |---|---|
-| **首页** | 运行状态总览 + 快速操作 |
+| **首页** | 运行状态总览 + MQTT 服务器 |
 | **运行模式** | idle / poll / sniff 三卡片切换（互斥）+ 开机默认模式 + 当前运行详情 |
 | **poll模式** | 两个子标签：**串口1（485总线）**（串口参数 + 参数列表）、**MQTT配置**（MQTT 连接参数 + 连接与上报状态） || **sniff模式** | 总线报文实时视图（REQ/RSP/ERR/配对标注 + 类型筛选）+ 轮询表推断 + 总线诊断 |
 
@@ -147,7 +147,7 @@ npm run dist:portable   # 或输出绿色单文件 exe
 
 | 标签页 | 用途 |
 |---|---|
-| **首页** | 运行状态总览（模式/轮询任务/数据点/MQTT/看门狗/报文）+ **MQTT 服务器地址与端口** + 快速操作 |
+| **首页** | 运行状态总览（模式/轮询任务/数据点/MQTT/看门狗/报文）+ **MQTT 服务器地址与端口** |
 | **运行模式** | idle / poll / sniff 三卡片切换（互斥）+ 开机默认模式 + 当前运行详情 |
 | **poll模式** | 两个子标签：**串口1（485总线）**（485 串口参数 + 参数列表）、**MQTT配置**（MQTT 连接参数 + 连接与上报状态） |
 | **sniff模式** | 总线报文实时视图（REQ/RSP/ERR/配对标注 + 类型筛选）+ 轮询表推断 + 总线诊断 |
@@ -170,7 +170,7 @@ npm run dist:portable   # 或输出绿色单文件 exe
 | 读设备信息 | `R:INFO` | `RET:INFO={json}` | SN/IMEI/ICCID/CSQ/RSRP/版本/项目/服务器/波特率/从机/寄存器数/锁状态 |
 | 读 poll 配置 | `R:CFG` | `RET:CFG={json}` | `{cfg:{baud,databits,parity,stopbits,slave,interval_ms,timeout_ms,regs},src}` |
 | 保存 poll 配置 | `W:CFG={json}` | `RET:CFG=OK` / `RET:FAIL:CFG:原因` | 串口参数变化自动重启轮询任务；间隔/寄存器表热更新 |
-| 读寄存器表 | `R:REG` | `RET:REG=[json]` | `[{addr,count,name,dtype,byteOrder,wordOrder}]` |
+| 读寄存器表 | `R:REG` | `RET:REG=[json]` | `[{addr,count,name,alias,dtype}]` |
 | 保存寄存器表 | `W:REG=[json]` | `RET:REG=OK` | 校验通过后热加载 |
 | 读 sniff 配置 | `R:SNIFFCFG` | `RET:SNIFFCFG={json}` | 旁听模式的串口参数 |
 | 保存 sniff 配置 | `W:SNIFFCFG={json}` | `RET:SNIFFCFG=OK` | 旁听运行中会自动重启生效 |
@@ -256,9 +256,8 @@ npm run dist:portable   # 或输出绿色单文件 exe
 | 数据类型 | 解码方式 | uint16/int16（1 寄存器）、uint32/int32/float32（2）、uint64/int64/float64（4） |
 | 寄存器个数 | 从起始地址起**连续读取的寄存器个数** | 1~125，必须是类型宽度的整数倍 |
 | 物理标识符 | 数据点名称，上报字段名 | ≤16 字符，只能含字母数字下划线 |
-| 字节序 | 同一寄存器内部两个字节是否交换 | BE（默认，标准）/ LE |
-| 字序 | 多个寄存器之间是否交换 | BE（默认，标准）/ LE |
 | 值 | 只读，设备解好的实时值 | 读失败时显示原始 hex 或留空 |
+| 时间 | 只读，该值采集时刻 | 设备 `os.time()` 秒级时间戳，显示为 HH:MM:SS |
 
 > float32/float64 按 IEEE754 解析；int64/uint64 超出 2^53 时前端用 BigInt
 > 精确显示（设备端 Lua 走双精度会有精度损失，可看 hex 字段核对）。
@@ -267,7 +266,7 @@ npm run dist:portable   # 或输出绿色单文件 exe
 
 | 文件 | 职责 |
 |---|---|
-| `lua/bus/mbus_common.lua` | 协议层：CRC16 / 帧构造解析 / 8 类型解码 / 字节序字序 / DE 时长精算 / CRC 试探切帧 |
+| `lua/bus/mbus.lua` | 协议层：CRC16 / 帧构造解析 / 8 类型解码 / DE 时长精算 / CRC 试探切帧 |
 | `lua/bus/mbus_poll.lua` | Modbus 主机轮询：任务代际令牌、早返回响应、写事务注入队列、DE 手动控制、残帧清理 |
 | `lua/bus/mbus_mon.lua` | 旁听嗅探：DE 恒低纯接收、CRC 试探切帧、REQ/RSP 配对 + no-match 兜底、本地存储 + VCOM 透传 |
 | `lua/bus/mbus_ctrl.lua` | 模式仲裁：poll/sniff/stop 互斥切换，开机默认 idle |

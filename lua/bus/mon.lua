@@ -193,7 +193,6 @@ function M.apply_infer()
             name = "s" .. a.slave .. "_r" .. a.addr,
             alias = "s" .. a.slave .. "_r" .. a.addr,
             addr = a.addr, count = a.count, dtype = "uint16",
-            byteOrder = "BE", wordOrder = "BE",
         }
     end
     local c = cfgstore.load_poll()

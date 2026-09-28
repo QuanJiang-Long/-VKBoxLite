@@ -125,7 +125,7 @@ local function poll_reg(reg)
         log.warn("poll", string.format("Rx err fc=%02x code=%d addr=%d %s", f.fc or 0, f.code or 0, reg.addr, alias))
         return
     end
-    local vals, hex = mbus.parse_regs(f.data, reg.dtype or "uint16", reg.byteOrder, reg.wordOrder)
+    local vals, hex = mbus.parse_regs(f.data, reg.dtype or "uint16")
     if not vals then
         log.warn("poll", string.format("Rx parse fail addr=%d %s hex=%s", reg.addr, alias, hex))
         return

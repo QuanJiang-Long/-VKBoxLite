@@ -69,6 +69,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .param-table input[type="number"],
 .param-table select{width:90%;padding:3px;border:1px solid #ccc;}
 .param-table td.val-cell input{background:#f4faf5;color:#0a7d2c;font-weight:bold;}
+.param-table td.ts-cell input{background:#f7f7f7;color:#888;font-size:12px;
+    font-family:Consolas,monospace;}
 .btn-del{color:#c0392b;border:none;background:transparent;cursor:pointer;}
 .btn-add-row{margin-bottom:8px;padding:4px 10px;}
 /* 模式切换 */
@@ -127,13 +129,6 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .switch .sl:before{content:"";position:absolute;height:18px;width:18px;left:2px;top:2px;background:#fff;border-radius:50%;transition:.2s;}
 .switch input:checked + .sl{background:#409eff;}
 .switch input:checked + .sl:before{transform:translateX(20px);}
-/* 字节序/字序说明块（添加寄存器弹窗） */
-.order-help{grid-column:1/-1;background:#f6f9ff;border:1px solid #d8e6fb;border-left:3px solid #409eff;
-    border-radius:4px;padding:10px 12px;font-size:12px;line-height:1.8;color:#555;}
-.order-help .oh-title{font-weight:bold;color:#333;margin-bottom:2px;}
-.order-help code{background:#eef3fb;border:1px solid #dde6f4;border-radius:3px;padding:0 4px;
-    font-family:Consolas,monospace;color:#c0392b;font-size:11px;}
-.order-help .oh-note{margin-top:6px;padding-top:6px;border-top:1px dashed #d8e6fb;color:#777;}
 /* 表头问号提示 */
 .th-help{display:inline-block;width:14px;height:14px;line-height:14px;text-align:center;
     border-radius:50%;background:#e8eef7;color:#5b7fb5;font-size:11px;cursor:help;margin-left:3px;}
@@ -220,26 +215,6 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                         <span class="hint" id="hMqRealId" style="color:#0a7d2c;font-weight:bold;">--</span>
                         <span class="hint">当前真正发给 broker 的 clientId</span>
                     </div>
-                    <p style="color:#999;font-size:12px;margin-top:8px;line-height:1.6;">
-                        只改地址/端口/ClientID 时用这里最方便；用户名、密码、topic 等完整配置在
-                        「poll模式 → MQTT配置」子标签。平台返回
-                        <b style="color:#c0392b;">CONACK 0x05 未授权</b>时，优先核对
-                        ClientID 格式（平台多按 clientId 认设备），其次才是补用户名密码。
-                    </p>
-                </div>
-                <div class="panel">
-                    <div class="panel-title">快速操作</div>                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                        <button id="btnQuickPoll">进入轮询模式</button>
-                        <button id="btnQuickSniff">进入旁听模式</button>
-                        <button id="btnQuickStop">停止 485</button>
-                        <button id="btnQuickReport">立即上报</button>
-                        <button class="danger" id="btnQuickRst">恢复默认配置</button>
-                    </div>
-                    <p style="color:#999;font-size:12px;margin-top:10px;line-height:1.6;">
-                        说明：485 总线一次只能有一个主人。"轮询模式"由本设备作主机主动读取从机；
-                        "旁听模式"本设备只收不发，记录总线上其它主机的通讯（GPIO8 保持接收态，绝不驱动总线）。
-                        开机默认为 idle（不主动采），掉电重启后按"运行模式"页的开机默认模式恢复。
-                    </p>
                 </div>
             </div>
 
@@ -381,22 +356,16 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                                 <th style="width:110px;">上报别名
                                     <span class="th-help" title="MQTT 上报里 name 字段显示的中文名，如「电压」。留空则用物理标识符。限 16 字节。">?</span>
                                 </th>
-                                <th style="width:100px;">字节序
-                                    <span class="th-help" title="同一寄存器内部两个字节谁在前。BE=大端(标准)，LE=小端">?</span>
-                                </th>
-                                <th style="width:100px;">字序
-                                    <span class="th-help" title="多个寄存器之间谁在前，只影响 32/64 位类型。BE=大端(标准)，LE=小端">?</span>
-                                </th>
                                 <th style="width:170px;">值</th>
+                                <th style="width:100px;">时间</th>
                                 <th style="width:60px;">操作</th>
                             </tr>
                         </thead>
                         <tbody id="paramTbody"></tbody>
                     </table>
                     <p style="color:#999;font-size:12px;margin-top:8px;line-height:1.6;">
-                        字节序：同一寄存器内部两个字节是否交换；字序：多个寄存器之间是否交换。
-                        默认都是 BE（大端，Modbus 标准）。float32/float64 按 IEEE754 解析。
-                        32/64 位类型会占用 2/4 个寄存器，所以"寄存器个数"需为类型宽度的整数倍。<br>
+                        32/64 位类型会占用 2/4 个寄存器，所以"寄存器个数"需为类型宽度的整数倍。
+                        float32/float64 按 IEEE754 大端解析（Modbus 标准）。<br>
                         上报别名：填中文名（如「电压」），MQTT 上报的 <code>name</code> 字段用它，
                         <code>id</code> 字段仍用物理标识符；留空则 <code>name</code> 等于 <code>id</code>。
                     </p>
@@ -594,25 +563,6 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
             <label>寄存器个数</label>
             <input id="regCount" type="number" value="1" min="1" max="125">
             <span class="hint">从"寄存器地址"起连续读几个；16 位填 1，32 位填 2，64 位填 4</span>
-            <label>字节序</label>
-            <select id="regByteOrder">
-                <option value="BE" selected>BE 大端（标准）</option>
-                <option value="LE">LE 小端（每寄存器内字节交换）</option>
-            </select>
-            <label>字序</label>
-            <select id="regWordOrder">
-                <option value="BE" selected>BE 大端（标准）</option>
-                <option value="LE">LE 小端（多寄存器间交换）</option>
-            </select>
-            <div class="order-help">
-                <div class="oh-title">字节序 / 字序 怎么选</div>
-                <div class="oh-row"><b>字节序</b>：同一个寄存器内部，高低两个字节谁在前。<br>
-                    读到 <code>0x01 0xF4</code> → BE 当成 <code>500</code>，LE 当成 <code>61441</code></div>
-                <div class="oh-row"><b>字序</b>：跨多个寄存器时，寄存器之间谁在前（只影响 32/64 位类型）。<br>
-                    读到 <code>0x00 0x01 | 0x00 0x00</code> → BE 当成 <code>65536</code>，LE 当成 <code>1</code></div>
-                <div class="oh-note">16 位类型（int16/uint16）只占 1 个寄存器，<b>字序不起作用</b>。<br>
-                    绝大多数设备两个都选 BE；只有读数明显离谱（差 256 倍 / 字节对不上）时才试 LE。</div>
-            </div>
             <div></div>
         </div>
         <div class="modal-footer">

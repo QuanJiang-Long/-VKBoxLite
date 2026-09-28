@@ -143,21 +143,6 @@ M.TYPE_WIDTH = {
     uint64 = 4, int64 = 4, float64 = 4,
 }
 
-local function swap_pairs(b, byte_order)
-    if byte_order == "LE" then
-        local n = #b
-        local out = {}
-        for i = 1, n, 2 do
-            out[i] = b:byte(i + 1)
-            out[i + 1] = b:byte(i)
-        end
-        return out
-    end
-    local out = {}
-    for i = 1, #b do out[i] = b:byte(i) end
-    return out
-end
-
 local function bytes_to_float(b, is_double)
     if is_double then
         if #b ~= 8 then return nil end
@@ -197,24 +182,16 @@ local function to_i64(b)
     return v
 end
 
--- 按数据类型直接解释; 字节序默认 BE(Modbus 惯例), 需要 LE 时才显式传
-function M.parse_value(data, offset, dtype, byte_order, word_order)
+-- 按数据类型直接解释。Modbus 标准是大端, 不再支持 LE:
+-- 前端界面已去掉字节序/字序选择, 保留 LE 分支就是死代码
+function M.parse_value(data, offset, dtype)
     local w = M.TYPE_WIDTH[dtype]
     if not w then return nil, "bad dtype" end
-    byte_order = byte_order or "BE"
-    word_order = word_order or "BE"
     local nbytes = w * 2
     local raw = data:sub(offset * 2 + 1, offset * 2 + nbytes)
     if #raw < nbytes then return nil, "short data" end
-    local b = swap_pairs(raw, byte_order)
-    if w > 1 and word_order == "LE" then
-        local rev = {}
-        for wi = w, 1, -1 do
-            rev[#rev + 1] = b[(wi - 1) * 2 + 1]
-            rev[#rev + 1] = b[(wi - 1) * 2 + 2]
-        end
-        b = rev
-    end
+    local b = {}
+    for i = 1, nbytes do b[i] = raw:byte(i) end
     if dtype == "float32" then
         return bytes_to_float({ b[1], b[2], b[3], b[4] }, false)
     elseif dtype == "float64" then
@@ -237,16 +214,14 @@ function M.parse_value(data, offset, dtype, byte_order, word_order)
     return nil, "bad dtype"
 end
 
--- 批量解释: 字节序默认 BE, 按 dtype 直接解
-function M.parse_regs(data, dtype, byte_order, word_order)
+-- 批量解释: 固定大端, 按 dtype 直接解
+function M.parse_regs(data, dtype)
     local w = M.TYPE_WIDTH[dtype]
     if not w then return nil, "bad dtype" end
-    byte_order = byte_order or "BE"
-    word_order = word_order or "BE"
     local out, hex = {}, {}
     local n = #data // 2
     for off = 0, n - w, w do
-        local v = M.parse_value(data, off, dtype, byte_order, word_order)
+        local v = M.parse_value(data, off, dtype)
         if v == nil then break end
         out[#out + 1] = v
     end

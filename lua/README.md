@@ -323,4 +323,11 @@ topic 里的 `{SN}` 取的是**烧号的 SN**（`_G.get_device_sn()`），与 pa
   前端首页"存储空间"栏、store.stats 的 `fs` 段、R:DISK 的探测字段全部删除
 - 看门狗参数、MQTT 用法、启动顺序均对照官方文档核对修正
 - 切帧统一为 CRC 试探法（每个候选长度都验 CRC，fc15/16 用 byte(7)=bc）；事务前 drain 清残帧（v1 只在失败后 drain）
-- 配置校验与原工程对齐：串口参数范围 / MAX_REGS=128 / 标识符去重 / count%width，save 上限 2048
+- 配置校验与原工程对齐：串口参数范围 / MAX_REGS=128 / 标识符去重 / count%width
+- **字节序/字序已整体移除**（按需求）：前端参数列表和添加寄存器弹窗的选择项删除，
+  设备端 `normalize_reg` 的 `byteOrder`/`wordOrder` 字段、`mbus.parse_value/parse_regs` 的
+  字节序参数、`swap_pairs` 辅助函数全部删除，解码固定走 Modbus 标准大端。
+  老配置里残留的这两个字段会被 `normalize_reg` 忽略，不影响升级
+- **W:CFG 保存失败已修**：`save_json` 上限 512 太小，5 个寄存器（含别名）就超限，
+  一直回 `too large`，前端只看到"保存失败"。上限与 `prov.lua` 的 `MAX_BUF` 对齐到 16KB
+  （`W:CFG` 是一整行命令，行超 `MAX_BUF` 会被整缓冲丢弃，存得下也传不过来）

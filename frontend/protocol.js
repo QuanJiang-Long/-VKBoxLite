@@ -113,46 +113,25 @@
   }
 
   // ---------- 寄存器值按数据类型解码 ----------
-  // 与 lua/bus/mbus_common.lua 的 parse_value 完全一致（含字节序/字序）
+  // 与 lua/bus/mbus.lua 的 parse_value 完全一致（固定大端）
   // regs: number[]（原始 16 位寄存器值，来自 R:VAL 的 value 或帧的 values）
   // type: uint16/int16/uint32/int32/float32/uint64/int64/float64
-  // byteOrder: 'BE'(默认)/'LE'  每个寄存器内部高低字节交换
-  // wordOrder: 'BE'(默认)/'LE'  多个寄存器之间顺序交换
   const TYPE_WIDTH = {
     uint16: 1, int16: 1,
     uint32: 2, int32: 2, float32: 2,
     uint64: 4, int64: 4, float64: 4
   };
 
-  function decodeValues(regs, type, count, byteOrder, wordOrder) {
+  function decodeValues(regs, type, count) {
     const out = [];
     if (!Array.isArray(regs)) return out;
     const width = TYPE_WIDTH[type] || 1;
-    byteOrder = byteOrder || 'BE';
-    wordOrder = wordOrder || 'BE';
     for (let i = 0; i + width <= regs.length && out.length < count; i += width) {
-      // 1. 切成字（每字 2 字节）
-      const words = [];
+      // 切成字节（每寄存器 2 字节，大端）
+      const b = [];
       for (let w = 0; w < width; w++) {
         const r = regs[i + w] & 0xFFFF;
-        words.push([Math.floor(r / 256), r % 256]);
-      }
-      // 2. 字序
-      if (width > 1 && wordOrder === 'LE') {
-        for (let w = 0; w < Math.floor(width / 2); w++) {
-          const o = width - 1 - w;
-          const t = words[w]; words[w] = words[o]; words[o] = t;
-        }
-      }
-      // 3. 展平
-      const b = [];
-      for (const w of words) { b.push(w[0]); b.push(w[1]); }
-      // 4. 字节序（每字内部）
-      if (byteOrder === 'LE') {
-        for (let w = 0; w < width; w++) {
-          const j = w * 2;
-          const t = b[j]; b[j] = b[j + 1]; b[j + 1] = t;
-        }
+        b.push(Math.floor(r / 256), r % 256);
       }
       out.push(decodeBytes(b, type));
     }

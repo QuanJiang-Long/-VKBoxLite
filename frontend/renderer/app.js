@@ -4,7 +4,7 @@
 // 浏览器预览模式：无 window.serial 时自动启用 mock，不影响界面联调
 //
 // 页面分工：
-//   首页       —— 运行状态总览 + 快速操作
+//   首页       —— 运行状态总览 + MQTT 服务器
 //   运行模式   —— poll / sniff / idle 互斥切换 + 开机默认模式
 //   poll模式   —— 485 串口参数 + 寄存器表 + MQTT 连接与上报
 //   sniff模式  —— 解译帧实时视图 + 轮询表推断 + 总线诊断
@@ -19,7 +19,7 @@ const S = {
   busy: false,         // 是否有指令在等待应答
   pending: null,       // { cmd, resolve, timer, settle } 当前等待的应答
   cfg: null,           // 设备返回的 poll 配置（含 regs）
-  regs: [],            // 寄存器表 [{addr,count,name,dtype,byteOrder,wordOrder}]
+  regs: [],            // 寄存器表 [{addr,count,name,alias,dtype}]
   mode: 'idle',        // 当前 485 运行模式（始终跟随设备，不被用户选择污染）
   modeStat: null,      // R:MODE 返回的完整状态
   modePending: null,   // 用户已选但设备尚未确认的模式；null = 无待应用选择
@@ -81,8 +81,6 @@ const el = new Proxy({
   hMqHost: $('hMqHost'), hMqPort: $('hMqPort'), hMqErr: $('hMqErr'),
   hMqClientId: $('hMqClientId'), hMqRealId: $('hMqRealId'),
   btnHomeMqttSave: $('btnHomeMqttSave'),
-  btnQuickPoll: $('btnQuickPoll'), btnQuickSniff: $('btnQuickSniff'),
-  btnQuickStop: $('btnQuickStop'), btnQuickReport: $('btnQuickReport'), btnQuickRst: $('btnQuickRst'),
   // MQTT 页
   btnMqttRefresh: $('btnMqttRefresh'), btnMqttSave: $('btnMqttSave'),
   btnMqttReport: $('btnMqttReport'), btnMqttReset: $('btnMqttReset'),
@@ -138,6 +136,16 @@ function esc(s) {
   return String(s === null || s === undefined ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// 设备 ts 是秒级 Unix 时间戳(collector.push_data 默认 os.time())
+// 秒就够看了：同一天内的采集时刻, 跨天看不出但 485 现场不需要
+function fmtTs(ts) {
+  if (ts == null || ts === '' || isNaN(+ts) || +ts <= 0) return '';
+  const d = new Date(+ts * 1000);
+  if (isNaN(d.getTime())) return '';
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
 
 //---------------------------------------------------------------------
@@ -429,12 +437,10 @@ function collectRegs() {
     const dtype = tr.querySelector('.c-type').value;
     const name = tr.querySelector('.c-name').value.trim();
     const count = parseInt(tr.querySelector('.c-count').value, 10);
-    const byteOrder = tr.querySelector('.c-bo').value;
-    const wordOrder = tr.querySelector('.c-wo').value;
     // 上报别名：MQTT 的 name 字段。空串照样下发，设备端会退回用标识符
     const alias = tr.querySelector('.c-alias').value.trim();
     if (!isNaN(addr) && dtype && count > 0) {
-      out.push({ addr, count, name, alias, dtype, byteOrder, wordOrder });
+      out.push({ addr, count, name, alias, dtype });
     }
   });
   return out;
@@ -488,15 +494,15 @@ async function readVal() {
       const addr = parseInt(tr.querySelector('.c-addr').value, 10);
       const type = tr.querySelector('.c-type').value;
       const count = parseInt(tr.querySelector('.c-count').value, 10) || 1;
-      const bo = tr.querySelector('.c-bo').value;
-      const wo = tr.querySelector('.c-wo').value;
       const cell = tr.querySelector('.c-val');
+      const tsCell = tr.querySelector('.c-ts');
       const it = (name && byName[name]) || byAddr[String(addr)];
+      if (tsCell) tsCell.value = '';
       if (it) {
         hit++;
-        // 设备已解好的值优先；只有给了原始 regs 时才前端重解
+        // 设备已解好的值优先；只有给了原始 regs 时才前端重解(固定 BE)
         if (it.regs && Array.isArray(it.regs)) {
-          const vals = Protocol.decodeValues(it.regs, type, count, bo, wo);
+          const vals = Protocol.decodeValues(it.regs, type, count);
           cell.value = vals.map(Protocol.fmt).join(', ');
         } else if (it.value !== undefined && it.value !== null) {
           cell.value = Protocol.fmt(it.value);
@@ -505,6 +511,7 @@ async function readVal() {
         } else {
           cell.value = '';
         }
+        if (tsCell) tsCell.value = fmtTs(it.ts);
       } else {
         cell.value = '';
       }
@@ -531,32 +538,26 @@ function renderRegTable() {
   const rows = (S.regs && S.regs.length) ? S.regs : [];
   if (rows.length === 0) {
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td colspan="9" style="color:#999;padding:14px;">暂无寄存器，点「新增寄存器」添加</td>';
+    tr.innerHTML = '<td colspan="8" style="color:#999;padding:14px;">暂无寄存器，点「新增寄存器」添加</td>';
     el.paramTbody.appendChild(tr);
     return;
   }
-  rows.forEach(r => addRegRow(r.addr, r.dtype || r.type, r.name, r.alias, r.count,
-                              r.byteOrder, r.wordOrder));
+  rows.forEach(r => addRegRow(r.addr, r.dtype || r.type, r.name, r.alias, r.count));
 }
 
-function addRegRow(addr, type, name, alias, count, byteOrder, wordOrder) {
+function addRegRow(addr, type, name, alias, count) {
   const tr = document.createElement('tr');
   const opts = ALL_TYPES
     .map(t => '<option' + (t === type ? ' selected' : '') + '>' + t + '</option>').join('');
-  const boOpts = ['BE', 'LE']
-    .map(t => '<option' + (t === (byteOrder || 'BE') ? ' selected' : '') + '>' + t + '</option>').join('');
-  const woOpts = ['BE', 'LE']
-    .map(t => '<option' + (t === (wordOrder || 'BE') ? ' selected' : '') + '>' + t + '</option>').join('');
-    tr.innerHTML =
+  tr.innerHTML =
     '<td><input class="c-addr" type="number" value="' + addr + '"></td>' +
     '<td><select class="c-type">' + opts + '</select></td>' +
     '<td><input class="c-count" type="number" value="' + (count || 1) + '" min="1" max="125"></td>' +
     '<td><input class="c-name" type="text" value="' + esc(name || '') + '"></td>' +
     '<td><input class="c-alias" type="text" value="' + esc(alias || '') + '" ' +
     'title="MQTT 上报 name 字段的中文名，留空则用标识符"></td>' +
-    '<td><select class="c-bo">' + boOpts + '</select></td>' +
-    '<td><select class="c-wo">' + woOpts + '</select></td>' +
     '<td class="val-cell"><input class="c-val" type="text" value="" readonly></td>' +
+    '<td class="ts-cell"><input class="c-ts" type="text" value="" readonly></td>' +
     '<td><button class="btn-del" onclick="deleteRow(this)">删除</button></td>';
   el.paramTbody.appendChild(tr);
 }
@@ -568,8 +569,6 @@ function addParamRow() {
   $('regId').value = '';
   $('regAlias').value = '';
   $('regCount').value = 1;
-  $('regByteOrder').value = 'BE';
-  $('regWordOrder').value = 'BE';
   $('modalAddReg').style.display = 'flex';
 }
 function closeModal() { $('modalAddReg').style.display = 'none'; }
@@ -579,14 +578,12 @@ function confirmAddReg() {
   const phyId = $('regId').value;
   const alias = $('regAlias').value.trim();
   const cnt = parseInt($('regCount').value, 10);
-  const bo = $('regByteOrder').value;
-  const wo = $('regWordOrder').value;
   if (!type) { alert('请选择数据类型'); return; }
   if (!addr || !cnt) { alert('寄存器地址、寄存器个数不能为空'); return; }
   const W = { uint32: 2, int32: 2, float32: 2, uint64: 4, int64: 4, float64: 4 };
   const w = W[type] || 1;
   if (cnt % w !== 0) { alert(type + ' 占 ' + w + ' 个寄存器，个数需为 ' + w + ' 的整数倍'); return; }
-  addRegRow(parseInt(addr, 10), type, phyId, alias, cnt, bo, wo);
+  addRegRow(parseInt(addr, 10), type, phyId, alias, cnt);
   closeModal();
 }
 
@@ -1132,23 +1129,6 @@ el.comSel.onchange = () => { S.port = el.comSel.value; };
 // 首页
 el.btnHomeRefresh.onclick = async () => { await readHome(); await readMode(); await readMqtt(); };
 el.btnHomeMqttSave.onclick = saveHomeMqtt;
-el.btnQuickPoll.onclick = () => applyMode('poll');
-el.btnQuickSniff.onclick = () => applyMode('sniff');
-el.btnQuickStop.onclick = () => applyMode('stop');
-el.btnQuickReport.onclick = reportNow;
-
-el.btnQuickRst.onclick = async () => {
-  if (!confirm('确定恢复默认配置？\n将清空设备保存的 485 配置和 MQTT 配置。')) return;
-  try {
-    await sendCmd(Protocol.Enc.rst(), 'RST', 6000);
-    status('已恢复默认配置', true);
-    toast('已恢复默认配置');
-    await readCfg(); await readMqtt(); await readMode();
-  } catch (e) {
-    status('恢复失败：' + e.message, false);
-    toast('恢复失败：' + e.message);
-  }
-};
 
 // 运行模式页
 el.btnModeRefresh.onclick = readMode;
@@ -1267,9 +1247,9 @@ const MOCK = {
     baud: 9600, databits: 8, parity: 0, stopbits: 1, slave: 1,
     interval_ms: 3000, timeout_ms: null,
     regs: [
-      { addr: 0, count: 2, name: 'sensor1', alias: '传感器1', dtype: 'uint16', byteOrder: 'BE', wordOrder: 'BE' },
-      { addr: 2, count: 2, name: 'sensor2', alias: '传感器2', dtype: 'int16', byteOrder: 'BE', wordOrder: 'BE' },
-      { addr: 4, count: 2, name: 'temp', alias: '温度', dtype: 'float32', byteOrder: 'BE', wordOrder: 'BE' }
+      { addr: 0, count: 2, name: 'sensor1', alias: '传感器1', dtype: 'uint16' },
+      { addr: 2, count: 2, name: 'sensor2', alias: '传感器2', dtype: 'int16' },
+      { addr: 4, count: 2, name: 'temp', alias: '温度', dtype: 'float32' }
     ]
   },
   mqtt: { host: 'test.mosquitto.org', port: 1883, user: '', pass: '', ssl: false,
@@ -1323,9 +1303,9 @@ function mockReply(line) {
       resp = 'RET:PULLCFG=' + JSON.stringify({ state: 'waiting', msg: '' });
     } else {
       const regs = [
-        { addr: 16, count: 1, name: 'Ua', alias: '电压', dtype: 'uint16', byteOrder: 'BE', wordOrder: 'BE' },
-        { addr: 15, count: 1, name: 'PT', alias: 'PT1', dtype: 'uint16', byteOrder: 'BE', wordOrder: 'BE' },
-        { addr: 14, count: 1, name: 'CT', alias: 'CT1', dtype: 'uint16', byteOrder: 'BE', wordOrder: 'BE' }
+        { addr: 16, count: 1, name: 'Ua', alias: '电压', dtype: 'uint16' },
+        { addr: 15, count: 1, name: 'PT', alias: 'PT1', dtype: 'uint16' },
+        { addr: 14, count: 1, name: 'CT', alias: 'CT1', dtype: 'uint16' }
       ];
       resp = 'RET:PULLCFG=' + JSON.stringify({
         state: 'done', msg: '',
@@ -1409,7 +1389,7 @@ function mockReply(line) {
       { slave: 1, addr: 100, count: 2, fc: 3, hits: 12 },
       { slave: 2, addr: 0, count: 10, fc: 3, hits: 5 }
     ].map(r => ({ addr: r.addr, count: r.count, name: 's' + r.slave + '_r' + r.addr,
-                  dtype: 'uint16', byteOrder: 'BE', wordOrder: 'BE' }));
+                  dtype: 'uint16' }));
     resp = 'RET:APPLYINFER=OK';
   }
   else if (line === 'W:RST') {

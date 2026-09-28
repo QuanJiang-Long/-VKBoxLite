@@ -72,7 +72,7 @@ local function props_to_regs(props, limit)
                 regs[#regs + 1] = {
                     addr = addr, count = qty, name = id,
                     alias = alias ~= "" and alias or id,
-                    dtype = dt, byteOrder = "BE", wordOrder = "BE",
+                    dtype = dt,
                 }
             end
         end

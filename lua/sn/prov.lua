@@ -10,7 +10,11 @@ local M = {}
 
 local DATA_BITS, STOP_BITS, PARITY = 8, 1, 0
 local BAUD = 115200
-local MAX_BUF = 2048
+-- 单行命令上限。W:CFG 一次下发整个 poll 配置(含全部寄存器),
+-- 128 条寄存器最坏约 12.7KB, 所以给 16KB。
+-- 超限只能整缓冲丢弃(命令以 \n 结尾, 半行丢了也没法补), 但正常情况下
+-- 前端发多少接多少, 到不了这个值
+local MAX_BUF = 16384
 
 local UART_ID = uart.VUART_0
 if UART_ID == nil then UART_ID = 4 end

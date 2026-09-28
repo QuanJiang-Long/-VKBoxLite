@@ -46,7 +46,12 @@ local function save_json(k, t)
     if not json then return false, "no json lib" end
     local ok, s = pcall(json.encode, t)
     if not ok or not s then return false, "encode fail" end
-    if #s > 512 then return false, "too large" end
+    -- 上限必须和 prov.lua 的 MAX_BUF 对齐: W:CFG 是【一整行】下发,
+    -- 行超过 MAX_BUF 会被整缓冲丢弃, 存得下也传不过来。
+    -- 128 条寄存器最坏约 12.7KB, 两侧都取 16KB。
+    -- 曾设 512, 结果 5 个寄存器就超限, W:CFG 一直回 too large,
+    -- 前端只看到"保存失败"却查不出原因
+    if #s > 16384 then return false, "too large" end
     return kv_set(k, s)
 end
 
@@ -82,13 +87,9 @@ local function normalize_reg(r)
     end
     local name = str(r.name)
     if not name or #name > 16 or not name:match("^%w+$") then return nil, "bad name" end
-    local bo = str(r.byteOrder, "BE")
-    local wo = str(r.wordOrder, "BE")
-    if bo ~= "BE" and bo ~= "LE" then return nil, "bad byteOrder" end
-    if wo ~= "BE" and wo ~= "LE" then return nil, "bad wordOrder" end
     return {
         addr = addr, count = count, dtype = dtype, name = name,
-        alias = str(r.alias, name), byteOrder = bo, wordOrder = wo,
+        alias = str(r.alias, name),
     }
 end
 
