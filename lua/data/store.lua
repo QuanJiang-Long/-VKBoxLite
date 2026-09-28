@@ -44,8 +44,11 @@ end
 
 local function keep_rounds()
     while #rounds > cfg.KEEP_ROUNDS do
-        table.remove(rounds, 1)
-        stats.dropped = stats.dropped + 1
+        local old = table.remove(rounds, 1)
+        -- 丢的是整轮的记录数, 不是 1 条
+        stats.dropped = stats.dropped + #old.recs
+        log.warn("store", "round overflow, drop oldest r=" .. tostring(old.r) ..
+            " recs=" .. #old.recs .. " dropped_total=" .. stats.dropped)
     end
 end
 
@@ -56,7 +59,6 @@ function M.begin_round()
     cur = { r = round_seq, ts = os.time(), recs = {} }
     return round_seq
 end
-
 local function changed(rec)
     if rec.kind == "frame" then return true end
     if rec.value == nil then return false end
@@ -107,7 +109,8 @@ function M.flush()
         return 0
     end
     local wok, werr = pcall(function()
-        f:write(table.concat(all, "\n"))
+        -- 结尾补换行: 否则最后一行不完整, 重启读回时会漏掉
+        f:write(table.concat(all, "\n") .. "\n")
         f:close()
     end)
     if not wok then
