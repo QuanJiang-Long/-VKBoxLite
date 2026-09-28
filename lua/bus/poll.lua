@@ -21,7 +21,7 @@ local writeQ = {}
 local writeTaskRun = false
 local respFlag, respData = false, nil
 local lastCfg = nil
-local stat = { rounds = 0, ok = 0, timeout = 0, werr = 0 }
+local stat = { rounds = 0, ok = 0, timeout = 0, werr = 0, zero = 0 }
 local wstat = { queued = 0, done = 0, wfail = 0 }
 
 local function de_high()
@@ -49,23 +49,32 @@ local function on_receive(id, len)
         if type(data) ~= "string" or #data == 0 then break end
         if respFlag then
             respData = (respData or "") .. data
+            if #respData > 512 then respData = respData:sub(-256) end
         end
     end
 end
 
+-- CRC 试探法切帧: 从头逐个偏移找第一个 CRC 合法且长度自洽的帧,
+-- 容忍响应前的杂字节(DE 拉毛刺/总线噪声); 找不到就继续等
 local function try_resp()
-    if not respData then return false end
-    local n = mbus.try_extract_len(respData)
-    if not n or #respData < n then return false end
-    local s = respData:sub(1, n)
-    respData = respData:sub(n + 1)
-    local f = mbus.parse_frame(s)
-    if not f then return false end
-    respFlag = false
-    return f
+    if not respData or #respData == 0 then return false end
+    for off = 1, #respData do
+        local s = respData:sub(off)
+        local n = mbus.try_extract_len(s)
+        if n and #s >= n then
+            local f = mbus.parse_frame(s:sub(1, n))
+            if f then
+                respData = s:sub(n + 1)
+                respFlag = false
+                return f
+            end
+        end
+    end
+    return false
 end
 
 local function do_transaction(frame, timeout_ms)
+    drain()                                  -- 先清残留, 避免杂字节顶掉真响应
     respFlag, respData = true, nil
     de_high()
     pcall(uart.write, mbus.UART_ID, frame)
@@ -165,6 +174,7 @@ end
 
 local function poll_task()
     local mygen = gen
+    local okBefore = stat.ok
     while gen == mygen and running do
         if store then store.begin_round() end
         for _, reg in ipairs(regs) do
@@ -176,6 +186,16 @@ local function poll_task()
         end
         drain_write_queue(mygen)
         stat.rounds = stat.rounds + 1
+        if stat.ok == okBefore then
+            stat.zero = stat.zero + 1
+            if stat.zero == 1 or stat.zero % 20 == 0 then
+                log.warn("poll", "round " .. stat.rounds .. " 无有效响应 timeout=" .. stat.timeout ..
+                    " werr=" .. stat.werr .. " (查从机地址/波特率/校验位/AB线/DE极性)")
+            end
+        else
+            stat.zero = 0
+        end
+        okBefore = stat.ok
         if sys then sys.wait(interval) end
     end
 end
@@ -262,7 +282,10 @@ function M.start()
     running = true
     gen = gen + 1
     if sys then sys.taskInit(poll_task) end
-    log.info("poll", "started, regs=" .. #regs)
+    log.info("poll", string.format("started, regs=%d slave=%d baud=%d parity=%d timeout=%dms",
+        #regs, lastCfg and lastCfg.slave or cfg.SLAVE_ADDR,
+        lastCfg and lastCfg.baud or cfg.BAUD, lastCfg and lastCfg.parity or cfg.PARITY,
+        lastCfg and lastCfg.timeout or cfg.TIMEOUT_MS))
     return true
 end
 
