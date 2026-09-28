@@ -78,13 +78,14 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:VAL | 实时值 |
 | R:STAT | 运行状态汇总 |
 | W:WRITE=slave,addr,value / W:WRITEJ={json} | 写寄存器（idle 也可写） |
+| W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配” |
 | R:MQTT / W:MQTT={json} | MQTT 配置读写 |
 | R:REPORT | 立即上报 |
 | R:NET / R:MEM | 网络/内存诊断 |
 | W:GC | 强制 GC + 重连 |
 | R:DISK / W:STORE=0\|1[,P] | 存储查询/开关 |
 | R:FRAMES / R:POLL | 旁听帧/轮询状态 |
-| W:BOOTMODE=idle\|poll\|sniff | 开机默认模式 |
+| W:BOOTMODE=idle\|poll\|sniff | 开机默认模式（大小写不敏感） |
 | W:RST | 恢复默认 |
 | R:SN / R:ID / W:SN=xxx[,FORCE] / C:SN / LOCK:SN / UNLOCK:SN / R:SNEN / W:SNEN=n,0\|1[,P] | SN 产线指令 |
 
