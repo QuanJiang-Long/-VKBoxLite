@@ -1,1 +1,11 @@
-﻿__pycache__/
+__pycache__/
+
+# 前端依赖：frontend/node_modules 是指向
+# D:\VKBox_Lite\VKBoxLite_poll\frontend\node_modules 的 junction，
+# 不随仓库分发（442MB）。详见 frontend/README.md「零、怎么运行」
+frontend/node_modules/
+node_modules/
+
+# electron-builder 打包产物
+frontend/dist/
+dist/

@@ -7,6 +7,82 @@ Air780EP 485 采集设备的 PC 端配置软件。Electron + serialport 实现�
 四大功能：**SN 写入**（产线工具负责，本工具只读展示）、**485 轮询采集**、
 **485 旁听嗅探**、**MQTT 上报**。
 
+## 零、怎么运行（先看这里）
+
+### 方式 1：双击启动脚本（推荐）
+
+```
+start.bat
+```
+
+### 方式 2：命令行
+
+```bat
+cd /d D:\VKBox_Lite\VKBoxLite_sniff\frontend
+npm start
+```
+
+`npm start` 等价于 `electron .`。
+
+### 方式 3：直接调 electron.exe
+
+```bat
+D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules\electron\dist\electron.exe .
+```
+
+### ⚠️ node_modules 是 junction，不是真实目录
+
+本目录**没有自己的 node_modules**，而是用 **junction（目录联接）** 指向：
+
+```
+D:\VKBox_Lite\VKBoxLite_poll\frontend\node_modules
+```
+
+两个工程的 `package-lock.json` MD5 完全一致（`E280EADD99E6967BFAB2914C1FF735F4`），
+依赖树相同，故直接复用：electron **31.7.7** + serialport **12.0.0**
+（`SerialPort.list` 为 function，匹配 `main.js` 的 v10+ 分支）。
+
+> 原工程已装好依赖，但本会话沙箱禁止 npm spawn 子进程（`spawn EPERM`），
+> 无法在此处执行 `npm install`，所以用联接复用。
+
+**删联接必须用 `rmdir`（不带 `/S`）**：
+
+```bat
+:: 查看是不是 junction
+dir /AL D:\VKBox_Lite\VKBoxLite_sniff\frontend
+
+:: 删掉联接（只删联接本身，不动原工程真实数据）
+rmdir D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules
+
+:: 重新创建
+mklink /J D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules D:\VKBox_Lite\VKBoxLite_poll\frontend\node_modules
+```
+
+**绝不能用 `Remove-Item node_modules -Recurse -Force` 或资源管理器删除** ——
+对 junction 而言那是删真实数据，会把 `VKBoxLite_poll/frontend` 的依赖一并删掉。
+
+想要独立依赖，在有网络且 npm 可正常 spawn 的机器上：`rmdir` 联接后执行 `npm install`。
+
+### 连接设备
+
+1. 插 USB → 设备管理器出现 **COM32**（LuatOS `uart.VUART_0 = 32`）
+2. 软件里「刷新」→ 选 COM32 → 「打开串口」（115200 8N1）
+3. 「读取设备信息」应填出 SN/IMEI/ICCID/CSQ/项目/版本/服务器
+
+### 常见现象
+
+| 现象 | 说明 |
+|---|---|
+| 首页存储空间显示"不支持" | **正常**。Air780EP base 25.11 实测 `type(rtos.fsinfo) ~= "function"` 且无 `fs` 库。落盘本身正常，看 `R:STAT.store.saved` 是否持续增长 |
+| 下拉框没有 COM32 | USB 未插好/未上电；或设备日志停在 `VUART task: 等待 USB 枚举...`，等 2~3 秒再刷新 |
+| 串口被占用 | Luatools / ssCOM 正开着同一 COM 口，先关掉 |
+| 打开白屏 | junction 断了，按上文重连或 `npm install` |
+
+---
+
+# 以下为原始文档
+
+
 ## 一、目录结构
 
 ```
