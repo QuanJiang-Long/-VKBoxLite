@@ -196,8 +196,23 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                     </div>
                 </div>
                 <div class="panel">
-                    <div class="panel-title">快速操作</div>
-                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <div class="panel-title">MQTT 服务器
+                        <div class="spacer"></div>
+                        <button class="sm" id="btnHomeMqttSave">保存并重连</button>
+                    </div>
+                    <div class="form-row">
+                        <label>服务器地址</label>
+                        <input id="hMqHost" type="text" placeholder="如 dz.voltkun.com 或 192.168.1.10">
+                        <span class="hint">拉取配置前先在这里配好</span>
+                    </div>
+                    <div class="form-row">
+                        <label>端口</label>
+                        <input id="hMqPort" type="number" value="1883" min="1" max="65535" style="max-width:140px;">
+                        <span class="hint" id="hMqErr"></span>
+                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-title">快速操作</div>                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
                         <button id="btnQuickPoll">进入轮询模式</button>
                         <button id="btnQuickSniff">进入旁听模式</button>
                         <button id="btnQuickStop">停止 485</button>

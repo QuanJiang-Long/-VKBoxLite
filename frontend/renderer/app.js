@@ -78,6 +78,8 @@ const el = new Proxy({
   selBootMode: $('selBootMode'), btnSaveBoot: $('btnSaveBoot'),
   // 首页
   btnHomeRefresh: $('btnHomeRefresh'), homeKv: $('homeKv'),
+  hMqHost: $('hMqHost'), hMqPort: $('hMqPort'), hMqErr: $('hMqErr'),
+  btnHomeMqttSave: $('btnHomeMqttSave'),
   btnQuickPoll: $('btnQuickPoll'), btnQuickSniff: $('btnQuickSniff'),
   btnQuickStop: $('btnQuickStop'), btnQuickReport: $('btnQuickReport'), btnQuickRst: $('btnQuickRst'),
   // MQTT 页
@@ -191,7 +193,8 @@ function setPortState(open, path) {
   el.btnOpen.textContent = open ? '关闭串口' : '打开串口';
   el.stPort.textContent = open ? (path || S.port) : '未连接';
   el.stPort.style.color = open ? '#0a7d2c' : '#666';
-  [el.btnReadInfo, el.btnReadCfg, el.btnPullCfg, el.btnSaveCfg, el.btnReadVal].forEach(b => b.disabled = !open);
+  [el.btnReadInfo, el.btnReadCfg, el.btnPullCfg, el.btnSaveCfg, el.btnReadVal,
+   el.btnHomeMqttSave].forEach(b => b.disabled = !open);
 }
 
 //---------------------------------------------------------------------
@@ -710,8 +713,42 @@ function renderHome() {
         wdtStalled(g, !!p.running).stalled);
   setKv('hPub', mq.published);
   setKv('hFrames', m.frames);
+  // 首页 MQTT 地址/端口回填。5s 定时刷新会打到这里, 正在输入时不能抢,
+  // 否则字打到一半被冲掉
+  fillMqHome(mq);
   el.stMqtt.textContent = mq.connected ? '已连接' : '未连接';
   el.stMqtt.style.color = mq.connected ? '#0a7d2c' : '#999';
+}
+
+function fillMqHome(mq) {
+  if (!el.hMqHost) return;
+  if (document.activeElement !== el.hMqHost) el.hMqHost.value = mq.host || '';
+  if (document.activeElement !== el.hMqPort) el.hMqPort.value = mq.port != null ? mq.port : 1883;
+  if (el.hMqErr) {
+    el.hMqErr.textContent = mq.reject_reason || '';
+    el.hMqErr.style.color = '#c0392b';
+  }
+}
+
+// 首页只改地址/端口。先读全量配置再合并, 否则把用户名/主题等字段冲掉
+async function saveHomeMqtt() {
+  const host = el.hMqHost.value.trim();
+  if (!host) { toast('MQTT 服务器地址不能为空'); return; }
+  const port = parseInt(el.hMqPort.value, 10) || 1883;
+  try {
+    const r = await sendCmd(Protocol.Enc.mqtt(), 'MQTT', 4000);
+    const c = (r.data && r.data.cfg) || {};
+    if (r.data) { S.mqtt = r.data; renderMqtt(); }
+    await sendCmd(Protocol.Enc.writeMqtt(Object.assign({}, c, { host: host, port: port })), 'MQTT', 5000);
+    status('MQTT 服务器已保存，设备正在重连', true);
+    toast('已保存，设备重连中');
+    await new Promise(res => setTimeout(res, 1500));
+    await readMqtt();
+    readHome();
+  } catch (e) {
+    status('保存失败：' + e.message, false);
+    toast('保存失败：' + e.message);
+  }
 }
 
 async function readHome() {
@@ -767,7 +804,7 @@ function renderMqtt() {
   setKv('mqStBackoff', s.backoff != null ? s.backoff + ' s' : '');
   setKv('mqStKeepSession',
         s.keep_session == null ? '--' : (s.keep_session ? '持久会话' : '离线自动销毁'));
-  setKv('mqStErr', s.last_err || '', !!s.last_err);
+  setKv('mqStErr', s.reject_reason || s.last_err || '', !!(s.reject_reason || s.last_err));
   setKv('mqStSn', r.ready ? '已烧号' : (r.err || '未烧号'), !r.ready);
   renderHome();
 }
@@ -1081,6 +1118,7 @@ el.comSel.onchange = () => { S.port = el.comSel.value; };
 
 // 首页
 el.btnHomeRefresh.onclick = async () => { await readHome(); await readMode(); await readMqtt(); };
+el.btnHomeMqttSave.onclick = saveHomeMqtt;
 el.btnQuickPoll.onclick = () => applyMode('poll');
 el.btnQuickSniff.onclick = () => applyMode('sniff');
 el.btnQuickStop.onclick = () => applyMode('stop');

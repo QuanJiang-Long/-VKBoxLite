@@ -140,6 +140,27 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 协议层已用标准 Modbus 校验值复核：读 slave=1 addr=14 qty=1 的请求帧为
 `01 03 00 0e 00 01 e5 c9`，合法响应形如 `01 03 02 00 64 b9 af`（值 100）。
 
+## MQTT 连不上排查
+
+日志出现 `W/mqtt CONACK 0x05` 时，固件随后会打
+`W/user.iot error conack`，前端 MQTT 面板与首页提示
+「平台拒绝连接(CONACK 0x05 未授权)」。
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `CONACK 0x01` | 协议版本不被接受 | 平台只支持 MQTT 3.1 或 5.0，换端口或换平台 |
+| `CONACK 0x02` | clientId 被拒 | 平台对 clientId 有格式要求，在「MQTT配置」填平台要求的格式 |
+| `CONACK 0x03` | 服务不可用 | 平台侧限流/维护 |
+| `CONACK 0x04` | 用户名或密码错 | 补 `user`/`pass` |
+| `CONACK 0x05` | 未授权 | **最常见**。先核对地址/端口；平台若开了认证，必须补 `user`/`pass` |
+
+**注意**：`auth()` 的空串必须传 `nil`。LuatOS 只判指针非空就当"有用户名"，
+会把**零长用户名字段**塞进 CONNECT 包，部分平台（EMQX/NanoMQ）据此判未授权
+回 0x05。绝大多数平台只认地址+端口，白送一个空用户名反而连不上。
+
+`try_connect` 等满 15s 后会把 `last_err` 覆盖成 `conack timeout`，
+拒绝原因会丢，所以单独用 `reject_reason` 记，前端优先显示它。
+
 ## 485 轮询日志（poll_reg）
 
 每笔事务固定两行，直接在日志里核对地址/长度/别称/数据：
@@ -252,7 +273,6 @@ topic 里的 `{SN}` 取的是**烧号的 SN**（`_G.get_device_sn()`），与 pa
 用的都是同一个 SN，对不上时先看这行日志确认。
 
 ## 本地落盘（已移除）
-
 按需求，poll 模式**不做本地保存**，采集数据只走两条路：
 
 - `collector.dataCache` 内存最新值 → `R:VAL` 实时查询

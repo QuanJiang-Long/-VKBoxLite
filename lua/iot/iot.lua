@@ -25,6 +25,7 @@ local function reset_state()
         published = 0, failed = 0, kick_flag = false,
         recv_pending = nil, pub = nil, sub = nil, device_id = nil,
         last_pub = 0, last_err = nil, client_id = nil,
+        reject_reason = nil,
         pull = { state = "idle", msg = "", result = nil, deadline = 0 },
         pull_payload = nil,
     }
@@ -137,6 +138,7 @@ local function on_mqtt(cli, event, data, payload)
     if event == "conack" then
         S.connected = true
         S.backoff = 1
+        S.reject_reason = nil
         local subs = {}
         if S.sub then subs[#subs + 1] = S.sub end
         local gtopic = get_topic()
@@ -155,6 +157,13 @@ local function on_mqtt(cli, event, data, payload)
     elseif event == "disconnect" or event == "error" then
         S.connected = false
         S.subscribed = false
+        -- CONACK 0x05 = 平台拒绝(未授权)。LuatOS C 库只打日志, 码值到不了
+        -- Lua 层, 这里单独记一个 reject_reason。
+        -- 不能塞进 last_err: try_connect 等满 15s 后会把它覆盖成
+        -- "conack timeout", 拒绝原因就丢了(线上正是如此)。
+        if event == "error" and tostring(data) == "conack" then
+            S.reject_reason = "平台拒绝连接(CONACK 0x05 未授权), 检查地址/端口或补用户名密码"
+        end
         log.warn("iot", event, tostring(data))
     end
 end
@@ -216,7 +225,11 @@ local function try_connect()
     local okc, cli = pcall(mqtt.create, nil, c.host, c.port, c.ssl)
     if not okc or not cli then return false, "mqtt.create 失败: " .. tostring(cli) end
     S.client = cli
-    pcall(function() cli:auth(cid, c.user, c.pass, not c.keep_session) end)
+    -- 空串要传 nil: auth() 只判指针非空就认为"有用户名", 会把零长
+    -- 用户名字段塞进 CONNECT 包, 部分平台(EMQX/NanoMQ)据此判未授权,
+    -- 回 CONACK 0x05。绝大多数平台只认地址+端口, 不能白送一个空用户名。
+    pcall(function() cli:auth(cid, c.user ~= "" and c.user or nil,
+                              c.pass ~= "" and c.pass or nil, not c.keep_session) end)
     pcall(function() cli:keepalive(60) end)
     pcall(function() cli:autoreconn(false) end)
     local okon, eon = pcall(cli.on, cli, on_mqtt)
@@ -396,7 +409,8 @@ local function pull_step()
         if S.connected then
             p.state = "helloing"
         elseif os.time() >= p.deadline then
-            pull_finish("fail", "MQTT 连接失败: " .. tostring(S.last_err or "超时"))
+            local why = S.reject_reason or S.last_err or "超时"
+            pull_finish("fail", "MQTT 连接失败: " .. tostring(why))
         end
     elseif p.state == "helloing" then
         local did = device_id()
@@ -526,6 +540,8 @@ function M.status()
         keep_session = c.keep_session,
         pub = S.pub,
         sub = S.sub,
+        host = c.host,
+        port = c.port,
         interval_s = c.interval_s,
         qos = c.qos,
         published = S.published,
@@ -534,6 +550,7 @@ function M.status()
         dirty = S.dirty,
         last_pub = S.last_pub,
         last_err = S.last_err,
+        reject_reason = S.reject_reason,
         sn = _G.get_device_sn and tostring(_G.get_device_sn()) or nil,
         heap = (function() local a, b = heap_info(); return { total = a, used = b } end)(),
     }
