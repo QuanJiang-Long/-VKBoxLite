@@ -168,9 +168,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
         <div class="tab-header">
             <div class="tab-item active" data-tab="tab0">首页</div>
             <div class="tab-item" data-tab="tabMode">运行模式</div>
-            <div class="tab-item" data-tab="tab2">串口配置</div>
-            <div class="tab-item" data-tab="tabMqtt">MQTT上报</div>
-            <div class="tab-item" data-tab="tabFrame">实时报文</div>
+            <div class="tab-item" data-tab="tabPoll">poll模式</div>
+            <div class="tab-item" data-tab="tabSniff">sniff模式</div>
         </div>
 
         <div class="tab-content">
@@ -192,7 +191,6 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                         <div class="kv"><b>看门狗</b><span id="hWdt">--</span></div>
                         <div class="kv"><b>已上报</b><span id="hPub">--</span></div>
                         <div class="kv"><b>本地落盘</b><span id="hStore">--</span></div>
-                        <div class="kv"><b>存储空间</b><span id="hFs">--</span></div>
                         <div class="kv"><b>总线报文</b><span id="hFrames">--</span></div>
                     </div>
                 </div>
@@ -290,8 +288,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                 </div>
             </div>
 
-            <!-- ============ 串口配置 tab2 ============ -->
-            <div class="tab-pane" id="tab2">
+            <!-- ============ poll模式 tabPoll ============ -->
+            <div class="tab-pane" id="tabPoll">
                 <div class="serial-tabs">
                     <div class="serial-tab active" data-serial="s1">串口1（485总线）</div>
                 </div>
@@ -389,10 +387,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                          <code>id</code> 字段仍用物理标识符；留空则 <code>name</code> 等于 <code>id</code>。
                     </p>
                 </div>
-            </div>
 
-            <!-- ============ MQTT上报 tabMqtt ============ -->
-            <div class="tab-pane" id="tabMqtt">
+                <!-- MQTT 上报（并入 poll模式） -->
                 <div class="panel">
                     <div class="panel-title">MQTT 连接
                         <div class="spacer"></div>
@@ -480,8 +476,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                 </div>
             </div>
 
-            <!-- ============ 实时报文 tabFrame ============ -->
-            <div class="tab-pane" id="tabFrame">
+            <!-- ============ sniff模式 tabSniff ============ -->
+            <div class="tab-pane" id="tabSniff">
                 <div class="panel">
                     <div class="panel-title">总线报文（旁听 sniff 模式）
                         <div class="spacer"></div>

@@ -85,7 +85,8 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:IOTSTAT | MQTT 运行态（connected/subscribed/published/failed/last_err/last_pub/backoff） |
 | R:NET / R:MEM | 网络/内存诊断 |
 | W:GC | 强制 GC + 重连 |
-| R:DISK / W:STORE=0\|1[,P] | 数据文件查询 / 落盘开关（P=持久化） |
+| R:DISK | 数据文件大小（`file=` + `bytes=`） |
+| W:STORE=0\|1[,P] | 落盘开关（P=持久化到 fskv） |
 | R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20） |
 | R:POLL | 轮询状态（rounds/ok/timeout/werr/regs/interval） |
 | R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits}], slaves, stat}` |
@@ -110,7 +111,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 - `rtos.meminfo("sys")` 返回 **3 个 int**（总/已用/历史峰值），不是 table
 - `mobile.imei/csq/rsrp/iccid()` 均为无参函数；`mobile.status()` 不能用于判断联网（以连上目标服务器为准）
 - `json.decode` 返回 obj/result/err 三个值；`json.encode` 第二参为浮点精度模式，缺省 "7f"
-- `rtos.fsinfo` 官方确认不存在（本框架已不依赖）
+- `rtos.fsinfo` 官方确认不存在；`fs` 库也不存在 → 存储空间功能已整体移除
 - 32 位固件：`ts*1000` 回绕、`%.0f` 大数科学计数法 → 数值全部手工拼（int_str/ms_of）
 - `tonumber(nil)` 会崩 VM → 所有外部取值先判 nil
 - 日志：开机不调 `setLevel`；guard 心跳用 `print` 走 stdout
@@ -143,6 +144,43 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 协议层已用标准 Modbus 校验值复核：读 slave=1 addr=14 qty=1 的请求帧为
 `01 03 00 0e 00 01 e5 c9`，合法响应形如 `01 03 02 00 64 b9 af`（值 100）。
 
+## 485 轮询日志（poll_reg）
+
+每笔事务固定两行，直接在日志里核对地址/长度/别称/数据：
+
+```
+I/user.poll Tx s1 fc3 addr=14 len=1 CT
+I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
+```
+
+| 行 | 字段 | 含义 |
+|---|---|---|
+| Tx | `s1` | 从机地址 |
+| | `fc3` | 功能码（读保持寄存器） |
+| | `addr=14` | 起始寄存器地址 |
+| | `len=1` | 连续读几个寄存器 |
+| | `CT` | 别称（alias，未配则用 name，再退 `r<addr>`） |
+| Rx | `hex=00ea` | 原始字节（小写十六进制） |
+| | `val=234` | 按 dtype 解出的值 |
+
+失败时的三种日志：`Rx timeout addr=14 CT rx=00ea39cb`（收到字节但组不成帧）、
+`Rx timeout ... rx=-`（一个字节都没收到）、`Rx err fc=83 code=2 ...`（从机返异常码）。
+
+## 本地落盘
+
+`STORE_ENABLE` 默认 **true**，插电即存，无需手动开启。写入文件 `/collect_data.jsonl`。
+
+| 参数 | 值 | 作用 |
+|---|---|---|
+| `CHANGE_EPS` | 0 | 值变化阈值，0 = 不过滤，每轮都存 |
+| `FLUSH_EVERY` | 20 | pending 累积到此条数立即落盘 |
+| `FLUSH_MS` | 5000 | 定时兜底：pending>0 就落盘 |
+| `FLUSH_BATCH` | 30 | 单轮记录上限，超出丢最旧并计 `dropped` |
+| `KEEP_ROUNDS` | 10 | 内存/文件只保留最近 10 轮（滚动窗口） |
+
+`stats.saved` 远大于 `stats.pushed` 是**设计使然**：flush 采用整文件重写，
+每次把当前保留的所有轮全部重写一遍，不是"新增多少写多少"。
+
 ## 与原版（v1）的差异
 
 - 24 文件 → 16 文件；删除 fsinfo/bootreason 桩、identity 独立模块、logctl 独立模块
@@ -153,7 +191,9 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
   `{cfg, src}`；R:MQTT 补 `stat`；R:INFO 补 server/baud/slave/regs 并修复
   mobile.iccid/csq 未调用导致 json.encode 失败返回 `{}` 的问题
 - 配置字段名 `timeout` → `timeout_ms`（与前端 collectCfg 一致），范围 50~500，
-  允许 null = 早返回模式；store.stats 补 recs 与 fs{total,free,used}
+  允许 null = 早返回模式
+- **存储空间功能已整体移除**：本固件 `rtos.fsinfo` 与 `fs` 库均不存在，
+  前端首页"存储空间"栏、store.stats 的 `fs` 段、R:DISK 的探测字段全部删除
 - 看门狗参数、MQTT 用法、启动顺序均对照官方文档核对修正
 - 切帧统一为 CRC 试探法（每个候选长度都验 CRC，fc15/16 用 byte(7)=bc）；事务前 drain 清残帧（v1 只在失败后 drain）
 - 配置校验与原工程对齐：串口参数范围 / MAX_REGS=128 / 标识符去重 / count%width / eps 上限，save 上限 2048

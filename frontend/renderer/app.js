@@ -6,9 +6,8 @@
 // 页面分工：
 //   首页       —— 运行状态总览 + 快速操作
 //   运行模式   —— poll / sniff / idle 互斥切换 + 开机默认模式
-//   串口配置   —— 485 串口参数 + 寄存器表（8 类型 / 字节序 / 字序）
-//   MQTT上报   —— MQTT 连接参数 / 发布订阅 topic / 周期 / 会话管理 + 连接状态
-//   实时报文   —— sniff 解译帧实时视图 + 轮询表推断 + 总线诊断
+//   poll模式   —— 485 串口参数 + 寄存器表 + MQTT 连接与上报
+//   sniff模式  —— 解译帧实时视图 + 轮询表推断 + 总线诊断
 //=====================================================================
 
 //---------------------------------------------------------------------
@@ -62,17 +61,6 @@ function wdtStalled(g, collecting) {
   return { stalled: stall > STALL_LIMIT_S, stall: stall };
 }
 
-//---------------------------------------------------------------------
-// 存储空间显示（R:STAT.store.fs，单位 KB）
-//   低空间时标红：磁盘快满后 io.open 会开始失败，采集数据就写不进去了
-//---------------------------------------------------------------------
-const FS_LOW_KB = 64;   // 与设备端 cfg.FS_LOW_KB 保持一致
-
-function fmtKB(kb) {
-  if (kb == null || isNaN(kb)) return '--';
-  if (kb >= 1024) return (kb / 1024).toFixed(2) + ' MB';
-  return Math.round(kb) + ' KB';
-}
 const el = new Proxy({
   comSel: $('comSel'), btnRefresh: $('btnRefresh'), btnOpen: $('btnOpen'),
   btnImport: $('btnImport'), btnExport: $('btnExport'), btnReadInfo: $('btnReadInfo'),
@@ -109,7 +97,7 @@ const el = new Proxy({
   btnBusSniff: $('btnBusSniff'), busSniffMs: $('busSniffMs'),
   txHex: $('txHex'), btnTx: $('btnTx')
 }, {
-  // 未在表里列出的 id 走 $() 现取（如 hFs / hStore 等只读展示字段），
+  // 未在表里列出的 id 走 $() 现取（如 hStore 等只读展示字段），
   // 取不到返回 null，由调用方判空
   get(t, k) { return t[k] !== undefined ? t[k] : $(k); }
 });
@@ -687,21 +675,6 @@ function renderHome() {
   if (typeof stStore.enable === 'boolean' && el.swStoreOn) {
     el.swStoreOn.checked = stStore.enable;
   }
-  // 存储空间：设备给了 fs 段才显示，没有（老固件无 fsinfo）明确告知"不支持"
-  //   Air780EP base 25.11 实测 type(rtos.fsinfo) ~= "function" 且无 fs 库，
-  //   所以"不支持"是固件限制而非缺陷；把原因写进 tooltip，避免反复来问。
-  const fsi = full.store && full.store.fs;
-  if (fsi && fsi.free != null) {
-    const low = fsi.free < FS_LOW_KB;
-    const txt = '剩余 ' + fmtKB(fsi.free) + ' / 共 ' + fmtKB(fsi.total);
-    setKv('hFs', txt, low);
-    el.hFs.title = '已用 ' + fmtKB(fsi.used) + '，剩余 ' + fmtKB(fsi.free)
-                 + (low ? '（空间不足，采集数据可能写不进去）' : '');
-  } else {
-    setKv('hFs', '不支持', false);
-    el.hFs.title = '本固件（Air780EP base 25.11）无 rtos.fsinfo / fs.fsinfo 接口，'
-                 + '读取不到剩余空间。\n落盘本身正常：R:STAT.store.saved 持续增长即说明在写。';
-  }
   setKv('hFrames', m.frames);
   el.stMqtt.textContent = mq.connected ? '已连接' : '未连接';
   el.stMqtt.style.color = mq.connected ? '#0a7d2c' : '#999';
@@ -1178,7 +1151,7 @@ tabItems.forEach(item => {
     document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
     $(tabId).classList.add('active');
     // 切到报文页时立即拉一次
-    if (tabId === 'tabFrame' && S.open && S.mode === 'sniff') readFrames();
+    if (tabId === 'tabSniff' && S.open && S.mode === 'sniff') readFrames();
   };
 });
 

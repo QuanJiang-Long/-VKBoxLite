@@ -73,7 +73,8 @@ mklink /J D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules D:\VKBox_Lite\VKBo
 
 | 现象 | 说明 |
 |---|---|
-| 首页存储空间显示"不支持" | **正常**。Air780EP base 25.11 实测 `type(rtos.fsinfo) ~= "function"` 且无 `fs` 库。落盘本身正常，看 `R:STAT.store.saved` 是否持续增长 |
+| 首页无"存储空间"一栏 | 已移除。Air780EP base 25.11 实测 `type(rtos.fsinfo) ~= "function"` 且无 `fs` 库，取不到剩余空间。落盘是否正常看 `R:STAT.store.saved` 是否持续增长 |
+| 标签页只有 4 个 | poll模式 / sniff模式 是合并后的结果：原「串口配置」+「MQTT上报」并入 **poll模式**（MQTT 在「串口1（485总线）」之后），原「实时报文」改名 **sniff模式** |
 | 下拉框没有 COM32 | USB 未插好/未上电；或设备日志停在 `VUART task: 等待 USB 枚举...`，等 2~3 秒再刷新 |
 | 串口被占用 | Luatools / ssCOM 正开着同一 COM 口，先关掉 |
 | 打开白屏 | junction 断了，按上文重连或 `npm install` |
@@ -93,9 +94,21 @@ frontend/
 ├── preload.js           桥接层：仅暴露 window.serial 最小 API
 ├── protocol.js          设备协议编解码（浏览器/Electron 通用，含 8 种数据类型解码）
 └── renderer/
-    ├── index.html       界面：5 个标签页
+    ├── index.html       界面：4 个标签页
     └── app.js           业务逻辑：串口/指令/配置/模式切换/报文视图/MQTT
 ```
+
+## 标签页结构
+
+| 标签页 | 内容 |
+|---|---|
+| **首页** | 运行状态总览 + 快速操作 |
+| **运行模式** | idle / poll / sniff 三卡片切换（互斥）+ 开机默认模式 + 当前运行详情 |
+| **poll模式** | 串口1（485总线）参数 + 参数列表（寄存器表） + **MQTT 连接与上报** |
+| **sniff模式** | 总线报文实时视图（REQ/RSP/ERR/配对标注 + 类型筛选）+ 轮询表推断 + 总线诊断 |
+
+> 原「串口配置」「MQTT上报」「实时报文」三个页已合并/改名：MQTT 上报并入 poll模式
+> （位于「串口1（485总线）」之后），「实时报文」改名为 sniff模式。
 
 ## 二、运行与打包
 

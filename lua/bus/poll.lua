@@ -101,31 +101,39 @@ local function do_transaction(frame, timeout_ms, exp_slave, exp_fc)
     return nil
 end
 
+local function hexs(s)
+    return #s > 0 and (s:gsub(".", function(c) return string.format("%02x", c:byte()) end)) or "-"
+end
+
 local function poll_reg(reg)
     local slave = lastCfg.slave or cfg.SLAVE_ADDR
-    local frame, err = mbus.build_read(slave, reg.addr, reg.count or 1)
+    local cnt = reg.count or 1
+    local alias = reg.alias or reg.name or ("r" .. reg.addr)
+    local frame, err = mbus.build_read(slave, reg.addr, cnt)
     if not frame then
         log.warn("poll", "build fail", reg.addr, tostring(err))
         return
     end
+    log.info("poll", string.format("Tx s%d fc3 addr=%d len=%d %s", slave, reg.addr, cnt, alias))
     local f = do_transaction(frame, lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS, slave, 3)
     if not f then
         stat.timeout = stat.timeout + 1
-        -- 前若干次超时把原始回字节打出来, 便于区分"完全没回"与"回了但解析不了"
-        if stat.timeout <= 3 then
-            local hex = respData or ""
-            hex = #hex > 0 and (hex:gsub(".", function(c) return string.format("%02x", c:byte()) end)) or "(无字节)"
-            log.warn("poll", string.format("timeout #%d addr=%d rx=%s", stat.timeout, reg.addr, hex))
-        end
+        log.warn("poll", string.format("Rx timeout addr=%d %s rx=%s", reg.addr, alias, hexs(respData or "")))
         return
     end
     if f.err then
         stat.werr = stat.werr + 1
+        log.warn("poll", string.format("Rx err fc=%02x code=%d addr=%d %s", f.fc or 0, f.code or 0, reg.addr, alias))
         return
     end
     local vals, hex = mbus.parse_regs(f.data, reg.dtype or "uint16", reg.byteOrder, reg.wordOrder)
-    if not vals then return end
+    if not vals then
+        log.warn("poll", string.format("Rx parse fail addr=%d %s hex=%s", reg.addr, alias, hex))
+        return
+    end
     stat.ok = stat.ok + 1
+    log.info("poll", string.format("Rx s%d addr=%d len=%d %s hex=%s val=%s",
+        slave, reg.addr, cnt, alias, hex, table.concat(vals, ",")))
     for i, v in ipairs(vals) do
         collector.push_data(reg.addr + i - 1, reg.name or ("r" .. reg.addr), hex, v, nil, reg.dtype, reg.eps)
     end
@@ -271,9 +279,9 @@ function M.probe_raw(slave, addr, qty, timeout_ms)
     return {
         tx_ok = txok,
         tx_err = txok and "" or tostring(txerr),
-        tx_hex = (frame:gsub(".", function(c) return string.format("%02x", c:byte()) end)),
+        tx_hex = hexs(frame),
         rx_len = #cap,
-        rx_hex = #cap > 0 and (cap:gsub(".", function(c) return string.format("%02x", c:byte()) end)) or "",
+        rx_hex = hexs(cap),
         parsed = mbus.parse_frame(cap) ~= nil,
         slave = slave, addr = addr, qty = qty,
     }
@@ -322,7 +330,7 @@ function M.tx_raw(hex, timeout_ms)
         tx_err = txok and "" or tostring(txerr),
         tx_hex = hex,
         rx_len = #cap,
-        rx_hex = #cap > 0 and (cap:gsub(".", function(c) return string.format("%02x", c:byte()) end)) or "",
+        rx_hex = hexs(cap),
         parsed = mbus.parse_frame(cap) ~= nil,
     }
 end
