@@ -84,7 +84,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:NET / R:MEM | 网络/内存诊断 |
 | W:GC | 强制 GC + 重连 |
 | R:DISK / W:STORE=0\|1[,P] | 存储查询/开关 |
-| R:FRAMES / R:POLL | 旁听帧/轮询状态 |
+| R:FRAMES[=n] / R:POLL | 旁听帧(n 取 1~50, 默认 20)/轮询状态 |
 | W:BOOTMODE=idle\|poll\|sniff | 开机默认模式（大小写不敏感） |
 | W:RST | 恢复默认 |
 | R:SN / R:ID / W:SN=xxx[,FORCE] / C:SN / LOCK:SN / UNLOCK:SN / R:SNEN / W:SNEN=n,0\|1[,P] | SN 产线指令 |
@@ -141,4 +141,6 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 - vcom → cmd，指令集保留核心 26 条（含 W:RAWTEST 裸探针），
   去掉 TX/FRAMELOG/NETTEST/INFER/PROBE 等诊断指令
 - 看门狗参数、MQTT 用法、启动顺序均对照官方文档核对修正
-- 切帧统一为 CRC 试探法；事务前 drain 清残帧（v1 只在失败后 drain）
+- 切帧统一为 CRC 试探法（每个候选长度都验 CRC，fc15/16 用 byte(7)=bc）；事务前 drain 清残帧（v1 只在失败后 drain）
+- 配置校验与原工程对齐：串口参数范围 / MAX_REGS=128 / 标识符去重 / count%width / eps 上限，save 上限 2048
+- 落盘 schema 与原工程一致：`{ts,kind,slave,fc,mkind,addr,qty,hex}`（帧）、`{ts,name,addr,value,hex,dtype,eps}`（数据）
