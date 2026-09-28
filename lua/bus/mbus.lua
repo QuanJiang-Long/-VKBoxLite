@@ -90,7 +90,8 @@ function M.parse_frame(s)
     if fc == 3 or fc == 4 then
         if #s < 5 then return nil end
         local bc = s:byte(3)
-        if #s ~= 4 + bc then return nil end
+        -- fc3/4 响应 = slave(1)+fc(1)+bc(1)+data(bc)+crc(2) = 5 + bc
+        if #s ~= 5 + bc then return nil end
         return { slave = slave, fc = fc, data = s:sub(4, 3 + bc), raw = s }
     end
     if fc == 6 then
@@ -114,7 +115,7 @@ function M.parse_frame(s)
     if fc == 1 or fc == 2 then
         if #s < 5 then return nil end
         local bc = s:byte(3)
-        if #s ~= 4 + bc then return nil end
+        if #s ~= 5 + bc then return nil end
         return { slave = slave, fc = fc, data = s:sub(4, 3 + bc), raw = s }
     end
     if fc == 5 or fc == 15 then
@@ -265,13 +266,19 @@ function M.try_extract_len(buf)
             end
         end
     end
-    -- fc 15/16: 写多寄存器 9 + byte_count
-    if (fc == 15 or fc == 16) and #buf >= 9 then
-        local bc = buf:byte(7)
-        if bc and bc >= 1 and bc <= 246 then
-            local total = 9 + bc
-            if #buf >= total then
-                if M.crc16(buf:sub(1, 7 + bc)) == buf:sub(8 + bc, 9 + bc) then return total end
+    -- fc 15/16: 既可能是 8 字节回显(slave fc addr(2) qty(2) crc(2)),
+    --           也可能是 9 + bc 的写多寄存器请求, 两种都试
+    if fc == 15 or fc == 16 then
+        if #buf >= 8 and M.crc16(buf:sub(1, 6)) == buf:sub(7, 8) then
+            return 8
+        end
+        if #buf >= 9 then
+            local bc = buf:byte(7)
+            if bc and bc >= 1 and bc <= 246 then
+                local total = 9 + bc
+                if #buf >= total then
+                    if M.crc16(buf:sub(1, 7 + bc)) == buf:sub(8 + bc, 9 + bc) then return total end
+                end
             end
         end
     end
