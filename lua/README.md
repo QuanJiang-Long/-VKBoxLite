@@ -32,7 +32,7 @@ lua/
 │   └── store.lua       本地落盘（按轮环形 + 整文件重写 + eps 过滤）
 ├── cfg.lua             配置中心（poll/sniff/sys 三类，fskv 持久化）
 ├── iot/
-│   ├── mqtt.lua        MQTT 配置（{id} 占位 + normalize）
+│   ├── mqttcfg.lua     MQTT 配置（{id} 占位 + normalize）
 │   └── iot.lua         连接编排 + 上报 + 下行
 └── svc/
     ├── guard.lua       看门狗喂狗 + 运行监控

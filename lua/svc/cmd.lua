@@ -16,7 +16,7 @@ local mbus = require "bus/mbus"
 local collector = require "data/collector"
 local store = require "data/store"
 local cfgstore = require "cfg"
-local mqtt_cfg = require "iot/mqtt"
+local mqtt_cfg = require "iot/mqttcfg"
 local iot = corelib.try("iot/iot")
 local guard = corelib.try("svc/guard")
 

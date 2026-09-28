@@ -227,6 +227,18 @@ CORE_LIBS = {
 }
 
 
+def check_module_names(errors):
+    """模块 basename 不能与核心库同名: Luatools 扫 require 'iot/mqtt' 会误判引用核心库"""
+    for root, _, fs in os.walk(LUA_DIR):
+        for f in fs:
+            if not f.endswith(".lua"):
+                continue
+            base = f[:-4]
+            if base in CORE_LIBS:
+                rel = os.path.relpath(os.path.join(root, f), LUA_DIR)
+                errors.append(f"{rel}: 模块名 '{base}' 与核心库同名, Luatools 会误判'多余核心库引用', 必须改名(如 {base}cfg.lua)")
+
+
 def check_core_lib_require(code, path, errors):
     """Luatools 静态扫描: require 核心库(字面量)会被判'多余核心库引用'拒绝烧录"""
     for m in re.finditer(r'require\s*[,(]\s*"([^"]+)"', code):
@@ -270,6 +282,7 @@ def main():
         check_core_lib_require(code, rel, all_errors)
 
     print(f"检查 {len(lua_files)} 个 Lua 文件")
+    check_module_names(all_errors)
     if all_errors:
         print(f"\n发现 {len(all_errors)} 个问题:")
         for e in all_errors:
