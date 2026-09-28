@@ -45,6 +45,13 @@ function M.crc_ok(s)
     return M.crc16(body) == s:byte(-2) + s:byte(-1) * 256
 end
 
+-- CRC 按数字比较: crc16 返回 number, 与帧尾两字节拼成的 number 比。
+-- ⚠️ 不能写成 crc16(x) == s:sub(a, b): number == string 在 Lua 恒为 false,
+--    会让 try_extract_len 永远返回 nil, 表现就是"收到合法帧却全 timeout"
+local function crc_at(buf, blen)
+    return M.crc16(buf:sub(1, blen)) == buf:byte(blen + 1) + buf:byte(blen + 2) * 256
+end
+
 local function be16(v) return string.char(v // 256 % 256, v % 256) end
 
 function M.build_read(slave, addr, qty)
@@ -190,9 +197,12 @@ local function to_i64(b)
     return v
 end
 
+-- 按数据类型直接解释; 字节序默认 BE(Modbus 惯例), 需要 LE 时才显式传
 function M.parse_value(data, offset, dtype, byte_order, word_order)
     local w = M.TYPE_WIDTH[dtype]
     if not w then return nil, "bad dtype" end
+    byte_order = byte_order or "BE"
+    word_order = word_order or "BE"
     local nbytes = w * 2
     local raw = data:sub(offset * 2 + 1, offset * 2 + nbytes)
     if #raw < nbytes then return nil, "short data" end
@@ -227,9 +237,12 @@ function M.parse_value(data, offset, dtype, byte_order, word_order)
     return nil, "bad dtype"
 end
 
+-- 批量解释: 字节序默认 BE, 按 dtype 直接解
 function M.parse_regs(data, dtype, byte_order, word_order)
     local w = M.TYPE_WIDTH[dtype]
     if not w then return nil, "bad dtype" end
+    byte_order = byte_order or "BE"
+    word_order = word_order or "BE"
     local out, hex = {}, {}
     local n = #data // 2
     for off = 0, n - w, w do
@@ -254,7 +267,7 @@ function M.try_extract_len(buf)
 
     -- fc 1-6: 请求/写回显 8 字节定长
     if fc >= 1 and fc <= 6 and #buf >= 8 then
-        if M.crc16(buf:sub(1, 6)) == buf:sub(7, 8) then return 8 end
+        if crc_at(buf, 6) then return 8 end
     end
     -- fc 1-4: 读响应 5 + byte_count
     if fc >= 1 and fc <= 4 and #buf >= 5 then
@@ -262,14 +275,14 @@ function M.try_extract_len(buf)
         if bc and bc >= 1 and bc <= 0xF4 then
             local total = bc + 5
             if #buf >= total then
-                if M.crc16(buf:sub(1, 3 + bc)) == buf:sub(4 + bc, 5 + bc) then return total end
+                if crc_at(buf, 3 + bc) then return total end
             end
         end
     end
     -- fc 15/16: 既可能是 8 字节回显(slave fc addr(2) qty(2) crc(2)),
     --           也可能是 9 + bc 的写多寄存器请求, 两种都试
     if fc == 15 or fc == 16 then
-        if #buf >= 8 and M.crc16(buf:sub(1, 6)) == buf:sub(7, 8) then
+        if #buf >= 8 and crc_at(buf, 6) then
             return 8
         end
         if #buf >= 9 then
@@ -277,14 +290,14 @@ function M.try_extract_len(buf)
             if bc and bc >= 1 and bc <= 246 then
                 local total = 9 + bc
                 if #buf >= total then
-                    if M.crc16(buf:sub(1, 7 + bc)) == buf:sub(8 + bc, 9 + bc) then return total end
+                    if crc_at(buf, 7 + bc) then return total end
                 end
             end
         end
     end
     -- fc 0x80+: 异常响应 5 字节
     if fc >= 0x80 and #buf >= 5 then
-        if M.crc16(buf:sub(1, 3)) == buf:sub(4, 5) then return 5 end
+        if crc_at(buf, 3) then return 5 end
     end
     return nil
 end

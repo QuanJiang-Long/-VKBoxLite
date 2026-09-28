@@ -200,14 +200,15 @@ local function poll_task()
         end
         drain_write_queue(mygen)
         stat.rounds = stat.rounds + 1
+        -- 每轮都打一行汇总: 既证明轮询在周期跑, 又便于对比 ok/timeout
         if stat.ok == okBefore then
             stat.zero = stat.zero + 1
-            if stat.zero == 1 or stat.zero % 20 == 0 then
-                log.warn("poll", "round " .. stat.rounds .. " 无有效响应 timeout=" .. stat.timeout ..
-                    " werr=" .. stat.werr .. " (查从机地址/波特率/校验位/AB线/DE极性)")
-            end
+            log.warn("poll", string.format("round %d 无新增 ok=%d timeout=%d werr=%d (查从机地址/波特率/校验位/AB线/DE极性)",
+                stat.rounds, stat.ok, stat.timeout, stat.werr))
         else
             stat.zero = 0
+            log.info("poll", string.format("round %d ok=%d timeout=%d werr=%d",
+                stat.rounds, stat.ok, stat.timeout, stat.werr))
         end
         okBefore = stat.ok
         if sys then sys.wait(interval) end

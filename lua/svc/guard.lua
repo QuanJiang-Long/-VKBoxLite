@@ -45,6 +45,15 @@ local function monitor()
         string.format("uptime=%ds mode=%s feed=%d", ticks, mode, cfg.WDT_FEED_MS // 1000),
     }
     if stall then parts[#parts + 1] = string.format("stall=%ds", stall) end
+    -- 轮询进度: 让"是否在周期轮询"直接从心跳可见
+    if mode == "poll" then
+        local okp, poll = pcall(require, "bus/poll")
+        if okp and poll then
+            local ps = poll.status()
+            parts[#parts + 1] = string.format("poll_round=%d ok=%d timeout=%d werr=%d",
+                ps.rounds or 0, ps.ok or 0, ps.timeout or 0, ps.werr or 0)
+        end
+    end
     local ok, store = pcall(require, "data/store")
     if ok and store then
         local st = store.stats()
