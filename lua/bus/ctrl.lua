@@ -19,6 +19,10 @@ local function switch_delay()
 end
 
 function M.switch_mode(mode)
+    if type(mode) ~= "string" then
+        return false, "FAIL unknown mode (use poll/sniff/idle)"
+    end
+    mode = mode:lower():gsub("^%s+", ""):gsub("%s+$", "")
     if mode == "poll" then
         if mon.is_running() then
             mon.stop()

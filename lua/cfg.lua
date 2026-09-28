@@ -130,7 +130,7 @@ end
 
 function M.normalize_sys(c)
     c = c or {}
-    local mode = str(c.boot_mode, "idle")
+    local mode = str(c.boot_mode, "idle"):lower():gsub("^%s+", ""):gsub("%s+$", "")
     if mode ~= "idle" and mode ~= "poll" and mode ~= "sniff" then return nil, "bad boot_mode" end
     return { boot_mode = mode }
 end

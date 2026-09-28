@@ -83,7 +83,9 @@ local function reg_cmds()
     end)
 
     M.reg("W:MODE", function(arg)
-        local ok, msg = ctrl.switch_mode(trim(arg))
+        local v = trim(arg):gsub("^%s+", ""):gsub("%s+$", ""):lower()
+        if v == "stop" then v = "idle" end
+        local ok, msg = ctrl.switch_mode(v)
         if ok then M.reply("RET:MODE=OK") else M.reply("RET:FAIL:MODE:" .. tostring(msg)) end
     end)
 
@@ -276,9 +278,11 @@ local function reg_cmds()
 end
 
 function M.handle(line)
+    if type(line) ~= "string" then return false end
+    line = line:gsub("[\r\n]", "")
     local fn = g_cmds[line]
     if not fn then
-        local cmd, arg = line:match("^([%w:]+)=(.*)$")
+        local cmd, arg = line:match("^%s*([%w:]+)%s*=%s*(.-)%s*$")
         if cmd then fn = g_cmds[cmd]; line = arg end
     end
     if not fn then return false end
