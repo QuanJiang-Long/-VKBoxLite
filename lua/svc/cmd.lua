@@ -268,8 +268,16 @@ local function reg_cmds()
         end
     end)
 
-    M.reg("R:FRAMES", function()
-        M.reply("RET:FRAMES=" .. jencode(mon.recent_frames(10)))
+    -- R:FRAMES[=n]  n 取 1..50, 默认 20(与原工程一致)
+    M.reg("R:FRAMES", function(arg)
+        local n = 20
+        if arg then
+            local v = tonumber(arg)
+            if v then n = math.floor(v) end
+        end
+        if n < 1 then n = 1 end
+        if n > 50 then n = 50 end
+        M.reply("RET:FRAMES=" .. jencode(mon.recent_frames(n)))
     end)
 
     M.reg("R:POLL", function()

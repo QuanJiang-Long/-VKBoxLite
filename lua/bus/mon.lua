@@ -16,6 +16,7 @@ local M = {}
 local running, gen = false, 0
 local rxbuf = ""
 local pendingReqs, lastReqs = {}, {}
+local lastRx, lastBaud = 0, nil
 local MAX_PENDING_PER_FC = 4
 local PAIR_TIMEOUT_MS = 250
 local stat = { frames = 0, reqs = 0, rsps = 0, errs = 0, paired = 0, orphans = 0 }
@@ -61,24 +62,39 @@ end
 local function process_frame(s)
     local f = mbus.decode_frame(s)
     stat.frames = stat.frames + 1
+    local pair_state, paired_addr = nil, nil
     if f.kind == "err" then
         stat.errs = stat.errs + 1
+        pair_state = "err"
     elseif f.kind == "rsp" then
         stat.rsps = stat.rsps + 1
         local now = os.clock()
-        if pop_req(f.fc, f.slave, f.qty, now) then
+        local hit = pop_req(f.fc, f.slave, f.qty, now)
+        if hit then
             stat.paired = stat.paired + 1
+            pair_state, paired_addr = "paired", hit.addr
         else
             local g = guess_last_req(f.fc, f.slave, f.qty)
-            if g then stat.paired = stat.paired + 1 else stat.orphans = stat.orphans + 1 end
+            if g then
+                stat.paired = stat.paired + 1
+                pair_state, paired_addr = "paired", g.addr
+            else
+                stat.orphans = stat.orphans + 1
+                pair_state = "orphan"
+            end
         end
     elseif f.kind == "req" then
         stat.reqs = stat.reqs + 1
         push_req(f)
+        pair_state = "req"
     end
+    f.pair_state = pair_state
+    f.paired_addr = paired_addr
+    f.paired_qty = f.qty
     if store then store.begin_round() end
+    collector.push_raw_rx(f.hex)
     collector.push_frame(f)
-    pcall(uart.write, mbus.VUART_DEBUG, "RX485:" .. f.hex)
+    pcall(uart.write, mbus.VUART_DEBUG, "RX485:" .. f.hex .. "\r\n")
 end
 local function on_receive(id, len)
     if id ~= mbus.UART_ID then return end
@@ -88,6 +104,7 @@ local function on_receive(id, len)
         if not ok then return end
         if type(data) ~= "string" or #data == 0 then break end
         rxbuf = rxbuf .. data
+        lastRx = os.time()
         if #rxbuf > 512 then rxbuf = rxbuf:sub(-256) end
     end
 end
@@ -110,12 +127,19 @@ local function next_frame()
 end
 
 local function task()
-    while running do
+    local mygen = gen
+    while running and gen == mygen do
         local s = next_frame()
         if s then
             process_frame(s)
         elseif #rxbuf > 0 then
-            rxbuf = rxbuf:sub(2)
+            -- 可能是半帧: 已声明长度但数据没到齐, 此时丢首字节会把帧打碎。
+            -- try_extract_len 需要至少 5 字节才能判定, 不足 5 字节只等待
+            if #rxbuf < 5 then
+                if sys then sys.wait(20) end
+            else
+                rxbuf = rxbuf:sub(2)
+            end
         elseif sys then
             sys.wait(20)
         end
@@ -136,6 +160,7 @@ function M.start(c)
         log.error("mon", "setup failed:", tostring(err))
         return false
     end
+    lastBaud = c.baud or cfg.BAUD
     pcall(uart.on, mbus.UART_ID, "receive", on_receive)
     running = true
     gen = gen + 1
@@ -149,6 +174,9 @@ function M.stop()
     running = false
     gen = gen + 1
     if gpio then pcall(gpio.set, mbus.DE_PIN, 0) end
+    pcall(uart.on, mbus.UART_ID, "receive", nil)
+    rxbuf = ""
+    pendingReqs, lastReqs = {}, {}
     log.info("mon", "sniff stopped")
     return true
 end
@@ -159,6 +187,15 @@ function M.get_gen() return gen end
 function M.status()
     local st = {}
     for k, v in pairs(stat) do st[k] = v end
+    st.running = running
+    st.gen = gen
+    st.baud = lastBaud or cfg.BAUD
+    st.pending = (function()
+        local n = 0
+        for _, q in pairs(pendingReqs) do n = n + #q end
+        return n
+    end)()
+    st.last_rx = lastRx
     st.buf = #rxbuf
     return st
 end

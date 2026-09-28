@@ -23,7 +23,7 @@ local function reset_state()
         client = nil, dirty = false, backoff = 1,
         published = 0, failed = 0, kick_flag = false,
         recv_pending = nil, pub = nil, sub = nil, device_id = nil,
-        last_pub = 0,
+        last_pub = 0, last_err = nil, client_id = nil,
     }
 end
 
@@ -100,7 +100,7 @@ end
 local function publish(force)
     if not S.client or not S.connected then return false end
     local payload = build_payload()
-    if payload == "[]" and not force then return false end
+    if payload == "[]" then return false end
     local ok, err = pcall(function()
         S.client:publish(S.pub, payload, mqttcfg.load().qos)
     end)
@@ -119,12 +119,16 @@ M.publish = publish
 local function on_mqtt(cli, event, data, payload)
     if event == "conack" then
         S.connected = true
-        S.subscribed = true
         S.backoff = 1
         if S.sub then
-            pcall(function() cli:subscribe(S.sub, mqttcfg.load().qos) end)
+            local sok, serr = pcall(function() cli:subscribe(S.sub, mqttcfg.load().qos) end)
+            -- 订阅成功才算已订阅, 否则 status 失真
+            S.subscribed = sok and true or false
+            if not sok then log.warn("iot", "subscribe fail:", tostring(serr)) end
+        else
+            S.subscribed = false
         end
-        log.info("iot", "conack ok, subscribed")
+        log.info("iot", "conack ok, subscribed=" .. tostring(S.subscribed))
     elseif event == "recv" then
         S.recv_pending = { topic = data, payload = payload }
     elseif event == "disconnect" or event == "error" then
@@ -134,12 +138,25 @@ local function on_mqtt(cli, event, data, payload)
     end
 end
 
+-- Lua 堆信息: 返回 total, used; 取不到返回 nil, nil
+-- Air780EP 堆约 300KB, mqtt.create 需要连续块, 建连前打印便于定位 OOM
+local function heap_info()
+    if not rtos or type(rtos.meminfo) ~= "function" then return nil, nil end
+    local ok, a, b = pcall(rtos.meminfo, "sys")
+    if not ok or type(a) ~= "number" then return nil, nil end
+    return a, b
+end
+
 local function destroy_client()
     if S.client then
+        -- 先关自动重连再断开, 否则断开后库仍会自行重连, 留下僵尸 client 占十几 KB
+        pcall(function() S.client:autoreconn(false) end)
         pcall(function() S.client:disconnect() end)
         pcall(function() S.client:close() end)
         S.client = nil
     end
+    S.connected = false
+    S.subscribed = false
     collectgarbage("collect")
 end
 
@@ -155,6 +172,8 @@ local function net_ready()
 end
 
 local function try_connect()
+    if not mqtt then return false, "mqtt 库不可用(需 sysplus/mqtt 组件)" end
+    if type(mqtt.create) ~= "function" then return false, "mqtt.create 不可用" end
     local c = mqttcfg.load()
     local did = device_id()
     if not did or did == "" then
@@ -162,21 +181,32 @@ local function try_connect()
         did = "unknown"
     end
     S.device_id = did
-    local pub, sub, terr = mqttcfg.resolve_topics(did)
+    -- 无 SN 时把 "unknown" 视作无 id: topic 含 {id} 会被拒, 不会把字面
+    -- unknown 拼进 topic(与原工程一致)
+    local pub, sub, terr = mqttcfg.resolve_topics(did == "unknown" and nil or did)
     if not pub then return false, terr end
     S.pub, S.sub = pub, sub
     local cid = c.client_id ~= "" and c.client_id or did
-    local cli, err = mqtt.create(nil, c.host, c.port, c.ssl)
-    if not cli then return false, "create fail" end
+    S.client_id = cid
+    -- Air780EP Lua 堆约 300KB, mqtt.create 需要连续块; 建连前先 GC + 记录堆
+    collectgarbage("collect")
+    local h1, h2 = heap_info()
+    log.info("iot", "create mqtt", c.host, c.port, "heap total=" .. tostring(h1) .. " used=" .. tostring(h2))
+    local okc, cli = pcall(mqtt.create, nil, c.host, c.port, c.ssl)
+    if not okc or not cli then return false, "mqtt.create 失败: " .. tostring(cli) end
     S.client = cli
     pcall(function() cli:auth(cid, c.user, c.pass, not c.keep_session) end)
     pcall(function() cli:keepalive(60) end)
     pcall(function() cli:autoreconn(false) end)
-    cli:on(on_mqtt)
-    local ok = cli:connect()
-    if not ok then
+    local okon, eon = pcall(cli.on, cli, on_mqtt)
+    if not okon then
         destroy_client()
-        return false, "connect fail"
+        return false, "on 失败: " .. tostring(eon)
+    end
+    local ok, e = pcall(cli.connect, cli)
+    if not ok or not e then
+        destroy_client()
+        return false, "connect 失败: " .. tostring(e)
     end
     local waited = 0
     while waited < 15000 do
@@ -191,6 +221,7 @@ end
 local function wait_kickable(ms)
     local waited = 0
     while waited < ms do
+        if not S.want_run then return end
         if S.kick_flag then S.kick_flag = false; return end
         if sys then sys.wait(200) end
         waited = waited + 200
@@ -204,6 +235,11 @@ local function downlink_write(items)
     local regs = okc and c and c.regs or {}
     local function resolve_addr(k)
         if not k then return nil end
+        if type(k) ~= "string" then
+            -- 纯数字直接当地址, 避免对 number 调 :lower()
+            if type(k) == "number" then return math.floor(k) end
+            return nil
+        end
         for _, r in ipairs(regs) do
             if r.name == k or r.alias == k then return r.addr end
         end
@@ -213,31 +249,46 @@ local function downlink_write(items)
         end
         return nil
     end
+    -- 安全取数: 下行 JSON 字段可能缺失或类型不对, 统一走 tonumber 兜底
+    local function dnum(v)
+        if v == nil then return nil end
+        local n = tonumber(v)
+        return n
+    end
     local nok, nfail = 0, 0
     for _, it in ipairs(items) do
         local dkey = it.id or it.name or it.key or it.regName or it.reg_name
-        local addr = tonumber(it.addr or it.address or it.reg or it.register or it.offset)
+        local addr = dnum(it.addr or it.address or it.reg or it.register or it.offset)
         if not addr then addr = resolve_addr(dkey) end
-        local slave = tonumber(it.slave or it.dev or it.device or it.slaveId or it.slave_id)
-        if not slave and dkey then slave = tonumber(dkey) end
+        local slave = dnum(it.slave or it.dev or it.device or it.slaveId or it.slave_id)
         if not slave then
             local okp, pc = pcall(cfgstore.load_poll)
             slave = okp and pc and pc.slave or cfg.SLAVE_ADDR
         end
         if it.values and type(it.values) == "table" and addr then
             local vals = {}
-            for _, v in ipairs(it.values) do vals[#vals + 1] = tonumber(v) end
+            for _, v in ipairs(it.values) do
+                local n = dnum(v)
+                if not n then n = 0 end
+                vals[#vals + 1] = n
+            end
             local okw = poll.enqueue_write({ slave = slave, addr = addr, values = vals })
             if okw then nok = nok + 1 else nfail = nfail + 1 end
-        elseif addr and (it.value or it.val or it.data) then
-            local v = tonumber(it.value or it.val or it.data)
-            local okw = poll.enqueue_write({ slave = slave, addr = addr, value = v })
-            if okw then nok = nok + 1 else nfail = nfail + 1 end
+        elseif addr then
+            local v = dnum(it.value or it.val or it.data)
+            if v then
+                local okw = poll.enqueue_write({ slave = slave, addr = addr, value = v })
+                if okw then nok = nok + 1 else nfail = nfail + 1 end
+            else
+                nfail = nfail + 1
+                log.warn("iot", "write item bad value:", tostring(dkey))
+            end
         else
             nfail = nfail + 1
             log.warn("iot", "write item unresolvable:", tostring(dkey))
         end
     end
+    log.info("iot", "downlink write: ok=" .. nok .. " fail=" .. nfail)
     return nok, nfail
 end
 
@@ -280,16 +331,21 @@ local function task_main()
                     else
                         local is_oom = type(err) == "string" and err:lower():find("memory") ~= nil
                         local wait_s = is_oom and 30 or S.backoff
-                        if not is_oom then
-                            S.backoff = math.min(S.backoff * 2, 60)
-                        else
+                        if is_oom then
+                            -- 堆不足: 清帧缓存 + 强制 GC, 固定等 30s 再试
                             collector.trim_cache()
+                            collectgarbage("collect")
+                            local h1, h2 = heap_info()
+                            log.warn("iot", "oom, trim+gc done, heap total=" .. tostring(h1) .. " used=" .. tostring(h2))
+                        else
+                            S.backoff = math.min(S.backoff * 2, 60)
                         end
+                        S.last_err = err
                         wait_kickable(wait_s * 1000)
                     end
                 end
             else
-                if sys then sys.wait(10000) end
+                wait_kickable(10000)
             end
         else
             if S.recv_pending then
@@ -357,9 +413,12 @@ end
 function M.status()
     local c = mqttcfg.load()
     return {
+        want_run = S.want_run,
         connected = S.connected,
+        subscribed = S.subscribed,
         device_id = S.device_id,
-        client_id = c.client_id,
+        client_id = S.client_id or c.client_id,
+        keep_session = c.keep_session,
         pub = S.pub,
         sub = S.sub,
         interval_s = c.interval_s,
@@ -368,6 +427,10 @@ function M.status()
         failed = S.failed,
         backoff = S.backoff,
         dirty = S.dirty,
+        last_pub = S.last_pub,
+        last_err = S.last_err,
+        sn = _G.get_device_sn and tostring(_G.get_device_sn()) or nil,
+        heap = (function() local a, b = heap_info(); return { total = a, used = b } end)(),
     }
 end
 
@@ -384,6 +447,9 @@ function M.net_state()
     end
     st.csq = g("csq")
     st.rsrp = g("rsrp")
+    st.rsrq = g("rsrq")
+    st.pci = g("pci")
+    st.reg = g("status")
     st.imei = g("imei")
     st.iccid = g("iccid")
     if socket then

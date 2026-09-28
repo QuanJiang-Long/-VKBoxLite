@@ -29,7 +29,8 @@ function M.push_data(addr, alias, hex, value, ts, dtype, eps)
     stat.pushed = stat.pushed + 1
     ring_add(string.format("data %s=%s", alias, tostring(value)))
     fire(updateCbs, alias, value, ts, addr)
-    fire(storeCbs, { alias = alias, addr = addr, hex = hex, value = value, ts = ts, dtype = dtype, eps = eps })
+    -- 落盘字段用 name(与原工程一致), 同时保留 alias 供 store 的 eps 过滤查询
+    fire(storeCbs, { name = alias, alias = alias, addr = addr, hex = hex, value = value, ts = ts, dtype = dtype, eps = eps })
     return true
 end
 
@@ -37,16 +38,20 @@ function M.push_frame(f)
     stat.frames = stat.frames + 1
     frames[#frames + 1] = f
     while #frames > cfg.FRAME_CACHE do table.remove(frames, 1) end
-    ring_add(string.format("frame %s fc=%s", tostring(f.kind), tostring(f.fc)))
+    -- 落盘 schema 与原工程保持一致: {ts, kind, slave, fc, mkind, addr, qty, hex}
+    -- (mkind = 原工程的 kind 字段, 用于区分 req/rsp/echo/err)
     fire(storeCbs, {
-        kind = "frame",
-        alias = f.slave and ("s" .. f.slave) or "?",
-        addr = f.addr or 0,
-        hex = f.hex,
-        value = f.value,
         ts = os.time(),
+        kind = "frame",
+        slave = f.slave,
         fc = f.fc,
+        mkind = f.kind,
+        addr = f.addr,
+        qty = f.qty,
+        hex = f.hex,
     })
+    local tag = f.kind == "req" and "REQ" or (f.kind == "rsp" and "RSP" or (f.kind == "err" and "ERR" or "FRM"))
+    ring_add(string.format("%s slave=%s fc=%s addr=%s", tag, tostring(f.slave), tostring(f.fc), tostring(f.addr or 0)))
 end
 
 function M.push_raw_rx(hex)
@@ -77,7 +82,6 @@ end
 
 function M.snapshot()
     local out = {}
-    for _, d in pairs(dataCache) do out[#out + 1] = { name = d.name, addr = d.addr, value = d.value, hex = d.hex, ts = d.ts, dtype = d.dtype } end
     for alias, d in pairs(dataCache) do
         out[#out + 1] = { name = alias, addr = d.addr, value = d.value, hex = d.hex, ts = d.ts, dtype = d.dtype }
     end

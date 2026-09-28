@@ -307,13 +307,25 @@ def check_module_names(errors):
 
 def check_core_lib_require(src, path, errors):
     """Luatools 静态扫描: require 核心库(字面量)会被判'多余核心库引用'拒绝烧录。
-    注释里的字样同样会被扫到, 故先剥注释"""
+    注意: 实测 Luatools 连【注释】里的 require "log" 字样都会扫到,
+    所以除了剥注释后的代码, 还要对原始源码本身查一遍(注释也不许出现)。"""
     code = strip_comments_only(src)
-    for m in re.finditer(r'require\s*[,(]\s*"([^"]+)"', code):
+    reported = set()
+    for m in re.finditer(r'require\s*[,(]?\s*"([^"]+)"', code):
         mod = m.group(1)
         if mod in CORE_LIBS:
             line = code.count("\n", 0, m.start()) + 1
+            reported.add((mod, line))
             errors.append(f"{path}:{line}: require 了核心库 '{mod}', Luatools 会拒绝烧录(核心库无需 require, 用 _G.{mod})")
+    # 原始源码(含注释): 注释里出现核心库 require 字样同样会被 Luatools 扫到
+    for m in re.finditer(r'require\s*[,(]?\s*"([^"]+)"', src):
+        mod = m.group(1)
+        if mod not in CORE_LIBS:
+            continue
+        line = src.count("\n", 0, m.start()) + 1
+        if (mod, line) in reported:
+            continue
+        errors.append(f"{path}:{line}: 注释里出现 require \"{mod}\" 字样, 实测 Luatools 静态扫描会读到并拒绝烧录, 必须改写措辞")
 
 
 def check_tonumber_nil(code, path, errors):

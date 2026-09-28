@@ -35,6 +35,8 @@ function M.normalize(c)
     local host = c.host
     if type(host) ~= "string" then host = "" end
     host = host:gsub("^%s*(.-)%s*$", "%1")
+    -- 缺字段回退默认值: W:MQTT 只改 host/port 时不应因缺 topic 而失败
+    if host == "" then host = d.host end
     if host == "" or #host > 128 then return nil, "bad host" end
     local port = math.floor(num(c.port, d.port))
     if port < 1 or port > 65535 then return nil, "bad port" end
@@ -44,9 +46,11 @@ function M.normalize(c)
     local cid = ""
     if type(c.client_id) == "string" then cid = c.client_id:gsub("^%s*(.-)%s*$", "%1"):sub(1, 128) end
     local pub = c.pub_topic
-    if type(pub) ~= "string" or pub == "" or #pub > 128 then return nil, "bad pub_topic" end
+    if type(pub) ~= "string" or pub == "" then pub = d.pub_topic end
+    if #pub > 128 then return nil, "bad pub_topic" end
     local sub = c.sub_topic
-    if type(sub) ~= "string" or sub == "" or #sub > 128 then return nil, "bad sub_topic" end
+    if type(sub) ~= "string" or sub == "" then sub = d.sub_topic end
+    if #sub > 128 then return nil, "bad sub_topic" end
     local interval = math.floor(num(c.interval_s, d.interval_s))
     if interval < 0 or interval > 86400 then return nil, "bad interval_s" end
     local qos = math.floor(num(c.qos, d.qos))

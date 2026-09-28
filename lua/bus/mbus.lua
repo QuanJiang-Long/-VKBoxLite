@@ -66,7 +66,12 @@ function M.build_write_multi(slave, addr, values)
     if addr < 0 or addr > 65535 then return nil, "bad addr" end
     local n = #values
     if n < 1 or n > 123 then return nil, "bad count" end
-    local body = string.char(slave, 16, addr // 256 % 256, addr % 256, n, n * 2)
+    -- fc16 请求: slave fc addr_hi addr_lo qty_hi qty_lo byte_count data...
+    -- qty 是 2 字节, byte_count 是 1 字节, 少一个字节从机就解析不了
+    local body = string.char(slave, 16,
+        addr // 256 % 256, addr % 256,
+        n // 256 % 256, n % 256,
+        n * 2 % 256)
     for i = 1, n do
         local v = values[i] % 65536
         body = body .. be16(v)
@@ -145,14 +150,31 @@ local function swap_pairs(b, byte_order)
     return out
 end
 
-local function bytes_to_float(b)
-    local b1, b2, b3, b4 = b[1], b[2], b[3], b[4]
-    local sign = b1 >= 128 and -1 or 1
-    local exp = (b1 % 128) * 2 + (b2 >= 128 and 1 or 0)
-    local mant = (b2 % 128) * 65536 + b3 * 256 + b4
-    if exp == 0 and mant == 0 then return 0.0 end
-    if exp == 255 then return mant == 0 and sign * math.huge or (0 / 0) end
-    return sign * (1 + mant / 8388608.0) * 2.0 ^ (exp - 127)
+local function bytes_to_float(b, is_double)
+    if is_double then
+        if #b ~= 8 then return nil end
+        local sign = math.floor(b[1] / 128)
+        local e = math.floor(b[1] % 128) * 16 + math.floor(b[2] / 16)
+        -- 尾数 52 位 = b[2] 低 4 位 + b[3..8]; 漏掉 b[2] 低 4 位会全解错
+        local m = b[2] % 16
+        for i = 3, 8 do m = m * 256 + b[i] end
+        if e == 2047 then return nil end
+        if e == 0 then
+            if m == 0 then return 0.0 end
+            return (sign == 1 and -1 or 1) * m * 2^(1 - 1023 - 52)
+        end
+        return (sign == 1 and -1 or 1) * (2^52 + m) * 2^(e - 1023 - 52)
+    end
+    if #b ~= 4 then return nil end
+    local sign = math.floor(b[1] / 128)
+    local e = math.floor(b[1] % 128) * 2 + math.floor(b[2] / 128)
+    local m = math.floor(b[2] % 128) * 65536 + b[3] * 256 + b[4]
+    if e == 255 then return nil end
+    if e == 0 then
+        if m == 0 then return 0.0 end
+        return (sign == 1 and -1 or 1) * m * 2^(1 - 127 - 23)
+    end
+    return (sign == 1 and -1 or 1) * (2^23 + m) * 2^(e - 127 - 23)
 end
 
 local function to_u64(b)
@@ -183,9 +205,9 @@ function M.parse_value(data, offset, dtype, byte_order, word_order)
         b = rev
     end
     if dtype == "float32" then
-        return bytes_to_float({ b[1], b[2], b[3], b[4] })
+        return bytes_to_float({ b[1], b[2], b[3], b[4] }, false)
     elseif dtype == "float64" then
-        return bytes_to_float({ b[1], b[2], b[3], b[4] }) * 4294967296.0 + bytes_to_float({ b[5], b[6], b[7], b[8] })
+        return bytes_to_float({ b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8] }, true)
     elseif dtype == "uint16" then
         return b[1] * 256 + b[2]
     elseif dtype == "int16" then
@@ -214,7 +236,7 @@ function M.parse_regs(data, dtype, byte_order, word_order)
         if v == nil then break end
         out[#out + 1] = v
     end
-    for i = 1, #data, 2 do hex[#hex + 1] = string.format("%02x", data:byte(i)) end
+    for i = 1, #data do hex[#hex + 1] = string.format("%02x", data:byte(i)) end
     return out, table.concat(hex)
 end
 
@@ -223,27 +245,40 @@ function M.calc_de_hold_ms(nbytes, baud)
     return math.ceil(bits * 1000 / baud) + 2
 end
 
-local FIXED_LEN = {
-    [1] = 8, [2] = 8, [3] = 8, [4] = 8, [5] = 8, [6] = 8,
-}
+-- CRC 试探法定帧长: Modbus RTU 无长度字段, 只能按功能码猜结构 + 验 CRC
+-- 每个候选长度都验 CRC, 猜错就不会返回错误长度
+function M.try_extract_len(buf)
+    if type(buf) ~= "string" or #buf < 5 then return nil end
+    local fc = buf:byte(2)
 
-function M.try_extract_len(s)
-    if #s < 4 then return nil end
-    local fc = s:byte(2)
-    if fc >= 0x80 then return 5 end
-    if fc == 1 or fc == 2 then
-        if #s < 5 then return nil end
-        return 5 + s:byte(3)
+    -- fc 1-6: 请求/写回显 8 字节定长
+    if fc >= 1 and fc <= 6 and #buf >= 8 then
+        if M.crc16(buf:sub(1, 6)) == buf:sub(7, 8) then return 8 end
     end
-    if fc == 3 or fc == 4 then
-        if #s < 5 then return nil end
-        return 5 + s:byte(3)
+    -- fc 1-4: 读响应 5 + byte_count
+    if fc >= 1 and fc <= 4 and #buf >= 5 then
+        local bc = buf:byte(3)
+        if bc and bc >= 1 and bc <= 0xF4 then
+            local total = bc + 5
+            if #buf >= total then
+                if M.crc16(buf:sub(1, 3 + bc)) == buf:sub(4 + bc, 5 + bc) then return total end
+            end
+        end
     end
-    if fc == 15 or fc == 16 then
-        if #s < 7 then return nil end
-        return 9 + s:byte(6)
+    -- fc 15/16: 写多寄存器 9 + byte_count
+    if (fc == 15 or fc == 16) and #buf >= 9 then
+        local bc = buf:byte(7)
+        if bc and bc >= 1 and bc <= 246 then
+            local total = 9 + bc
+            if #buf >= total then
+                if M.crc16(buf:sub(1, 7 + bc)) == buf:sub(8 + bc, 9 + bc) then return total end
+            end
+        end
     end
-    if FIXED_LEN[fc] then return FIXED_LEN[fc] end
+    -- fc 0x80+: 异常响应 5 字节
+    if fc >= 0x80 and #buf >= 5 then
+        if M.crc16(buf:sub(1, 3)) == buf:sub(4, 5) then return 5 end
+    end
     return nil
 end
 

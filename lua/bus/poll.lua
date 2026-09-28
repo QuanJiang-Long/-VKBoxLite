@@ -20,6 +20,7 @@ local regs, interval = {}, cfg.POLL_INTERVAL_MS
 local writeQ = {}
 local writeTaskRun = false
 local respFlag, respData = false, nil
+local reqSlave, reqFc = nil, nil
 local lastCfg = nil
 local stat = { rounds = 0, ok = 0, timeout = 0, werr = 0, zero = 0 }
 local wstat = { queued = 0, done = 0, wfail = 0 }
@@ -55,6 +56,7 @@ local function on_receive(id, len)
 end
 
 -- CRC 试探法切帧: 从头逐个偏移找第一个 CRC 合法且长度自洽的帧,
+-- 并校验 slave/fc 与在途请求一致(多从机/噪声下防错配他从机响应);
 -- 容忍响应前的杂字节(DE 拉毛刺/总线噪声); 找不到就继续等
 local function try_resp()
     if not respData or #respData == 0 then return false end
@@ -64,18 +66,21 @@ local function try_resp()
         if n and #s >= n then
             local f = mbus.parse_frame(s:sub(1, n))
             if f then
-                respData = s:sub(n + 1)
-                respFlag = false
-                return f
+                if f.slave == reqSlave and (f.fc == reqFc or (f.err and f.fc == reqFc)) then
+                    respData = s:sub(n + 1)
+                    respFlag = false
+                    return f
+                end
             end
         end
     end
     return false
 end
 
-local function do_transaction(frame, timeout_ms)
+local function do_transaction(frame, timeout_ms, exp_slave, exp_fc)
     drain()                                  -- 先清残留, 避免杂字节顶掉真响应
     respFlag, respData = true, nil
+    reqSlave, reqFc = exp_slave, exp_fc
     de_high()
     pcall(uart.write, mbus.UART_ID, frame)
     local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD)
@@ -89,16 +94,18 @@ local function do_transaction(frame, timeout_ms)
         waited = waited + 5
     end
     respFlag = false
+    reqSlave, reqFc = nil, nil
     return nil
 end
 
 local function poll_reg(reg)
-    local frame, err = mbus.build_read(lastCfg.slave or cfg.SLAVE_ADDR, reg.addr, reg.count or 1)
+    local slave = lastCfg.slave or cfg.SLAVE_ADDR
+    local frame, err = mbus.build_read(slave, reg.addr, reg.count or 1)
     if not frame then
         log.warn("poll", "build fail", reg.addr, tostring(err))
         return
     end
-    local f = do_transaction(frame, lastCfg and lastCfg.timeout or cfg.TIMEOUT_MS)
+    local f = do_transaction(frame, lastCfg and lastCfg.timeout or cfg.TIMEOUT_MS, slave, 3)
     if not f then
         stat.timeout = stat.timeout + 1
         -- 前若干次超时把原始回字节打出来, 便于区分"完全没回"与"回了但解析不了"
@@ -132,7 +139,8 @@ local function do_write(w)
         wstat.wfail = wstat.wfail + 1
         return false
     end
-    local f = do_transaction(frame, lastCfg and lastCfg.timeout or cfg.TIMEOUT_MS)
+    local f = do_transaction(frame, lastCfg and lastCfg.timeout or cfg.TIMEOUT_MS,
+        w.slave, w.values and 16 or 6)
     if not f or f.err then
         wstat.wfail = wstat.wfail + 1
         return false

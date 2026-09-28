@@ -85,7 +85,7 @@ function M.push(rec)
     rec.r = cur.r
     cur.recs[#cur.recs + 1] = rec
     pending = pending + 1
-    while #cur.recs > cfg.FLUSH_EVERY do
+    while #cur.recs > cfg.FLUSH_BATCH do
         table.remove(cur.recs, 1)
         stats.dropped = stats.dropped + 1
     end

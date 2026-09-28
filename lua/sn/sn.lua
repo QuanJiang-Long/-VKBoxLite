@@ -133,7 +133,9 @@ function M.write(new_sn, opts)
 end
 
 function M.clear()
-    if M.locked() then return false, "locked" end
+    -- 已锁但当前是 INVALID(非法号)时允许清: 否则返工必须先 UNLOCK 再 C,
+    -- 产线多一步操作(与原工程一致)
+    if M.locked() and state ~= M.STATE.INVALID then return false, "locked" end
     M.erase()
     sn_cache, state = nil, M.STATE.EMPTY
     notify(nil, state)
@@ -188,8 +190,8 @@ end
 
 function M.info_line()
     return string.format("imei:%s;uid:%s;sn:%s;state:%s;lock:%d",
-        tostring(imei_cache), tostring(uid_cache),
-        tostring(sn_cache), state, M.locked() and 1 or 0)
+        imei_cache or "", uid_cache or "",
+        sn_cache or "", state, M.locked() and 1 or 0)
 end
 
 return M
