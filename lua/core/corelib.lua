@@ -34,10 +34,10 @@ local function log_fallback()
 end
 
 function M.log()
+    -- 核心库均为全局, 直接取 _G.log; 绝不用 require("log")
+    -- (Luatools 静态扫描会判"多余核心库引用"拒绝烧录)
     local m = _G.log
     if is_lib(m) and type(m.info) == "function" and type(m.debug) == "function" then return m end
-    local ok, mod = pcall(require, "log")
-    if ok and is_lib(mod) and type(mod.info) == "function" and type(mod.debug) == "function" then return mod end
     if is_lib(m) and type(m.info) == "function" then
         return {
             debug = function() end,

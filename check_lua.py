@@ -220,6 +220,22 @@ def check_string_format(code, path, errors):
             errors.append(f"{path}:{line}: string.format 用了 32 位固件不安全的格式 '{fmt}'")
 
 
+CORE_LIBS = {
+    "log", "sys", "uart", "gpio", "fskv", "json", "mqtt", "mobile", "rtos",
+    "mcu", "wdt", "socket", "pack", "bit", "crypto", "string", "table",
+    "math", "os", "io", "coroutine", "debug", "pm", "i2c", "spi", "adc",
+}
+
+
+def check_core_lib_require(code, path, errors):
+    """Luatools 静态扫描: require 核心库(字面量)会被判'多余核心库引用'拒绝烧录"""
+    for m in re.finditer(r'require\s*[,(]\s*"([^"]+)"', code):
+        mod = m.group(1)
+        if mod in CORE_LIBS:
+            line = code.count("\n", 0, m.start()) + 1
+            errors.append(f"{path}:{line}: require 了核心库 '{mod}', Luatools 会拒绝烧录(核心库无需 require, 用 _G.{mod})")
+
+
 def check_tonumber_nil(code, path, errors):
     """tonumber(x) 中 x 是裸 nil 字面量"""
     for m in re.finditer(r"\btonumber\(\s*nil\s*\)", code):
@@ -251,6 +267,7 @@ def main():
         check_requires(files, all_errors)
         check_string_format(code, rel, all_errors)
         check_tonumber_nil(code, rel, all_errors)
+        check_core_lib_require(code, rel, all_errors)
 
     print(f"检查 {len(lua_files)} 个 Lua 文件")
     if all_errors:
