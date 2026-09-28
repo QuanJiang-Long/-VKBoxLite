@@ -70,24 +70,33 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 
 | 指令 | 用途 |
 |---|---|
-| R:INFO | 设备信息（IMEI/UID/SN/锁状态/信号） |
-| R:MODE / W:MODE=idle\|poll\|sniff | 模式查询/切换 |
-| R:CFG / W:CFG={json} | 轮询配置读写 |
-| R:SNIFFCFG / W:SNIFFCFG={json} | 旁听配置读写 |
+| R:INFO | 设备信息（SN/IMEI/ICCID/CSQ/RSRP/版本/项目/服务器/波特率/从机/寄存器数/锁状态） |
+| R:SN / R:ID | SN / 芯片身份（imei;uid;sn;state;lock 的 k:v 形式） |
+| R:MODE / W:MODE=idle\|poll\|sniff | 模式查询（返回 {mode,busy,poll,mon,write}）/ 切换 |
+| R:CFG / W:CFG={json} | 轮询配置读写，读返回 `{cfg, src}`，src=default 表示 fskv 里没写过 |
+| R:SNIFFCFG / W:SNIFFCFG={json} | 旁听配置读写，读返回 `{cfg, src}` |
 | R:REG / W:REG=[json] | 寄存器表读写 |
-| R:VAL | 实时值 |
-| R:STAT | 运行状态汇总 |
-| W:WRITE=slave,addr,value / W:WRITEJ={json} | 写寄存器（idle 也可写） |
+| R:VAL | 实时值快照 |
+| R:STAT | 运行状态汇总（mode/data/guard/store/iot；store 段含 recs/fs） |
+| W:WRITE=slave,addr,value / W:WRITEJ={json} | 写寄存器（idle 也可写，经写事务队列在安全点注入） |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配” |
-| R:MQTT / W:MQTT={json} | MQTT 配置读写 |
+| R:MQTT / W:MQTT={json} | MQTT 配置读写，读返回 `{cfg,pub,sub,ready,err,stat}` |
 | R:REPORT | 立即上报 |
+| R:IOTSTAT | MQTT 运行态（connected/subscribed/published/failed/last_err/last_pub/backoff） |
 | R:NET / R:MEM | 网络/内存诊断 |
 | W:GC | 强制 GC + 重连 |
-| R:DISK / W:STORE=0\|1[,P] | 存储查询/开关 |
-| R:FRAMES[=n] / R:POLL | 旁听帧(n 取 1~50, 默认 20)/轮询状态 |
+| R:DISK / W:STORE=0\|1[,P] | 数据文件查询 / 落盘开关（P=持久化） |
+| R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20） |
+| R:POLL | 轮询状态（rounds/ok/timeout/werr/regs/interval） |
+| R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits}], slaves, stat}` |
+| W:APPLYINFER | 把推断结果写入轮询配置 |
+| R:SNIFF=ms | 静默侦听总线 ms 毫秒（100~30000），返回帧数 |
+| W:TX=hex | 裸发一串字节（总线诊断），回显 rx_len/parsed/rx |
 | W:BOOTMODE=idle\|poll\|sniff | 开机默认模式（大小写不敏感） |
 | W:RST | 恢复默认 |
 | R:SN / R:ID / W:SN=xxx[,FORCE] / C:SN / LOCK:SN / UNLOCK:SN / R:SNEN / W:SNEN=n,0\|1[,P] | SN 产线指令 |
+
+指令集与 `frontend/protocol.js` 的 `Enc` 一一对应；`W:RAWTEST`/`R:NET`/`R:MEM`/`W:GC` 是前端不调用的现场诊断入口。
 
 ## 固件适配要点（对照官方文档）
 
@@ -138,8 +147,13 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 
 - 24 文件 → 16 文件；删除 fsinfo/bootreason 桩、identity 独立模块、logctl 独立模块
 - mbus_common → mbus；cfg_store → cfg.lua；collector/data_store 移入 data/
-- vcom → cmd，指令集保留核心 26 条（含 W:RAWTEST 裸探针），
-  去掉 TX/FRAMELOG/NETTEST/INFER/PROBE 等诊断指令
+- vcom → cmd，指令集按 `frontend/protocol.js` 全量对齐（32 条，含 SN 产线 7 条），
+  恢复 v1 删掉的 TX/INFER/APPLYINFER/SNIFF/IOTSTAT，新增 W:RAWTEST 裸探针
+- 应答结构按前端读取方式修正：R:MODE 返回状态对象而非裸字符串；R:CFG/R:SNIFFCFG 包
+  `{cfg, src}`；R:MQTT 补 `stat`；R:INFO 补 server/baud/slave/regs 并修复
+  mobile.iccid/csq 未调用导致 json.encode 失败返回 `{}` 的问题
+- 配置字段名 `timeout` → `timeout_ms`（与前端 collectCfg 一致），范围 50~500，
+  允许 null = 早返回模式；store.stats 补 recs 与 fs{total,free,used}
 - 看门狗参数、MQTT 用法、启动顺序均对照官方文档核对修正
 - 切帧统一为 CRC 试探法（每个候选长度都验 CRC，fc15/16 用 byte(7)=bc）；事务前 drain 清残帧（v1 只在失败后 drain）
 - 配置校验与原工程对齐：串口参数范围 / MAX_REGS=128 / 标识符去重 / count%width / eps 上限，save 上限 2048
