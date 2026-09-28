@@ -403,12 +403,12 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                     </div>
                     <div class="form-row">
                         <label>发布 Topic</label>
-                        <input id="mqPub" type="text" placeholder="vkbox/{id}/up">
-                        <span class="hint">{id} 会被替换成设备 SN</span>
+                        <input id="mqPub" type="text" placeholder="/sys/thing/node/property/post/{sn}">
+                        <span class="hint">{sn} 会被替换成设备 SN，留空用此默认值</span>
                     </div>
                     <div class="form-row">
                         <label>订阅 Topic</label>
-                        <input id="mqSub" type="text" placeholder="vkbox/{id}/down">
+                        <input id="mqSub" type="text" placeholder="/sys/thing/gw/config/get/{sn}">
                     </div>
                     <div class="form-row">
                         <label>上报周期(秒)</label>

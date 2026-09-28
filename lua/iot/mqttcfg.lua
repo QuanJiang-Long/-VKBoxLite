@@ -16,8 +16,12 @@ M.default = {
     pass = "",
     ssl = false,
     client_id = "",
-    pub_topic = "vkbox/{id}/up",
-    sub_topic = "vkbox/{id}/down",
+    -- 默认与平台 topic 对齐: 上报走 node/property/post, 下行走 gw/config/get。
+    -- {sn} 会替换成设备 SN。前端两个输入框留空时就用这两个值。
+    -- 注意: sub_topic 默认与 PLATFORM_GET_TOPIC 同形, 所以 iot.lua 的
+    -- 订阅列表会去重, 且下行分流只在拉取状态机等待时才当配置包收。
+    pub_topic = "/sys/thing/node/property/post/{sn}",
+    sub_topic = "/sys/thing/gw/config/get/{sn}",
     interval_s = cfg.MQTT_INTERVAL_S,
     qos = cfg.MQTT_QOS,
     allow_no_sn = cfg.MQTT_ALLOW_NO_SN,
@@ -108,17 +112,24 @@ function M.reset()
     return M.default
 end
 
+-- {sn} 与 {id} 等价(都替换成设备 SN)。{sn} 是新默认模板用的写法,
+-- {id} 保留是为了兼容 fskv 里已存过的旧配置, 否则老配置会把字面 {id} 发出去
+local function has_sn_ph(s)
+    return s:find("{sn}", 1, true) ~= nil or s:find("{id}", 1, true) ~= nil
+end
+
+local function sub_sn(s, did)
+    if not did then return s end
+    return (s:gsub("{sn}", did):gsub("{id}", did))
+end
+
 function M.resolve_topics(device_id)
     local c = M.load()
-    local need = c.pub_topic:find("{id}", 1, true) or c.sub_topic:find("{id}", 1, true)
-    if need and (not device_id or device_id == "") then
-        return nil, nil, "topic has {id} but no SN"
+    if (has_sn_ph(c.pub_topic) or has_sn_ph(c.sub_topic))
+        and (not device_id or device_id == "") then
+        return nil, nil, "topic has {sn} but no SN"
     end
-    local gsub_id = function(s)
-        if not device_id then return s end
-        return (s:gsub("{id}", device_id))
-    end
-    return gsub_id(c.pub_topic), gsub_id(c.sub_topic)
+    return sub_sn(c.pub_topic, device_id), sub_sn(c.sub_topic, device_id)
 end
 
 function M.effective(device_id)

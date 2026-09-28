@@ -31,7 +31,7 @@ lua/
 │   └── collector.lua   数据层（最新值 + 帧缓存 + 回调）
 ├── cfg.lua             配置中心（poll/sniff/sys 三类，fskv 持久化）
 ├── iot/
-│   ├── mqttcfg.lua     MQTT 配置（{id} 占位 + normalize）
+│   ├── mqttcfg.lua     MQTT 配置（{sn}/{id} 占位 + normalize）
 │   ├── pullcfg.lua     平台配置下发解析（只提取，无副作用）
 │   └── iot.lua         连接编排 + 上报 + 下行 + 配置拉取状态机
 └── svc/
@@ -243,10 +243,15 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 
 | 用途 | topic | 说明 |
 |---|---|---|
-| hello | `/sys/thing/gw/config/hello/{SN}` | `{SN}` = 设备 SN |
+| 上报（发布） | `/sys/thing/node/property/post/{sn}` | 前端留空时的默认模板，`{sn}` = 设备 SN |
+| 订阅（下行） | `/sys/thing/gw/config/get/{sn}` | 前端留空时的默认模板 |
+| hello | `/sys/thing/gw/config/hello/{SN}` | 拉取握手，`{SN}` = 设备 SN |
 | 配置下发 | `/sys/thing/gw/config/get/{SN}` | conack 时与下行 topic 一起订阅 |
-| 上报 | `/sys/thing/node/property/post/{SN}-1` | `{n}` 固定为 1 |
-| 下行命令 | `/sys/thing/gw/function/get/{SN}` | |
+| 上报（平台） | `/sys/thing/node/property/post/{SN}-1` | 拉取结果里回给前端展示，当前不订阅 |
+| 下行命令（平台） | `/sys/thing/node/function/get/{SN}-1` | 拉取结果里回给前端展示，当前不订阅 |
+
+> 业务订阅模板默认与「配置下发」topic 同形，所以 conack 时会去重（同一 topic 只订一次），
+> 且下行分流只在拉取状态机 `waiting` 时才把该 topic 的报文当配置包收，其余按普通指令解析。
 
 ### 字段提取（`lua/iot/pullcfg.lua`）
 
@@ -282,7 +287,7 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 点「拉取配置」后 OS log 里依次出现：
 
 ```
-I/iot: conack ok, subscribed=true, topics=[vkbox/11802026092600016/down /sys/thing/gw/config/get/11802026092600016]
+I/iot: conack ok, subscribed=true, topics=[/sys/thing/gw/config/get/11802026092600016]
 I/iot: pullcfg hello topic=/sys/thing/gw/config/hello/11802026092600016 sn=11802026092600016 imei=86xxxxxxxxxxxxx body={"vendor":"VKBoxLite",...}
 I/iot: pullcfg recv topic=/sys/thing/gw/config/get/11802026092600016 len=812
 I/iot: pullcfg done 已忽略 0 条
@@ -291,8 +296,7 @@ I/iot: pullcfg done 已忽略 0 条
 连不上 MQTT 时是 `pullcfg fail MQTT 连接失败: <原因>`（等 20s）。
 
 topic 里的 `{SN}` 取的是**烧号的 SN**（`_G.get_device_sn()`），与 payload 里的
-`deviceId`（IMEI）**不是同一个标识**。三个 topic（hello / config/get / property/post）
-用的都是同一个 SN，对不上时先看这行日志确认。
+`deviceId`（IMEI）**不是同一个标识**。所有 topic 用的都是同一个 SN，对不上时先看这行日志确认。
 
 ## 本地落盘（已移除）
 按需求，poll 模式**不做本地保存**，采集数据只走两条路：

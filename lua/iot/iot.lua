@@ -140,9 +140,11 @@ local function on_mqtt(cli, event, data, payload)
         S.backoff = 1
         S.reject_reason = nil
         local subs = {}
+        -- 业务订阅与平台配置订阅默认同形(/sys/thing/gw/config/get/{sn}),
+        -- 同一个 topic 订两次纯属浪费, 去重后再订
         if S.sub then subs[#subs + 1] = S.sub end
         local gtopic = get_topic()
-        if gtopic then subs[#subs + 1] = gtopic end
+        if gtopic and gtopic ~= S.sub then subs[#subs + 1] = gtopic end
         S.subscribed = false
         for _, t in ipairs(subs) do
             local sok, serr = pcall(function() cli:subscribe(t, mqttcfg.load().qos) end)
@@ -332,11 +334,17 @@ local function downlink_write(items)
 end
 
 function M.handle_downlink(topic, payload)
-    -- 平台配置下发: 与指令下行共用 recv 通道, 按 topic 前缀区分
+    -- 平台配置下发与业务指令下行默认共用同一 topic
+    -- (/sys/thing/gw/config/get/{sn}), 不能一见这个前缀就当配置包收下,
+    -- 否则 REPORT/WRITE 指令全被吞掉。
+    -- 只有拉取状态机正在 waiting 时才当配置包; 其余情况按普通指令解析。
     if type(topic) == "string" and topic:find("/gw/config/get/", 1, true) then
-        log.info("iot", string.format("pullcfg recv topic=%s len=%d", topic, #tostring(payload)))
-        if S.pull.state == "waiting" then S.pull_payload = payload end
-        return
+        if S.pull.state == "waiting" then
+            log.info("iot", string.format("pullcfg recv topic=%s len=%d", topic, #tostring(payload)))
+            S.pull_payload = payload
+            return
+        end
+        log.info("iot", "downlink on get topic, pull idle -> parse as cmd")
     end
     if not json then return end
     local ok, t = pcall(json.decode, payload)

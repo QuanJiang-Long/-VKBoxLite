@@ -438,6 +438,12 @@ function collectCfg() {
   };
 }
 
+// topic 里是否含 SN 占位符。{sn} 是新默认模板的写法，
+// {id} 是旧模板写法，两者都认，避免老配置被误判为"没写 SN"
+function hasSnPh(s) {
+  return String(s).indexOf('{sn}') >= 0 || String(s).indexOf('{id}') >= 0;
+}
+
 function collectRegs() {
   const out = [];
   el.paramTbody.querySelectorAll('tr').forEach(tr => {
@@ -923,10 +929,10 @@ async function readMqtt() {
 async function saveMqtt() {
   const host = el.mqHost.value.trim();
   if (!host) { toast('MQTT 服务器地址不能为空'); return; }
-  // {id} 只是推荐（多台设备不撞 topic）。平台若要求固定格式
+  // {sn} 只是推荐（多台设备不撞 topic）。平台若要求固定格式
   // （如 /12/<sn>/property/post），用户直接把 SN 写进 topic 也放行。
-  if (el.mqPub.value.indexOf('{id}') < 0 && el.mqSub.value.indexOf('{id}') < 0) {
-    if (!confirm('发布/订阅 Topic 都不含 {id} 占位符。\n若 topic 里没写设备 SN，多台设备会共用同一 topic 导致数据互相覆盖。\n确定继续吗？')) return;
+  if (!hasSnPh(el.mqPub.value) && !hasSnPh(el.mqSub.value)) {
+    if (!confirm('发布/订阅 Topic 都不含 {sn} 占位符。\n若 topic 里没写设备 SN，多台设备会共用同一 topic 导致数据互相覆盖。\n确定继续吗？')) return;
   }
   const cfg = {
     host: host,
@@ -935,8 +941,9 @@ async function saveMqtt() {
     user: el.mqUser.value.trim(),
     pass: el.mqPass.value,
     client_id: el.mqClientId.value.trim(),
-    pub_topic: el.mqPub.value.trim() || 'vkbox/{id}/up',
-    sub_topic: el.mqSub.value.trim() || 'vkbox/{id}/down',
+    // 留空时用设备端默认模板，两边必须一致
+    pub_topic: el.mqPub.value.trim() || '/sys/thing/node/property/post/{sn}',
+    sub_topic: el.mqSub.value.trim() || '/sys/thing/gw/config/get/{sn}',
     interval_s: parseInt(el.mqInterval.value, 10) || 0,
     // QoS 界面已移除，不再下发；设备端固定用 QoS 1
     allow_no_sn: el.mqAllowNoSn.checked,
@@ -1256,8 +1263,8 @@ el.btnMqttReset.onclick = async () => {
   el.mqUser.value = '';
   el.mqPass.value = '';
   el.mqClientId.value = '';
-  el.mqPub.value = 'vkbox/{id}/up';
-  el.mqSub.value = 'vkbox/{id}/down';
+  el.mqPub.value = '/sys/thing/node/property/post/{sn}';
+  el.mqSub.value = '/sys/thing/gw/config/get/{sn}';
   el.mqInterval.value = 60;
   // QoS 界面已移除，不再重置
   el.mqAllowNoSn.checked = false;
@@ -1344,7 +1351,8 @@ const MOCK = {
     ]
   },
   mqtt: { host: 'test.mosquitto.org', port: 1883, user: '', pass: '', ssl: false,
-          pub_topic: 'vkbox/{id}/up', sub_topic: 'vkbox/{id}/down',
+          pub_topic: '/sys/thing/node/property/post/{sn}',
+          sub_topic: '/sys/thing/gw/config/get/{sn}',
           interval_s: 60, allow_no_sn: false, keep_session: false },
   published: 0
 };
@@ -1414,7 +1422,9 @@ function mockReply(line) {
            parity: MOCK.cfg.parity, stopbits: MOCK.cfg.stopbits }, src: 'fskv'
   });
   else if (line === 'R:MQTT') resp = 'RET:MQTT=' + JSON.stringify({
-    cfg: MOCK.mqtt, pub: 'vkbox/VK20260925001/up', sub: 'vkbox/VK20260925001/down',
+    cfg: MOCK.mqtt,
+    pub: '/sys/thing/node/property/post/VK20260925001',
+    sub: '/sys/thing/gw/config/get/VK20260925001',
     ready: true, err: null,
     stat: { want_run: true, connected: true, subscribed: true,
             device_id: 'VK20260925001', published: MOCK.published,

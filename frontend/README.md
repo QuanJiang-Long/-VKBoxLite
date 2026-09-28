@@ -189,7 +189,7 @@ npm run dist:portable   # 或输出绿色单文件 exe
 
 - 设备 publish `hello` 到 `/sys/thing/gw/config/hello/{SN}`，订阅 `/sys/thing/gw/config/get/{SN}`
 - 只提取 `commInterfaces`（串口参数）与 `tsl.properties`（寄存器表），其余全部丢弃
-- 上报 topic 自动拼成 `/sys/thing/node/property/post/{SN}-1`，下行 topic 为 `/sys/thing/gw/function/get/{SN}`
+- 拉取结果里回的 topic：上报 `/sys/thing/node/property/post/{SN}-1`，下行 `/sys/thing/node/function/get/{SN}-1`
 - **拉取只回填表单，不自动保存**：需用户点「保存配置」「保存并重连」才写入设备
 
 ### 模式控制
@@ -221,8 +221,8 @@ npm run dist:portable   # 或输出绿色单文件 exe
 | 立即上报一次 | `R:REPORT` | `RET:REPORT=OK` | 调试用 |
 | 读上报状态 | `R:IOTSTAT` | `RET:IOTSTAT={json}` | 连接/序号/已上报/失败/错误 |
 
-> **deviceId 用 SN**：topic 里的 `{id}` 占位符会被替换成设备 SN。
-> 多台设备共用不含 id 的 topic 会导致数据互相覆盖，前端保存时会弹窗警告。
+> **deviceId 用 SN**：topic 里的 `{sn}` 占位符会被替换成设备 SN（`{id}` 为旧写法，仍兼容）。
+> 多台设备共用不含 SN 占位符的 topic 会导致数据互相覆盖，前端保存时会弹窗警告。
 > 未烧 SN 时设备默认**拒绝建连**（`allow_no_sn=false`），可在配置里打开调试后门。
 
 ### sniff / 总线诊断
@@ -272,7 +272,7 @@ npm run dist:portable   # 或输出绿色单文件 exe
 | `lua/bus/mbus_ctrl.lua` | 模式仲裁：poll/sniff/stop 互斥切换，开机默认 idle |
 | `lua/bus/collector.lua` | 纯数据层：dataCache / 帧缓存 / ring buffer / on_update + on_store 回调 |
 | `lua/cfg/cfg_store.lua` | 统一配置中心：poll / sniff / sys 三类配置的 fskv 持久化 + 校验规范化 |
-| `lua/iot/mqtt_cfg.lua` | MQTT 配置持久化 + `{id}` 占位符解析 + allow_no_sn 开关 |
+| `lua/iot/mqtt_cfg.lua` | MQTT 配置持久化 + `{sn}`/`{id}` 占位符解析 + allow_no_sn 开关 |
 | `lua/iot/iot_manager.lua` | MQTT 编排：指数退避重连、订阅、值变化驱动上报、下行 REPORT/WRITE |
 | `lua/svc/vcom.lua` | 前端指令层（全部 R:/W: 指令注册） |
 | `lua/main.lua` | 启动编排 8 个 stage（顶部含 require 兼容层） |

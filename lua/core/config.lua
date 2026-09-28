@@ -36,7 +36,7 @@ M.PLATFORM_MODEL = "VKBox-Lite"
 M.PLATFORM_HELLO_TOPIC = "/sys/thing/gw/config/hello/%s"
 M.PLATFORM_GET_TOPIC = "/sys/thing/gw/config/get/%s"
 M.PLATFORM_POST_TOPIC = "/sys/thing/node/property/post/%s-1"
-M.PLATFORM_FUNC_TOPIC = "/sys/thing/gw/function/get/%s"
+M.PLATFORM_FUNC_TOPIC = "/sys/thing/node/function/get/%s-1"
 M.PULL_TIMEOUT_MS = 15000
 -- 拉取前自动连 MQTT 的等待上限(设备可能刚上电, 网络还没就绪)
 M.PULL_CONNECT_MS = 20000
