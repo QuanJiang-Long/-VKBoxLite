@@ -79,6 +79,7 @@ const el = new Proxy({
   // 首页
   btnHomeRefresh: $('btnHomeRefresh'), homeKv: $('homeKv'),
   hMqHost: $('hMqHost'), hMqPort: $('hMqPort'), hMqErr: $('hMqErr'),
+  hMqClientId: $('hMqClientId'), hMqRealId: $('hMqRealId'),
   btnHomeMqttSave: $('btnHomeMqttSave'),
   btnQuickPoll: $('btnQuickPoll'), btnQuickSniff: $('btnQuickSniff'),
   btnQuickStop: $('btnQuickStop'), btnQuickReport: $('btnQuickReport'), btnQuickRst: $('btnQuickRst'),
@@ -724,13 +725,23 @@ function fillMqHome(mq) {
   if (!el.hMqHost) return;
   if (document.activeElement !== el.hMqHost) el.hMqHost.value = mq.host || '';
   if (document.activeElement !== el.hMqPort) el.hMqPort.value = mq.port != null ? mq.port : 1883;
+  // client_id 只在 R:MQTT 的 cfg 段有, R:STAT 的 mqtt 段没有; 没有就不动输入框
+  const c = (S.mqtt && S.mqtt.cfg) || {};
+  if (el.hMqClientId && document.activeElement !== el.hMqClientId) {
+    el.hMqClientId.value = c.client_id || '';
+  }
   if (el.hMqErr) {
     el.hMqErr.textContent = mq.reject_reason || '';
     el.hMqErr.style.color = '#c0392b';
   }
+  // 实际发给 broker 的 clientId(S.client_id), 与配置项可能不同(留空时用 SN)。
+  // CONACK 0x05 时最该看的就是这行
+  if (el.hMqRealId) {
+    el.hMqRealId.textContent = mq.client_id || '--';
+  }
 }
 
-// 首页只改地址/端口。先读全量配置再合并, 否则把用户名/主题等字段冲掉
+// 首页只改地址/端口/ClientID。先读全量配置再合并, 否则把用户名/主题等字段冲掉
 async function saveHomeMqtt() {
   const host = el.hMqHost.value.trim();
   if (!host) { toast('MQTT 服务器地址不能为空'); return; }
@@ -739,8 +750,10 @@ async function saveHomeMqtt() {
     const r = await sendCmd(Protocol.Enc.mqtt(), 'MQTT', 4000);
     const c = (r.data && r.data.cfg) || {};
     if (r.data) { S.mqtt = r.data; renderMqtt(); }
-    await sendCmd(Protocol.Enc.writeMqtt(Object.assign({}, c, { host: host, port: port })), 'MQTT', 5000);
-    status('MQTT 服务器已保存，设备正在重连', true);
+    const patch = { host: host, port: port };
+    if (el.hMqClientId) patch.client_id = el.hMqClientId.value.trim();
+    await sendCmd(Protocol.Enc.writeMqtt(Object.assign({}, c, patch)), 'MQTT', 5000);
+    status('MQTT 配置已保存，设备正在重连', true);
     toast('已保存，设备重连中');
     await new Promise(res => setTimeout(res, 1500));
     await readMqtt();

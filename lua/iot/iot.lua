@@ -222,6 +222,11 @@ local function try_connect()
     collectgarbage("collect")
     local h1, h2 = heap_info()
     log.info("iot", "create mqtt", c.host, c.port, "heap total=" .. tostring(h1) .. " used=" .. tostring(h2))
+    -- 连之前把 CONNECT 关键参数打全。平台回 CONACK 0x05(未授权)时,
+    -- 现场直接对照这行看 clientId/用户名发了什么, 不用猜
+    log.info("iot", string.format("connect: host=%s port=%d ssl=%s clientId=%s user=%s clean=%s",
+        c.host, c.port, tostring(c.ssl), cid,
+        c.user ~= "" and c.user or "(无)", tostring(not c.keep_session)))
     local okc, cli = pcall(mqtt.create, nil, c.host, c.port, c.ssl)
     if not okc or not cli then return false, "mqtt.create 失败: " .. tostring(cli) end
     S.client = cli

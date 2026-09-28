@@ -142,24 +142,46 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 
 ## MQTT 连不上排查
 
-日志出现 `W/mqtt CONACK 0x05` 时，固件随后会打
-`W/user.iot error conack`，前端 MQTT 面板与首页提示
-「平台拒绝连接(CONACK 0x05 未授权)」。
+**先看这一行**——每次建连前都会把 CONNECT 的关键参数打全：
 
-| 现象 | 原因 | 处理 |
+```
+I/user.iot connect: host=dz.voltkun.com port=1883 ssl=false clientId=11802026092600016 user=(无) clean=true
+```
+
+### CONACK 返回码
+
+日志出现 `W/mqtt CONACK 0x05` 时，固件随后打 `W/user.iot error conack`，
+前端显示「平台拒绝连接(CONACK 0x05 未授权)」。
+
+| 码 | 含义 | 处理 |
 |---|---|---|
-| `CONACK 0x01` | 协议版本不被接受 | 平台只支持 MQTT 3.1 或 5.0，换端口或换平台 |
-| `CONACK 0x02` | clientId 被拒 | 平台对 clientId 有格式要求，在「MQTT配置」填平台要求的格式 |
-| `CONACK 0x03` | 服务不可用 | 平台侧限流/维护 |
-| `CONACK 0x04` | 用户名或密码错 | 补 `user`/`pass` |
-| `CONACK 0x05` | 未授权 | **最常见**。先核对地址/端口；平台若开了认证，必须补 `user`/`pass` |
+| `0x01` | 协议版本不接受 | 平台只支持 MQTT 3.1 或 5.0 |
+| `0x02` | clientId 被拒 | 平台对 clientId 有格式要求 |
+| `0x03` | 服务不可用 | 平台限流/维护 |
+| `0x04` | 用户名或密码错 | 补 `user`/`pass` |
+| `0x05` | **未授权** | 见下 |
 
-**注意**：`auth()` 的空串必须传 `nil`。LuatOS 只判指针非空就当"有用户名"，
-会把**零长用户名字段**塞进 CONNECT 包，部分平台（EMQX/NanoMQ）据此判未授权
-回 0x05。绝大多数平台只认地址+端口，白送一个空用户名反而连不上。
+### 0x05 未授权的排查顺序
 
-`try_connect` 等满 15s 后会把 `last_err` 覆盖成 `conack timeout`，
-拒绝原因会丢，所以单独用 `reject_reason` 记，前端优先显示它。
+`0x05` **不等于"必须补用户名密码"**。按以下顺序查：
+
+1. **clientId 格式**（最常见）
+   很多平台不认纯 SN，而是带前缀后缀的格式，例如 `S&<SN>&12&1`。
+   原工程 `lua/iot/mqtt_cfg.lua` 明确记载过这种规范。
+   留空时本框架退回用 SN，格式不对平台就判未授权。
+   → 去「MQTT配置」或首页填平台要求的 clientId 格式。
+2. **地址/端口**：确认平台给的是 MQTT 端口（常见 1883 / 8883(TLS) / 自定义），
+   不是 Web 端口。
+3. **设备是否已注册**：平台可能只放行预先录入的设备，按 clientId 或 SN 白名单。
+4. **用户名密码**：确实有账号密码时才需要补。
+
+### 两个实现细节
+
+- **`auth()` 的空串必须传 `nil`**。LuatOS 只判指针非空就当"有用户名"，
+  会把零长用户名字段塞进 CONNECT 包，部分平台据此判未授权回 0x05。
+- **`reject_reason` 独立于 `last_err`**。`try_connect` 等满 15s 后会把
+  `last_err` 覆盖成 `conack timeout`，拒绝原因就丢了，所以单独记一个字段，
+  前端优先显示它。
 
 ## 485 轮询日志（poll_reg）
 
