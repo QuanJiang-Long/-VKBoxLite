@@ -438,18 +438,48 @@ function collectRegs() {
     const name = tr.querySelector('.c-name').value.trim();
     const count = parseInt(tr.querySelector('.c-count').value, 10);
     // 上报别名：MQTT 的 name 字段。空串照样下发，设备端会退回用标识符
+    // name 合法性由 badRegRow() 提前逐行校验，这里只做最基本的结构过滤
     const alias = tr.querySelector('.c-alias').value.trim();
-    if (!isNaN(addr) && dtype && count > 0) {
+    if (!isNaN(addr) && dtype && count > 0 && name) {
       out.push({ addr, count, name, alias, dtype });
     }
   });
   return out;
 }
 
+// 设备 cfgstore.normalize_* 的错误码 -> 人话。原样弹 bad name 之类用户看不懂
+const CFG_ERR = {
+  'bad addr': '寄存器地址越界(0~65535)',
+  'bad count': '寄存器个数越界(1~125)',
+  'bad dtype': '数据类型不合法',
+  'bad name': '物理标识符为空/超16字符/含非法字符(只能字母数字下划线)',
+  'bad byteOrder': '字节序不合法',
+  'bad wordOrder': '字序不合法',
+  'bad slave': '从机地址越界(1~247)',
+  'bad interval': '轮询间隔过小',
+  'too many regs': '寄存器个数超过上限',
+  'too large': '配置过大',
+  'bad host': 'MQTT 服务器地址不合法',
+  'bad port': 'MQTT 端口越界(1~65535)',
+  'bad pub_topic': '发布 Topic 不合法',
+  'bad sub_topic': '订阅 Topic 不合法',
+  'bad interval_s': '上报周期越界',
+  'bad qos': 'QoS 越界(0~2)',
+  'bad boot_mode': '开机默认模式不合法',
+  'not table': '配置格式错误'
+};
+function cfgErr(raw) {
+  const s = String(raw || '');
+  for (const k in CFG_ERR) if (s.indexOf(k) >= 0) return CFG_ERR[k];
+  return s;
+}
+
 async function saveCfg() {
   const c = collectCfg();
   if (!c.ok) { toast(c.err); status('配置无效：' + c.err, false); return; }
   const cfg = c.cfg;
+  const bad = badRegRow();
+  if (bad) { toast(bad); status('配置无效：' + bad, false); return; }
   const regs = collectRegs();
   if (regs.length === 0) { toast('参数列表为空，请先添加寄存器'); return; }
   const dup = regs.some((r, i) => regs.findIndex(x => x.addr === r.addr && x.name === r.name) !== i);
@@ -471,9 +501,34 @@ async function saveCfg() {
     toast('保存成功');
     await readMode();
   } catch (e) {
-    status('保存失败：' + e.message, false);
-    toast('保存失败：' + e.message);
+    const msg = cfgErr(e.message);
+    status('保存失败：' + msg, false);
+    toast('保存失败：' + msg);
   }
+}
+
+// 逐行检查参数表，返回第一条不合法的人类可读原因（全部合法返回 null）。
+// 比 collectRegs 静默丢弃更好：能说清是第几行、缺什么
+function badRegRow() {
+  const rows = el.paramTbody.querySelectorAll('tr');
+  for (let i = 0; i < rows.length; i++) {
+    const tr = rows[i];
+    if (!tr.querySelector('.c-addr')) continue;      // 空表提示行
+    const addr = parseInt(tr.querySelector('.c-addr').value, 10);
+    const dtype = tr.querySelector('.c-type').value;
+    const name = tr.querySelector('.c-name').value.trim();
+    const count = parseInt(tr.querySelector('.c-count').value, 10);
+    const n = i + 1;
+    if (isNaN(addr) || addr < 0 || addr > 65535) return '第 ' + n + ' 行：寄存器地址越界(0~65535)';
+    if (!dtype) return '第 ' + n + ' 行：未选择数据类型';
+    if (!count || count < 1 || count > 125) return '第 ' + n + ' 行：寄存器个数越界(1~125)';
+    if (!name) return '第 ' + n + ' 行：物理标识符不能为空';
+    if (name.length > 16) return '第 ' + n + ' 行：物理标识符超 16 字符';
+    if (!/^\w+$/.test(name)) return '第 ' + n + ' 行：物理标识符只能含字母、数字、下划线';
+    const w = ({ uint32: 2, int32: 2, float32: 2, uint64: 4, int64: 4, float64: 4 })[dtype] || 1;
+    if (count % w !== 0) return '第 ' + n + ' 行：' + dtype + ' 占 ' + w + ' 个寄存器，个数需为 ' + w + ' 的整数倍';
+  }
+  return null;
 }
 
 //---------------------------------------------------------------------
@@ -534,6 +589,10 @@ async function readVal() {
 const ALL_TYPES = ['uint16', 'int16', 'uint32', 'int32', 'float32', 'uint64', 'int64', 'float64'];
 
 function renderRegTable() {
+  // 正在编辑参数表时不要重建 DOM：重建会让焦点丢失、刚打的字被冲掉，
+  // 表现为"输入框突然不能编辑了"。此时保留现状，等下一次刷新再同步。
+  const ae = document.activeElement;
+  if (ae && ae.closest && el.paramTbody.contains(ae)) return;
   el.paramTbody.innerHTML = '';
   const rows = (S.regs && S.regs.length) ? S.regs : [];
   if (rows.length === 0) {

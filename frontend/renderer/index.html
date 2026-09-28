@@ -108,7 +108,7 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .frame-line .fl-pair{color:#c678dd;flex-shrink:0;}
 /* 弹窗样式 */
 #modalAddReg{display:none;position:fixed;top:0;left:0;width:100%;height:100%;
-    background:rgba(0,0,0,0.3);z-index:999;align-items:center;justify-content:center;}
+    background:rgba(0,0,0,0.3);z-index:2001;align-items:center;justify-content:center;}
 .modal-content{background:#fff;width:560px;padding:24px;border-radius:8px;position:relative;}
 .modal-close{position:absolute;right:20px;top:16px;font-size:24px;cursor:pointer;color:#999;}
 .modal-form{display:grid;grid-template-columns:130px 1fr;gap:14px;align-items:center;}
@@ -559,11 +559,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
             <input id="regId" type="text" placeholder="如 A1 / 温度 / 压力">
             <label>上报别名</label>
             <input id="regAlias" type="text" placeholder="如 电压 / A相电流，留空则用标识符">
-            <span class="hint">MQTT 上报里 name 字段显示的中文名；id 字段仍用上面的物理标识符</span>
             <label>寄存器个数</label>
             <input id="regCount" type="number" value="1" min="1" max="125">
-            <span class="hint">从"寄存器地址"起连续读几个；16 位填 1，32 位填 2，64 位填 4</span>
-            <div></div>
         </div>
         <div class="modal-footer">
             <button onclick="closeModal()">取消</button>
