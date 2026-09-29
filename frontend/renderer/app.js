@@ -117,6 +117,50 @@ function status(msg, ok = true) {
   el.stMsg.textContent = msg;
   el.stMsg.className = ok ? 'ok' : 'err';
 }
+// 通用确认弹窗，替代原生 confirm()。
+// ⚠️ 为什么必须替换：Electron 的原生 confirm() 在 Windows 上是模态消息框，
+//    关掉之后系统常常不把前台激活还给本窗口。此时 DOM 照样能点、能获得焦点，
+//    但按键全部送给上一个前台窗口——用户看到的就是"点得进输入框却打不了字，
+//    必须把鼠标点到软件外任意地方，再回到软件内点一次才能输入"。
+//    模式切换每次都会弹一次确认框，所以切一轮 idle→poll 后就复现。
+//    自绘弹窗全程留在渲染进程里，窗口激活状态不受影响。
+function askConfirm(msg, title) {
+  return new Promise(resolve => {
+    $('cfTitle').textContent = title || '请确认';
+    $('cfMsg').textContent = msg;
+    $('modalConfirm').style.display = 'flex';
+    // done 只允许跑一次：确定按钮有焦点时按 Enter 会同时触发 click 和 keydown
+    let done = false;
+    const finish = ok => {
+      if (done) return;
+      done = true;
+      $('modalConfirm').style.display = 'none';
+      $('cfYes').onclick = null;
+      $('cfNo').onclick = null;
+      $('modalConfirm').onclick = null;
+      document.removeEventListener('keydown', onKey);
+      resolve(ok);
+    };
+    const onKey = e => {
+      if (e.key === 'Escape') finish(false);
+      else if (e.key === 'Enter') finish(true);
+    };
+    $('cfYes').onclick = () => finish(true);
+    $('cfNo').onclick = () => finish(false);
+    // 点遮罩空白处算取消；点到内容区不关，避免误触
+    $('modalConfirm').onclick = e => { if (e.target === $('modalConfirm')) finish(false); };
+    document.addEventListener('keydown', onKey);
+  });
+}
+// 添加寄存器弹窗内的错误提示。不用 alert()/toast()：
+// alert() 是原生模态框，有和 confirm() 一样的焦点问题；
+// toast 的 z-index 低于弹窗，会被遮住看不见
+function regErr(msg) {
+  const e = $('regErr');
+  if (!msg) { e.style.display = 'none'; e.textContent = ''; return; }
+  e.textContent = msg;
+  e.style.display = 'block';
+}
 function radioVal(name) {
   const r = document.querySelector('input[name="' + name + '"]:checked');
   return r ? r.value : '';
@@ -687,6 +731,7 @@ function addParamRow() {
   $('regId').value = '';
   $('regAlias').value = '';
   $('regCount').value = 1;
+  regErr('');                                   // 上次的错误提示不能留着
   $('modalAddReg').style.display = 'flex';
 }
 function closeModal() { $('modalAddReg').style.display = 'none'; }
@@ -696,12 +741,17 @@ function confirmAddReg() {
   const phyId = $('regId').value;
   const alias = $('regAlias').value.trim();
   const cnt = parseInt($('regCount').value, 10);
-  if (!type) { alert('请选择数据类型'); return; }
-  if (!addr || !cnt) { alert('寄存器地址、寄存器个数不能为空'); return; }
+  // 错误提示写在弹窗里：alert() 是原生模态框，关掉后会让整个窗口丢失
+  // 前台激活（详见 askConfirm 的注释），弹窗内的输入框也会跟着打不了字
+  if (!type) { regErr('请选择数据类型'); return; }
+  if (!addr || !cnt) { regErr('寄存器地址、寄存器个数不能为空'); return; }
   const W = { uint32: 2, int32: 2, float32: 2, uint64: 4, int64: 4, float64: 4 };
   const w = W[type] || 1;
-  if (cnt % w !== 0) { alert(type + ' 占 ' + w + ' 个寄存器，个数需为 ' + w + ' 的整数倍'); return; }
-  addRegRow(parseInt(addr, 10), type, phyId, alias, cnt);
+  if (cnt % w !== 0) { regErr(type + ' 占 ' + w + ' 个寄存器，个数需为 ' + w + ' 的整数倍'); return; }
+  if (!/^\w+$/.test(phyId.trim())) { regErr('标识符只能含字母、数字、下划线'); return; }
+  if (phyId.trim().length > 16) { regErr('标识符最长 16 字符'); return; }
+  addRegRow(parseInt(addr, 10), type, phyId.trim(), alias, cnt);
+  regErr('');
   closeModal();
 }
 
@@ -955,7 +1005,7 @@ async function saveMqtt() {
   // {sn} 只是推荐（多台设备不撞 topic）。平台若要求固定格式
   // （如 /12/<sn>/property/post），用户直接把 SN 写进 topic 也放行。
   if (!hasSnPh(el.mqPub.value) && !hasSnPh(el.mqSub.value)) {
-    if (!confirm('发布/订阅 Topic 都不含 {sn} 占位符。\n若 topic 里没写设备 SN，多台设备会共用同一 topic 导致数据互相覆盖。\n确定继续吗？')) return;
+    if (!await askConfirm('发布/订阅 Topic 都不含 {sn} 占位符。\n若 topic 里没写设备 SN，多台设备会共用同一 topic 导致数据互相覆盖。\n确定继续吗？', 'Topic 未含 {sn}')) return;
   }
   const cfg = {
     host: host,
@@ -1260,7 +1310,7 @@ el.btnSaveBoot.onclick = saveBootMode;
 // 卡片区域大、容易误点，切换又要停掉旧模式，所以必须弹窗确认。
 const MODE_LABEL = { idle: '空闲 idle', poll: '轮询 poll', sniff: '旁听 sniff' };
 document.querySelectorAll('.mode-card').forEach(c => {
-  c.onclick = () => {
+  c.onclick = async () => {
     const m = c.getAttribute('data-mode');
     // 点的就是设备当前模式且没有待应用选择：只重绘，不发命令、不弹窗
     if (m === S.mode && !S.modePending) { renderMode(); return; }
@@ -1268,9 +1318,9 @@ document.querySelectorAll('.mode-card').forEach(c => {
     if (S.modeSwitching) return;
     const label = MODE_LABEL[m] || m;
     const curLabel = MODE_LABEL[S.mode] || S.mode;
-    if (!confirm('确定把 485 运行模式从「' + curLabel + '」切换到「' + label + '」？\n\n'
+    if (!await askConfirm('确定把 485 运行模式从「' + curLabel + '」切换到「' + label + '」？\n\n'
                  + '切换时设备会先停掉旧模式再启动新模式（互斥），'
-                 + '正在进行的采集会中断。')) return;
+                 + '正在进行的采集会中断。', '切换运行模式')) return;
     applyMode(m);
   };
 });
@@ -1279,7 +1329,7 @@ el.btnMqttRefresh.onclick = readMqtt;
 el.btnMqttSave.onclick = saveMqtt;
 el.btnMqttReport.onclick = reportNow;
 el.btnMqttReset.onclick = async () => {
-  if (!confirm('确定恢复 MQTT 默认配置？')) return;
+  if (!await askConfirm('确定恢复 MQTT 默认配置？', '恢复默认配置')) return;
   el.mqHost.value = 'test.mosquitto.org';
   el.mqPort.value = 1883;
   el.mqSsl.checked = false;

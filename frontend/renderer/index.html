@@ -107,8 +107,9 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .frame-line .fl-desc{color:#a8b8cc;overflow:hidden;text-overflow:ellipsis;}
 .frame-line .fl-pair{color:#c678dd;flex-shrink:0;}
 /* 弹窗样式 */
-#modalAddReg{display:none;position:fixed;top:0;left:0;width:100%;height:100%;
+#modalAddReg,#modalConfirm{display:none;position:fixed;top:0;left:0;width:100%;height:100%;
     background:rgba(0,0,0,0.3);z-index:2001;align-items:center;justify-content:center;}
+#modalConfirm .modal-content{width:420px;}
 .modal-content{background:#fff;width:560px;padding:24px;border-radius:8px;position:relative;}
 .modal-close{position:absolute;right:20px;top:16px;font-size:24px;cursor:pointer;color:#999;}
 .modal-form{display:grid;grid-template-columns:130px 1fr;gap:14px;align-items:center;}
@@ -556,9 +557,24 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
             <label>寄存器个数</label>
             <input id="regCount" type="number" value="1" min="1" max="125">
         </div>
+        <p id="regErr" style="display:none;margin:0 0 12px 0;color:#c0392b;font-size:12px;line-height:1.6;"></p>
         <div class="modal-footer">
             <button onclick="closeModal()">取消</button>
             <button onclick="confirmAddReg()">确定</button>
+        </div>
+    </div>
+</div>
+
+<!-- 通用确认弹窗。替代原生 confirm()：Electron 的原生模态框关掉后 Windows
+     常常不把前台激活还给本窗口，表现为"点得进输入框但打不了字，必须点到
+     软件外再点回来"。自绘弹窗全程不离开渲染进程，没有这个问题 -->
+<div id="modalConfirm">
+    <div class="modal-content">
+        <h3 id="cfTitle" style="margin:0 0 12px 0;font-weight:normal;">请确认</h3>
+        <p id="cfMsg" style="margin:0;font-size:13px;line-height:1.7;white-space:pre-wrap;"></p>
+        <div class="modal-footer">
+            <button id="cfNo">取消</button>
+            <button id="cfYes">确定</button>
         </div>
     </div>
 </div>
