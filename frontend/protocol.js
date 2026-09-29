@@ -46,6 +46,8 @@
     // ---- MQTT ----
     mqtt:    ()   => 'R:MQTT',
     writeMqtt: (o) => 'W:MQTT=' + JSON.stringify(o),
+    // 只重连、不动配置：设备侧等价于 iot.kick()（销毁 client 后按 backoff=1 立刻重连）
+    mqttReconnect: () => 'W:MQTTRC',
     report:  ()   => 'R:REPORT',
     iotStat: ()   => 'R:IOTSTAT',
 

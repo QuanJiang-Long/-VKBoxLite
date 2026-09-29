@@ -246,6 +246,14 @@ local function reg_cmds()
         if ok then M.reply("RET:MQTT=OK") else M.reply("RET:FAIL:MQTT:" .. tostring(err)) end
     end)
 
+    -- W:MQTTRC: 只重连，不写配置。等价于 iot.kick()：销毁 client 后
+    -- backoff 归 1，task_main 下一轮立刻重连（wait_kickable 会被 kick_flag 打断）
+    M.reg("W:MQTTRC", function()
+        if not iot then return M.reply("RET:FAIL:MQTTRC:no iot") end
+        iot.kick()
+        M.reply("RET:MQTTRC=OK")
+    end)
+
     M.reg("R:REPORT", function()
         if not iot then return M.reply("RET:FAIL:REPORT:no iot") end
         iot.report_now()

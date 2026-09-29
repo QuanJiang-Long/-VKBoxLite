@@ -394,12 +394,10 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                     <div class="form-row">
                         <label>ClientID</label>
                         <input id="mqClientId" type="text" placeholder="如 S&amp;11802026092600016&amp;12&amp;1">
-                        <span class="hint">平台要求的 clientId 格式，留空则用设备 SN</span>
                     </div>
                     <div class="form-row">
                         <label>发布 Topic</label>
                         <input id="mqPub" type="text" placeholder="/sys/thing/node/property/post/{sn}">
-                        <span class="hint">{sn} 会被替换成设备 SN，留空用此默认值</span>
                     </div>
                     <div class="form-row">
                         <label>订阅 Topic</label>
@@ -408,7 +406,6 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                     <div class="form-row">
                         <label>上报周期(秒)</label>
                         <input id="mqInterval" type="number" value="60" min="0" max="86400" style="max-width:140px;">
-                        <span class="hint">0 = 仅在有新采集值时上报</span>
                     </div>
                     <div class="form-row" style="align-items:flex-start;">
                         <label style="padding-top:5px;">MQTT 会话管理</label>
@@ -416,17 +413,18 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                             <option value="0" selected>离线自动销毁</option>
                             <option value="1">持久会话</option>
                         </select>
-                        <span class="hint" style="line-height:1.7;">离线自动销毁：断开即清会话，省 broker 资源<br>持久会话：broker 记住订阅，离线期间指令排队，重连后补收</span>
                     </div>
                     <div class="form-row">
                         <label>no_SN 建连</label>
                         <label class="switch"><input id="mqAllowNoSn" type="checkbox"><span class="sl"></span></label>
                         <span class="hint">默认关闭：防止多台未烧号设备撞同一 topic</span>
                     </div>
-                    <div style="margin-top:14px;display:flex;gap:8px;">
-                        <button id="btnMqttSave" class="primary">保存并重连</button>
-                        <button id="btnMqttReport">立即上报一次</button>
+                    <div style="margin-top:14px;display:flex;gap:8px;align-items:center;">
                         <button id="btnMqttReset" class="danger">恢复默认</button>
+                        <button id="btnMqttReport">立即上报一次</button>
+                        <div style="margin-left:auto;"></div>
+                        <button id="btnMqttReconnect">重连</button>
+                        <button id="btnMqttSave" class="primary">保存</button>
                     </div>
                 </div>
                 <div class="panel">

@@ -79,6 +79,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | W:WRITE=slave,addr,value / W:WRITEJ={json} | 写寄存器（idle 也可写，经写事务队列在安全点注入） |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配” |
 | R:MQTT / W:MQTT={json} | MQTT 配置读写，读返回 `{cfg,pub,sub,ready,err,stat}` |
+| W:MQTTRC | 只重连不动配置（等价 `iot.kick()`：销毁 client 后 backoff 归 1 立刻重连） |
 | R:REPORT | 立即上报 |
 | R:IOTSTAT | MQTT 运行态（connected/subscribed/published/failed/last_err/last_pub/backoff） |
 | R:NET / R:MEM | 网络/内存诊断 |
@@ -227,7 +228,8 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 平台  ──publish────────────────▶  设备  /sys/thing/gw/config/get/{SN}  （连上即订阅）
 
 前端  回填 485 表单 + 寄存器表 + MQTT pub/sub 输入框
-用户  点「保存配置」/「保存并重连」→ W:CFG / W:REG / W:MQTT
+用户  点「保存配置」/「保存」→ W:CFG / W:REG / W:MQTT
+（「重连」按钮单独发 W:MQTTRC，只重连不动配置）
 ```
 
 > `W:PULLCFG` 处理器在 VUART 回调上下文，**不能 `sys.wait`**，所以握手跑在

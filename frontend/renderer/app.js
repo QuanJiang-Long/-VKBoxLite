@@ -1047,6 +1047,21 @@ async function reportNow() {
   }
 }
 
+// 只重连、不保存配置：改完地址/端口后想立即生效又不想整份覆盖时用。
+// 设备侧 W:MQTTRC -> iot.kick()，销毁 client 后 backoff 归 1 立刻重连
+async function mqttReconnect() {
+  try {
+    await sendCmd(Protocol.Enc.mqttReconnect(), 'MQTTRC', 5000);
+    status('已通知设备重连', true);
+    toast('重连中');
+    await new Promise(res => setTimeout(res, 1500));
+    await readMqtt();
+  } catch (e) {
+    status('重连失败：' + e.message, false);
+    toast('重连失败：' + e.message);
+  }
+}
+
 //=====================================================================
 // 实时报文（sniff）
 //=====================================================================
@@ -1328,6 +1343,7 @@ document.querySelectorAll('.mode-card').forEach(c => {
 el.btnMqttRefresh.onclick = readMqtt;
 el.btnMqttSave.onclick = saveMqtt;
 el.btnMqttReport.onclick = reportNow;
+el.btnMqttReconnect.onclick = mqttReconnect;
 el.btnMqttReset.onclick = async () => {
   if (!await askConfirm('确定恢复 MQTT 默认配置？', '恢复默认配置')) return;
   el.mqHost.value = 'test.mosquitto.org';

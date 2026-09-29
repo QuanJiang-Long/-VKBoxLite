@@ -190,7 +190,7 @@ npm run dist:portable   # 或输出绿色单文件 exe
 - 设备 publish `hello` 到 `/sys/thing/gw/config/hello/{SN}`，订阅 `/sys/thing/gw/config/get/{SN}`
 - 只提取 `commInterfaces`（串口参数）与 `tsl.properties`（寄存器表），其余全部丢弃
 - 拉取结果里回的 topic：上报 `/sys/thing/node/property/post/{SN}-1`，下行 `/sys/thing/node/function/get/{SN}-1`
-- **拉取只回填表单，不自动保存**：需用户点「保存配置」「保存并重连」才写入设备
+- **拉取只回填表单，不自动保存**：需用户点「保存配置」「保存」才写入设备
 
 ### 模式控制
 
@@ -218,8 +218,12 @@ npm run dist:portable   # 或输出绿色单文件 exe
 |---|---|---|---|
 | 读 MQTT 配置+状态 | `R:MQTT` | `RET:MQTT={json}` | `{cfg,pub,sub,ready,err,stat}` |
 | 保存 MQTT 配置 | `W:MQTT={json}` | `RET:MQTT=OK` | 保存后自动断开重连 |
+| 只重连不动配置 | `W:MQTTRC` | `RET:MQTTRC=OK` | 等价设备侧 `iot.kick()`，改完参数想立即生效又不想整份覆盖时用 |
 | 立即上报一次 | `R:REPORT` | `RET:REPORT=OK` | 调试用 |
 | 读上报状态 | `R:IOTSTAT` | `RET:IOTSTAT={json}` | 连接/序号/已上报/失败/错误 |
+
+> MQTT 配置页按钮顺序：**恢复默认** / **立即上报一次** ‖ **重连** / **保存**（后两个靠右）。
+> 「保存」= 保存配置 + 重连（原「保存并重连」改名，功能不变）；「重连」只重连、不写配置。
 
 > **deviceId 用 SN**：topic 里的 `{sn}` 占位符会被替换成设备 SN（`{id}` 为旧写法，仍兼容）。
 > 多台设备共用不含 SN 占位符的 topic 会导致数据互相覆盖，前端保存时会弹窗警告。
@@ -300,7 +304,8 @@ npm run dist:portable   # 或输出绿色单文件 exe
 5. **轮询模式**：「运行模式」页点「轮询 poll」→「应用所选模式」→「串口配置」页「读实时值」；
 6. **旁听模式**：「运行模式」页点「旁听 sniff」→「实时报文」页应实时刷出总线报文；
    「推断轮询表」→「应用到轮询配置」可省掉手工问客户要寄存器地址；
-7. **MQTT**：「MQTT上报」页填 MQTT 服务器地址 →「保存并重连」→ 连接状态变「已连接」；
+7. **MQTT**：「MQTT配置」子标签填 MQTT 服务器地址 →「保存」→ 连接状态变「已连接」；
+   改完参数想立即生效又不想整份覆盖时，点「重连」；
    下行发 `{"cmd":"REPORT"}` 可触发设备立即上报；
 8. 「保存配置」后断电重启，验证配置是否保留。
 
