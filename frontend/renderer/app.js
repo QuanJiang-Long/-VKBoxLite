@@ -20,6 +20,8 @@ const S = {
   pending: null,       // { cmd, resolve, timer, settle } 当前等待的应答
   cfg: null,           // 设备返回的 poll 配置（含 regs）
   regs: [],            // 寄存器表 [{addr,count,name,alias,dtype}]
+  cfgSnap: null,       // 485 表单+参数表上次「干净」状态的归一化快照（null = 无基线）
+  cfgDirty: false,     // 485 表单是否有未保存改动
   mode: 'idle',        // 当前 485 运行模式（始终跟随设备，不被用户选择污染）
   modeStat: null,      // R:MODE 返回的完整状态
   modePending: null,   // 用户已选但设备尚未确认的模式；null = 无待应用选择
@@ -188,6 +190,56 @@ function fillOk(e) {
   const sp = e.closest && e.closest('.serial-pane');
   return !(sp && !sp.classList.contains('active'));
 }
+
+//---------------------------------------------------------------------
+// 485 页「未保存改动」检测
+//   问题：通讯参数和参数列表改完后没有任何提示，用户切个页面/点下读取配置
+//        就丢了，还以为是设备没存上。
+//   做法：把表单 + 参数表归一化成快照，和上一次「干净」快照（读入/保存/拉取/
+//        导入之后）比对。比给每个控件挂 input 监听可靠——漏挂一个就漏判；
+//        也不怕回填过程误触发——回填完再取快照。
+//---------------------------------------------------------------------
+function cfgSnap() {
+  const rows = [];
+  el.paramTbody.querySelectorAll('tr').forEach(tr => {
+    if (!tr.querySelector('.c-addr')) return;          // 空表提示行
+    rows.push([
+      tr.querySelector('.c-addr').value,
+      tr.querySelector('.c-type').value,
+      tr.querySelector('.c-count').value,
+      tr.querySelector('.c-name').value,
+      tr.querySelector('.c-alias').value
+    ].join('|'));
+  });
+  return JSON.stringify({
+    b: el.selBaud.value, db: radioVal('databits'), p: radioVal('parity'),
+    sb: radioVal('stopbits'), sl: el.inpSlave.value,
+    iv: el.inpRound.value, to: el.inpTimeout.value, r: rows
+  });
+}
+
+// 表单被程序改过（读配置 / 保存 / 拉取 / 导入）之后调用：当前状态记为干净
+function snapClean() { S.cfgSnap = cfgSnap(); refreshCfgDirty(); }
+
+function refreshCfgDirty() {
+  // cfgSnap 还是 null 说明从没读过配置，没有可比基线，不算脏
+  const d = S.cfgSnap !== null && cfgSnap() !== S.cfgSnap;
+  if (d === S.cfgDirty) return;
+  S.cfgDirty = d;
+  el.btnSaveCfg.textContent = d ? '保存配置 *' : '保存配置';
+  el.btnSaveCfg.classList.toggle('dirty', d);
+  if (d) status('有未保存的更改，点「保存配置」生效', false);
+}
+
+// 会整份覆盖表单的动作（读配置/拉取/应用推断/导入）之前调用。
+// 返回 true 才继续。用自绘弹窗，不用原生 confirm()——原生模态框会抢窗口激活
+async function guardUnsaved() {
+  if (!S.cfgDirty) return true;
+  return await askConfirm(
+    '485 配置有未保存的更改，继续会丢失这些改动。\n建议先点「保存配置」。确定继续？',
+    '有未保存的更改');
+}
+
 function esc(s) {
   return String(s === null || s === undefined ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -352,7 +404,9 @@ async function readInfo() {
 //=====================================================================
 // 485 poll 配置读 / 写
 //=====================================================================
-async function readCfg() {
+// quiet=true 跳过「有未保存更改」确认（调用方已经问过了，或刚连上串口没有基线）
+async function readCfg(quiet) {
+  if (!quiet && !await guardUnsaved()) return;
   try {
     const rc = await sendCmd(Protocol.Enc.cfg(), 'CFG');
     const payload = rc.data;
@@ -393,6 +447,7 @@ async function readCfg() {
     } else {
       status('配置已读取', true);
     }
+    snapClean();                       // 读完了，当前表单就是干净基线
   } catch (e) {
     status('读取配置失败：' + e.message, false);
     toast('读取配置失败：' + e.message);
@@ -405,6 +460,7 @@ async function readCfg() {
 //   ③ done 后回填 串口参数 + 寄存器表 + MQTT 上报/下行 topic
 async function pullCfg() {
   if (S.pullBusy) return;
+  if (!await guardUnsaved()) return;
   S.pullBusy = true;
   const btn = el.btnPullCfg;
   const oldText = btn ? btn.textContent : '';
@@ -432,6 +488,7 @@ async function pullCfg() {
       return;
     }
     fillFormFromPlatform(d);
+    snapClean();                       // 拉回来的值成为新基线，不再是「未保存」
     const skipped = (d.skipped || []).length;
     const n = (d.poll && d.poll.regs ? d.poll.regs.length : 0);
     status('已拉取 ' + n + ' 个寄存器' + (skipped ? '，忽略 ' + skipped + ' 条' : '') + '，请检查后保存', true);
@@ -577,6 +634,7 @@ async function saveCfg() {
       cfg.regs = regs;
       await sendCmd(Protocol.Enc.writeCfg(cfg), 'CFG', 5000);
       S.cfg = cfg; S.regs = regs;
+      snapClean();                     // 保存成功 = 表单和设备一致，清掉「未保存」标记
       status('配置已保存（串口参数变化时设备会自动重启轮询任务）', true);
       toast('保存成功');
       await readMode();
@@ -722,9 +780,13 @@ function addRegRow(addr, type, name, alias, count) {
   const ph = el.paramTbody.querySelector('tr td[colspan]');
   if (ph) ph.parentNode.removeChild(ph);
   el.paramTbody.appendChild(tr);
+  refreshCfgDirty();                   // 增行是 DOM 操作，不触发 input 事件，得手动标脏
 }
 
-function deleteRow(btn) { btn.closest('tr').remove(); }
+function deleteRow(btn) {
+  btn.closest('tr').remove();
+  refreshCfgDirty();                   // 删行同理
+}
 function addParamRow() {
   $('regAddr').value = 1;
   $('regType').value = '';
@@ -1159,11 +1221,12 @@ function renderInfer() {
 }
 
 async function applyInfer() {
+  if (!await guardUnsaved()) return;
   try {
     await sendCmd(Protocol.Enc.applyInfer(), 'APPLYINFER', 5000);
     status('推断结果已写入轮询配置', true);
     toast('已应用到轮询配置');
-    await readCfg();
+    await readCfg(true);               // 上面已经确认过，别再弹一次
   } catch (e) {
     status('应用失败：' + e.message, false);
     toast('应用失败：' + e.message);
@@ -1233,7 +1296,9 @@ function exportCfg() {
   toast('配置已导出');
 }
 
-function importCfg() {
+async function importCfg() {
+  // 先问再弹文件选择框：顺序反了的话用户选完文件才被告知会丢改动，白选一趟
+  if (!await guardUnsaved()) return;
   const inp = document.createElement('input');
   inp.type = 'file';
   inp.accept = '.json,application/json';
@@ -1271,6 +1336,7 @@ function importCfg() {
           el.mqKeepSession.value = d.mqtt.keep_session ? '1' : '0';
         }
         toast('配置已导入：' + regs.length + ' 个寄存器');
+        snapClean();                   // 导入的内容成为新基线
       } catch (e) {
         toast('导入失败：不是合法的 JSON 配置文件');
       }
@@ -1311,6 +1377,15 @@ el.btnAddReg.onclick = addParamRow;
 el.btnImport.onclick = importCfg;
 el.btnExport.onclick = exportCfg;
 el.comSel.onchange = () => { S.port = el.comSel.value; };
+
+// 485 页未保存检测：一条 input + 一条 change 的事件代理覆盖全部编辑入口
+// （波特率/从站/间隔/超时 4 个输入框 + 3 组 radio + 参数表每行 5 个可编辑单元格），
+// 比逐个控件挂监听省事，新增控件也不会漏。
+// 增行/删行走 DOM 操作，不触发这两个事件，已在 addRegRow/deleteRow 里手动标脏
+['input', 'change'].forEach(ev => {
+  const pane = $('sp-s1');
+  if (pane) pane.addEventListener(ev, refreshCfgDirty);
+});
 
 // 首页
 el.btnHomeRefresh.onclick = async () => { await readHome(); await readMode(); await readMqtt(); };

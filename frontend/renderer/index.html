@@ -17,6 +17,10 @@ button:disabled{opacity:.5;cursor:not-allowed;}
 button.primary{background:#409eff;color:#fff;border-color:#409eff;}
 button.primary:hover{background:#66b1ff;}
 button.danger{background:#f56c6c;color:#fff;border-color:#f56c6c;}
+/* 未保存改动标记：保存配置按钮变橙 + 文字加 *。
+   必须排在 button.primary 之后，两者特异性相同，后来者胜 */
+button.dirty{background:#e6a23c;color:#fff;border-color:#e6a23c;}
+button.dirty:hover{background:#ebb563;}
 button.sm{padding:2px 8px;height:26px;font-size:12px;}
 /* 左侧面板 */
 .left-panel{background:#fff;padding:10px;border-radius:4px;overflow-y:auto;}
@@ -72,7 +76,6 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .param-table td.ts-cell input{background:#f7f7f7;color:#888;font-size:12px;
     font-family:Consolas,monospace;}
 .btn-del{color:#c0392b;border:none;background:transparent;cursor:pointer;}
-.btn-add-row{margin-bottom:8px;padding:4px 10px;}
 /* 模式切换 */
 .mode-grid{display:flex;gap:10px;margin:12px 0;}
 .mode-card{flex:1;border:2px solid #dde2ea;border-radius:6px;padding:14px;cursor:pointer;background:#fff;text-align:center;}
@@ -345,7 +348,7 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                     <div class="panel-title">参数列表
                         <div class="spacer"></div>
                         <button class="sm" id="btnReadVal">读实时值</button>
-                        <button class="sm btn-add-row" id="btnAddReg">新增寄存器</button>
+                        <button class="sm" id="btnAddReg">新增寄存器</button>
                     </div>
                     <table class="param-table">
                         <thead>
