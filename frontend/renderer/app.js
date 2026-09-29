@@ -22,6 +22,8 @@ const S = {
   regs: [],            // 寄存器表 [{addr,count,name,alias,dtype}]
   cfgSnap: null,       // 485 表单+参数表上次「干净」状态的归一化快照（null = 无基线）
   cfgDirty: false,     // 485 表单是否有未保存改动
+  mqSnap: null,        // MQTT 表单+首页 3 个 MQTT 输入框上次「干净」快照
+  mqDirty: false,      // MQTT 配置是否有未保存改动
   mode: 'idle',        // 当前 485 运行模式（始终跟随设备，不被用户选择污染）
   modeStat: null,      // R:MODE 返回的完整状态
   modePending: null,   // 用户已选但设备尚未确认的模式；null = 无待应用选择
@@ -88,6 +90,8 @@ const el = new Proxy({
   btnMqttReport: $('btnMqttReport'), btnMqttReset: $('btnMqttReset'),
   mqHost: $('mqHost'), mqPort: $('mqPort'), mqSsl: $('mqSsl'), mqUser: $('mqUser'),
   mqPass: $('mqPass'), mqClientId: $('mqClientId'),
+  // 密码框右侧小眼睛：显/隐切换
+  btnMqttPassEye: $('btnMqttPassEye'),
   mqPub: $('mqPub'), mqSub: $('mqSub'), mqInterval: $('mqInterval'),
   mqAllowNoSn: $('mqAllowNoSn'),
   // MQTT 会话管理：select（离线自动销毁=0 / 持久会话=1），不是开关
@@ -231,13 +235,53 @@ function refreshCfgDirty() {
   if (d) status('有未保存的更改，点「保存配置」生效', false);
 }
 
-// 会整份覆盖表单的动作（读配置/拉取/应用推断/导入）之前调用。
-// 返回 true 才继续。用自绘弹窗，不用原生 confirm()——原生模态框会抢窗口激活
-async function guardUnsaved() {
-  if (!S.cfgDirty) return true;
-  return await askConfirm(
-    '485 配置有未保存的更改，继续会丢失这些改动。\n建议先点「保存配置」。确定继续？',
+// 会整份覆盖表单的动作（读配置/拉取/应用推断/导入/读 MQTT）之前调用。
+//   what = "485"/"MQTT"，btn = 建议点的保存按钮名，clear = 用户确认后作废对应基线
+// 为什么要 clear：表单马上要被设备值覆盖，旧基线没意义了；不清的话
+// fillMqHome 还会按旧基线认为"用户改过"而拒绝覆盖，导致该刷新的不刷新。
+// 用自绘弹窗，不用原生 confirm()——原生模态框会抢窗口激活
+async function guardUnsaved(dirty, what, btn, clear) {
+  if (!dirty) return true;
+  const ok = await askConfirm(
+    what + ' 配置有未保存的更改，继续会丢失这些改动。\n建议先点「' + btn + '」。确定继续？',
     '有未保存的更改');
+  if (ok && clear) { clear(); refreshCfgDirty(); refreshMqDirty(); }
+  return ok;
+}
+
+//---------------------------------------------------------------------
+// MQTT 页「未保存改动」检测（与 485 页同一套思路）
+//   MQTT 页不会被 5s 定时刷新打（readMqtt 只在点刷新/切子标签/保存后调），
+//   可以放心用快照比对。首页那 3 个 MQTT 输入框会被 renderHome 每 5s 回填，
+//   所以在 fillMqHome 里额外加一道"脏了就不覆盖"，否则用户改了一半的
+//   地址/端口/ClientID 会被设备旧值冲掉且毫无提示。
+//---------------------------------------------------------------------
+function mqSnap() {
+  const g = e => (e ? e.value : '');
+  const c = e => (e ? e.checked : false);
+  return JSON.stringify({
+    host: g(el.mqHost), port: g(el.mqPort), ssl: c(el.mqSsl),
+    user: g(el.mqUser), pass: g(el.mqPass), cid: g(el.mqClientId),
+    pub: g(el.mqPub), sub: g(el.mqSub), iv: g(el.mqInterval),
+    noSn: c(el.mqAllowNoSn), keep: g(el.mqKeepSession),
+    hHost: g(el.hMqHost), hPort: g(el.hMqPort), hCid: g(el.hMqClientId)
+  });
+}
+
+function snapMqClean() { S.mqSnap = mqSnap(); refreshMqDirty(); }
+
+function refreshMqDirty() {
+  const d = S.mqSnap !== null && mqSnap() !== S.mqSnap;
+  if (d === S.mqDirty) return;
+  S.mqDirty = d;
+  // MQTT 页和首页各有一个保存按钮，两边都要显示未保存标记
+  el.btnMqttSave.textContent = d ? '保存 *' : '保存';
+  el.btnMqttSave.classList.toggle('dirty', d);
+  if (el.btnHomeMqttSave) {
+    el.btnHomeMqttSave.textContent = d ? '保存并重连 *' : '保存并重连';
+    el.btnHomeMqttSave.classList.toggle('dirty', d);
+  }
+  if (d) status('有未保存的 MQTT 更改，点「保存」生效', false);
 }
 
 function esc(s) {
@@ -406,7 +450,7 @@ async function readInfo() {
 //=====================================================================
 // quiet=true 跳过「有未保存更改」确认（调用方已经问过了，或刚连上串口没有基线）
 async function readCfg(quiet) {
-  if (!quiet && !await guardUnsaved()) return;
+  if (!quiet && !await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
   try {
     const rc = await sendCmd(Protocol.Enc.cfg(), 'CFG');
     const payload = rc.data;
@@ -460,7 +504,7 @@ async function readCfg(quiet) {
 //   ③ done 后回填 串口参数 + 寄存器表 + MQTT 上报/下行 topic
 async function pullCfg() {
   if (S.pullBusy) return;
-  if (!await guardUnsaved()) return;
+  if (!await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
   S.pullBusy = true;
   const btn = el.btnPullCfg;
   const oldText = btn ? btn.textContent : '';
@@ -950,12 +994,18 @@ function renderHome() {
 
 function fillMqHome(mq) {
   if (!el.hMqHost) return;
-  if (fillOk(el.hMqHost)) el.hMqHost.value = mq.host || '';
-  if (fillOk(el.hMqPort)) el.hMqPort.value = mq.port != null ? mq.port : 1883;
-  // client_id 只在 R:MQTT 的 cfg 段有, R:STAT 的 mqtt 段没有; 没有就不动输入框
   const c = (S.mqtt && S.mqtt.cfg) || {};
-  if (el.hMqClientId && fillOk(el.hMqClientId)) {
-    el.hMqClientId.value = c.client_id || '';
+  // 有未保存改动时，5s 定时刷新不许覆盖首页这三个 MQTT 输入框。
+  // fillOk 只挡"焦点正在里面"——用户点一下别处焦点就丢了，下一轮刷新
+  // 照样把改了一半的地址/端口/ClientID 冲成设备旧值，而且毫无提示。
+  // 切到别的标签页时 tab0 不可见，fillOk 本来就会挡住，两道一起才全覆盖
+  if (!S.mqDirty) {
+    if (fillOk(el.hMqHost)) el.hMqHost.value = mq.host || '';
+    if (fillOk(el.hMqPort)) el.hMqPort.value = mq.port != null ? mq.port : 1883;
+    // client_id 只在 R:MQTT 的 cfg 段有, R:STAT 的 mqtt 段没有; 没有就不动输入框
+    if (el.hMqClientId && fillOk(el.hMqClientId)) {
+      el.hMqClientId.value = c.client_id || '';
+    }
   }
   if (el.hMqErr) {
     el.hMqErr.textContent = mq.reject_reason || '';
@@ -970,6 +1020,9 @@ function fillMqHome(mq) {
 
 // 首页只改地址/端口/ClientID。先读全量配置再合并, 否则把用户名/主题等字段冲掉
 async function saveHomeMqtt() {
+  // 必须守卫：合并用的基线来自 R:MQTT（设备当前值），不是表单。
+  // 如果用户在 MQTT 页改了 topic/用户名没保存，这里一保存就把那些改动冲掉了
+  if (!await guardUnsaved(S.mqDirty, 'MQTT', '保存', () => { S.mqSnap = null; })) return;
   const host = el.hMqHost.value.trim();
   if (!host) { toast('MQTT 服务器地址不能为空'); return; }
   const port = parseInt(el.hMqPort.value, 10) || 1883;
@@ -980,10 +1033,11 @@ async function saveHomeMqtt() {
     const patch = { host: host, port: port };
     if (el.hMqClientId) patch.client_id = el.hMqClientId.value.trim();
     await sendCmd(Protocol.Enc.writeMqtt(Object.assign({}, c, patch)), 'MQTT', 5000);
+    snapMqClean();
     status('MQTT 配置已保存，设备正在重连', true);
     toast('已保存，设备重连中');
     await new Promise(res => setTimeout(res, 1500));
-    await readMqtt();
+    await readMqtt(true);
     readHome();
   } catch (e) {
     status('保存失败：' + e.message, false);
@@ -1051,11 +1105,15 @@ function renderMqtt() {
   renderHome();
 }
 
-async function readMqtt() {
+// quiet=true 跳过「有未保存更改」确认（保存/上报/重连之后的回读，以及
+// 刚连上串口还没有基线时）。这两处不该弹框：不是用户主动发起的读取
+async function readMqtt(quiet) {
+  if (!quiet && !await guardUnsaved(S.mqDirty, 'MQTT', '保存', () => { S.mqSnap = null; })) return;
   try {
     const r = await sendCmd(Protocol.Enc.mqtt(), 'MQTT');
     S.mqtt = r.data;
     renderMqtt();
+    snapMqClean();                   // 读完了，当前表单就是干净基线
   } catch (e) {
     setKv('mqStErr', '读取失败：' + e.message, true);
   }
@@ -1087,10 +1145,11 @@ async function saveMqtt() {
   };
   try {
     await sendCmd(Protocol.Enc.writeMqtt(cfg), 'MQTT', 5000);
+    snapMqClean();                     // 保存成功 = 表单和设备一致，清掉「未保存」标记
     status('MQTT 配置已保存，设备正在重连', true);
     toast('已保存，设备重连中');
     await new Promise(res => setTimeout(res, 1500));
-    await readMqtt();
+    await readMqtt(true);
   } catch (e) {
     status('保存失败：' + e.message, false);
     toast('保存失败：' + e.message);
@@ -1102,11 +1161,21 @@ async function reportNow() {
     await sendCmd(Protocol.Enc.report(), 'REPORT', 5000);
     status('已触发一次上报', true);
     toast('已上报');
-    await readMqtt();
+    await readMqtt(true);
   } catch (e) {
     status('上报失败：' + e.message, false);
     toast('上报失败：' + e.message);
   }
+}
+
+// 密码框右侧小眼睛：password / text 互换。
+// 只改 type，值和焦点都不动，所以正在输入中途切也不会丢字；
+// 也不抢输入框焦点（按钮是独立的 type="button"，点了焦点还在输入框）
+function togglePassEye() {
+  const show = el.mqPass.type === 'password';
+  el.mqPass.type = show ? 'text' : 'password';
+  el.btnMqttPassEye.classList.toggle('show', show);
+  el.btnMqttPassEye.title = show ? '隐藏密码' : '显示密码';
 }
 
 // 只重连、不保存配置：改完地址/端口后想立即生效又不想整份覆盖时用。
@@ -1117,7 +1186,7 @@ async function mqttReconnect() {
     status('已通知设备重连', true);
     toast('重连中');
     await new Promise(res => setTimeout(res, 1500));
-    await readMqtt();
+    await readMqtt(true);
   } catch (e) {
     status('重连失败：' + e.message, false);
     toast('重连失败：' + e.message);
@@ -1221,7 +1290,7 @@ function renderInfer() {
 }
 
 async function applyInfer() {
-  if (!await guardUnsaved()) return;
+  if (!await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
   try {
     await sendCmd(Protocol.Enc.applyInfer(), 'APPLYINFER', 5000);
     status('推断结果已写入轮询配置', true);
@@ -1298,7 +1367,7 @@ function exportCfg() {
 
 async function importCfg() {
   // 先问再弹文件选择框：顺序反了的话用户选完文件才被告知会丢改动，白选一趟
-  if (!await guardUnsaved()) return;
+  if (!await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
   const inp = document.createElement('input');
   inp.type = 'file';
   inp.accept = '.json,application/json';
@@ -1387,6 +1456,18 @@ el.comSel.onchange = () => { S.port = el.comSel.value; };
   if (pane) pane.addEventListener(ev, refreshCfgDirty);
 });
 
+// MQTT 未保存检测：MQTT 页(#sp-s2) + 首页 MQTT 那一栏(#tab0)分属两个容器，
+// 用事件代理得挂到 body 上，反而绕。这里直接把 14 个可编辑字段逐个挂监听，
+// 一目了然，新增字段时漏不了（编译器不会提醒，但列表就摆在眼前）。
+// 程序回填(renderMqtt/fillMqHome 赋 .value)不触发这两个事件，不会误标脏
+[el.mqHost, el.mqPort, el.mqSsl, el.mqUser, el.mqPass, el.mqClientId,
+ el.mqPub, el.mqSub, el.mqInterval, el.mqKeepSession, el.mqAllowNoSn,
+ el.hMqHost, el.hMqPort, el.hMqClientId].forEach(e => {
+  if (!e) return;
+  e.addEventListener('input', refreshMqDirty);
+  e.addEventListener('change', refreshMqDirty);
+});
+
 // 首页
 el.btnHomeRefresh.onclick = async () => { await readHome(); await readMode(); await readMqtt(); };
 el.btnHomeMqttSave.onclick = saveHomeMqtt;
@@ -1419,7 +1500,9 @@ el.btnMqttRefresh.onclick = readMqtt;
 el.btnMqttSave.onclick = saveMqtt;
 el.btnMqttReport.onclick = reportNow;
 el.btnMqttReconnect.onclick = mqttReconnect;
+el.btnMqttPassEye.onclick = togglePassEye;
 el.btnMqttReset.onclick = async () => {
+  if (!await guardUnsaved(S.mqDirty, 'MQTT', '保存', () => { S.mqSnap = null; })) return;
   if (!await askConfirm('确定恢复 MQTT 默认配置？', '恢复默认配置')) return;
   el.mqHost.value = 'test.mosquitto.org';
   el.mqPort.value = 1883;

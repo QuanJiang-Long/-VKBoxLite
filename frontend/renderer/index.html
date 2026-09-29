@@ -53,6 +53,21 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
     padding:4px;flex:1;max-width:400px;border:1px solid #ccc;
 }
 .form-row .hint{color:#999;font-size:12px;}
+/* 密码框 + 右侧小眼睛。span 占位和 input 原先一样大(flex:1 + 400px 上限)，
+   眼睛绝对定位在右侧，不占布局也不改变输入框宽度。
+   ⚠️ padding-right 必须写成 .form-row .pw-wrap input：.form-row input[type]
+   的特异性 (0,1,1,1) 高于 .pw-wrap input (0,1,0,1)，直接写会被 padding:4px 覆盖，
+   长密码的文字会钻到眼睛底下去 */
+.form-row .pw-wrap{position:relative;display:flex;flex:1;max-width:400px;}
+.form-row .pw-wrap input{flex:1;min-width:0;padding-right:26px;}
+.pw-eye{position:absolute;right:4px;top:50%;transform:translateY(-50%);
+    width:20px;height:20px;padding:0;border:none;background:transparent;
+    color:#999;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.pw-eye:hover{color:#333;background:transparent;}
+.pw-eye svg{width:14px;height:14px;fill:currentColor;display:block;}
+.pw-eye .slash{display:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;}
+/* 密码已显示时：眼睛上叠一道斜杠，变成"隐藏"态 */
+.pw-eye.show .slash{display:block;}
 .radio-group{display:flex;gap:16px;}
 .radio-group label{display:flex;align-items:center;gap:4px;font-weight:normal;width:auto;}
 /* 面板 */
@@ -392,7 +407,16 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                     </div>
                     <div class="form-row">
                         <label>密码</label>
-                        <input id="mqPass" type="password" placeholder="无则留空">
+                        <span class="pw-wrap">
+                            <input id="mqPass" type="password" placeholder="无则留空">
+                            <button type="button" class="pw-eye" id="btnMqttPassEye" title="显示密码">
+                                <svg viewBox="0 0 16 16" aria-hidden="true">
+                                    <path d="M8 2.5C4.4 2.5 1.4 5.6.3 8c1.1 2.4 4.1 5.5 7.7 5.5s6.6-3.1 7.7-5.5C14.6 5.6 11.6 2.5 8 2.5z"/>
+                                    <circle cx="8" cy="8" r="2.6"/>
+                                    <line class="slash" x1="2.5" y1="13.5" x2="13.5" y2="2.5"/>
+                                </svg>
+                            </button>
+                        </span>
                     </div>
                     <div class="form-row">
                         <label>ClientID</label>
