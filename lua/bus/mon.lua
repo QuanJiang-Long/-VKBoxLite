@@ -92,7 +92,6 @@ local function process_frame(s)
     f.paired_qty = f.qty
     collector.push_raw_rx(f.hex)
     collector.push_frame(f)
-    pcall(uart.write, mbus.VUART_DEBUG, "RX485:" .. f.hex .. "\r\n")
 end
 
 local function on_receive(id, len)

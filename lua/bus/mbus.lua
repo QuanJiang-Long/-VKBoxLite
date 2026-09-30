@@ -1,13 +1,10 @@
 local corelib = require "core/corelib"
-local log = corelib.log()
 local uart = corelib.try("uart")
 
 local M = {}
 
 M.UART_ID = 1
 M.DE_PIN = 8
--- 旁听帧透传口与产线/前端通道共用同一个 USB 虚拟串口(实测 VUART_0=32, 非 4)
-M.VUART_DEBUG = (uart and uart.VUART_0) or 4
 
 local CRC_TABLE = {}
 do
