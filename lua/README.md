@@ -75,10 +75,10 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:REG / W:REG=[json] | 寄存器表读写 |
 | R:VAL | 实时值快照 |
 | R:STAT | 运行状态汇总（mode/data/guard/mqtt）；`mqtt` 段另带 `push_pending`/`push_n`/`push_seen`/`push_err`（平台主动重推横幅用） |
-| W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt,msg_id,replied,src,seen,push_pending,push_n,push_err}`，`mqtt` 段含 `hello`/`pub`/`sub` 三个拼好的 topic；`msg_id`/`replied` 反映回执；`src`=`pull`/`push`）。平台主动重推的配置也走这个返回（`src=push`）。前提只需配好 MQTT 服务器地址和端口，设备会自己连 |
+| W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt,msg_id,replied,src,seen,autosaved,autosave_at,autosave_regs,push_n,push_err}`，`mqtt` 段含 `hello`/`pub`/`sub`/`func`/`pset`/`pget` 六个拼好的 topic；`autosaved`=解析成功即已落盘生效并自动回执；`msg_id`/`replied` 反映回执；`src`=`pull`/`push`）。平台主动重推的配置也走这个返回（`src=push`）。前提只需配好 MQTT 服务器地址和端口，设备会自己连 |
 | W:WRITE=slave,addr,value / W:WRITEJ={json} | 写寄存器（idle 也可写，经写事务队列在安全点注入） |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配” |
-| R:MQTT / W:MQTT={json} | MQTT 配置读写，读返回 `{cfg,pub,sub,ready,err,stat}` |
+| R:MQTT / W:MQTT={json} | MQTT 配置读写，读返回 `{cfg,pub,sub,hello,func,pset,pget,ready,err,stat}`（后三个是补齐的下行订阅成品） |
 | W:MQTTRC | 只重连不动配置（等价 `iot.kick()`：销毁 client 后 backoff 归 1 立刻重连） |
 | R:REPORT | 立即上报 |
 | R:IOTSTAT | MQTT 运行态（connected/subscribed/published/failed/last_err/last_pub/backoff） |
@@ -208,7 +208,8 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 
 ## 平台配置拉取（W:PULLCFG）
 
-前端点「拉取配置」→ 设备与平台握手拿配置 → **只回填表单，不自动落盘**，用户点「保存配置」才生效。
+前端点「拉取配置」→ 设备与平台握手拿配置 → **解析成功即自动落盘、生效、回执平台**，
+不需要人在前端点「保存配置」确认。
 
 **前提只需配好 MQTT 服务器地址和端口**，不要求 MQTT 已连上：设备会自己先去连
 （`PULL_CONNECT_MS=20s`），连上再发 hello。这是新设备首次使用的正常顺序——
@@ -223,20 +224,31 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 设备  ① 未连 MQTT? 先自己连(最多 20s)      state=connecting
       ② publish hello                      state=helloing
       ③ 等平台下发(15s 超时)                state=waiting
-      ④ 解析 → 回结果                       state=done / fail
+       ④ 解析 → auto_apply 落盘生效 → 回执    state=done / fail
 
 平台  ──publish────────────────▶  设备  /sys/thing/gw/config/get/{SN}  （连上即订阅）
 
-前端  回填 485 表单 + 寄存器表 + MQTT hello/pub/sub 输入框，
-      并强制关掉「手动配置」——三个 topic 换成平台给的那套成品
-用户  点「保存配置」→ W:CFG 成功 → iot.reply_config()
+前端  回填 485 表单 + 寄存器表 + MQTT 6 个 topic 输入框，
+       并强制关掉「手动配置」——topic 换成平台给的那套成品
+设备  auto_apply 落盘生效 → iot.reply_config()（都不需要用户操作）
 设备  ──publish────────────────▶  平台  /sys/thing/gw/config/reply/{SN}
        {"msgId":<下发原值>,"code":200,"status":"ok","appliedTs":<now>}
 （「重连」按钮单独发 W:MQTTRC，只重连不动配置）
 ```
 
-> 回执刻意放在**用户保存之后**：`parse()` 成功只代表报文解析通过，不代表现场
-> 认可这套配置。用户不点保存就不回执，平台会继续重推——这正是想要的语义。
+> **保存与回执都发生在设备侧（`iot.auto_apply`），不经前端**：平台主动重推
+> 走的是同一条路径，靠前端的话没开串口就永远不落地。三道安全边界：
+>
+> | 边界 | 作用 |
+> |---|---|
+> | `normalize_poll` 不过 | 整体拒绝、不落盘、不重启轮询，`skipped` 明细照旧带回 |
+> | `interval_ms`/`timeout_ms` 取设备现值 | 平台怎么下发都不改轮询节奏（`pullcfg` 本来也不给这两个字段） |
+> | 前后对比日志 | `pullcfg 自动保存并生效: 寄存器 3→3, slave 1→2, baud 9600→19200, msgId=...`，否则现场无法追溯配置何时被谁改过 |
+>
+> 串口参数变了才 `stop/apply/start` 重启轮询任务；只换寄存器表时 `apply_cfg` 热更
+> 就够了，重启会硬断一次正在进行的 Modbus 事务。
+> 落盘失败（flash 写不下等）按 **fail** 报，不假装成功——平台会继续重推，而设备
+> 留旧配置，报 fail 比静默好排查；失败时**不回执 U6**。
 > 只回一次（`pull.replied` 去重），同一 msgId 重复回执会让平台重复核销。
 > 新一轮 `W:PULLCFG` 会重置 `msg_id`/`replied`。
 >
@@ -286,6 +298,8 @@ handle_downlink
 改成 `done`，把握手掐断——用户点了「拉取配置」却拿到一份可能是旧的推送。
 寄存后状态机走到 `waiting` 会立刻消费掉，反而省一次平台往返。
 
+**横幅已从"待确认门控"改为"已自动保存的通知"**：黄底=已生效（附多久前落下），红底=解析或自动保存失败需介入。
+
 **横幅数据为什么挂在 `R:STAT`**：`R:PULLCFG` 只在用户点「拉取配置」时才查，
 等不到横幅。`M.status()` 的 `mqtt` 段因此多带四个字段，前端 5s 轮询
 （`readHome`）就能发现：
@@ -297,7 +311,7 @@ handle_downlink
 | `push_seen` | 收到的 OS 时间，横幅显示"已等待 N 秒/分钟" |
 | `push_err` | 解析失败原因，非空时横幅改成"解析失败" |
 
-**横幅撤掉的时机**：用户经 `R:PULLCFG` 看到这份（`pull_finish("done")`）/
+**横幅撤掉的时机**：用户点「知道了」，或 `push_n` 归零 /
 保存并回执成功（`reply_config`）/ 平台不再推。回执失败（未连接）时不撤。
 
 > 注意 `R:PULLCFG` 的返回也多了 `src`/`seen`/`push_pending`/`push_n`/`push_err`
@@ -308,12 +322,22 @@ handle_downlink
 
 | 用途 | topic | 说明 |
 |---|---|---|
-| 上报（发布） | `/sys/thing/node/property/post/{sn}` | 前端留空时的默认模板，`{sn}` = 设备 SN |
-| 订阅（下行） | `/sys/thing/gw/config/get/{sn}` | 前端留空时的默认模板 |
+| 上报（发布） | `/sys/thing/node/property/post/{sn}` | 数据面。模板写死 `-1` 后缀（子设备站位），`{sn}` = 设备 SN。**前端可改**（`mqttcfg.pub_topic`） |
+| 订阅（下行） | `/sys/thing/gw/config/get/{sn}` | 主下行通道：平台配置下发 + 普通指令都走它。**前端可改**（`mqttcfg.sub_topic`） |
 | hello | `/sys/thing/gw/config/hello/{sn}` | 拉取握手，`{sn}` = 设备 SN。**前端可改**（`mqttcfg.hello_topic`，「MQTT配置」页的 **hello Topic** 输入框），留空回落此默认 |
+| 服务调用 | `/sys/thing/gw/function/get/{sn}` | **前端可改**（`mqttcfg.func_topic`），原先写死在 `iot.build_subs()` 里 |
+| 属性设置 | `/sys/thing/gw/property/set/{sn}` | **前端可改**（`mqttcfg.pset_topic`），同上 |
+| 属性查询 | `/sys/thing/gw/property/get/{sn}` | **前端可改**（`mqttcfg.pget_topic`），同上 |
 | 配置下发 | `/sys/thing/gw/config/get/{SN}` | conack 时与下行 topic 一起订阅 |
 | 上报（平台） | `/sys/thing/node/property/post/{SN}-1` | 拉取结果里回给前端展示，当前不订阅 |
 | 下行命令（平台） | `/sys/thing/gw/function/get/{SN}` | 拉取结果里回给前端展示，当前不订阅 |
+
+> 上表 6 条带 `{sn}` 的是**模板**，页面显示的是代入 SN 后的成品。前端「MQTT配置」页
+> 自动模式下只读显示成品，**手动配置** 开关打开后可改模板（改 hello/pub/sub 三项的
+> 同一套开关，不另做一套）。
+> 6 条模板都存在 `mqtt_cfg` 这一条 fskv 里，落盘上限已从 512 抬到 **2048**——原上限下
+> host(128)+clientId(128) 加上 6 条 topic 最长会到 673B，直接 `too large` 拒存。
+> 缺字段的键用设备默认值补，所以老固件/老配置只带 3 个键也能正常加载。
 
 > 业务订阅模板默认与「配置下发」topic 同形，所以 conack 时会去重（同一 topic 只订一次），
 > 且下行分流只在拉取状态机 `waiting` 时才把该 topic 的报文当配置包收，其余按普通指令解析。
@@ -330,9 +354,12 @@ handle_downlink
 |---|---|
 | `/sys/thing/gw/config/get/{SN}` | **无条件订阅**。业务 `sub_topic` 被用户改到别处时，这条仍要订，否则拉取链路断了 |
 | `{sub}` | 用户自配的业务订阅（改过 sub_topic 时才会与上一条不同） |
-| `/sys/thing/gw/function/get/{SN}` | 服务调用 |
-| `/sys/thing/gw/property/set/{SN}` | 属性设置 |
-| `/sys/thing/gw/property/get/{SN}` | 属性查询（空 body = 读全量） |
+| `{func}` | 服务调用（`mqttcfg.func_topic`） |
+| `{pset}` | 属性设置（`mqttcfg.pset_topic`） |
+| `{pget}` | 属性查询（`mqttcfg.pget_topic`） |
+
+后三条**读配置而不是写死**：用户改过这三条模板，`build_subs()` 就按改的拼，
+去重逻辑不变（与 `config/get` 同形时仍只订一次）。
 
 清单全量回在 `R:MQTT` 的 `stat.subs`（数组），前端「连接与上报状态」的 **下行订阅** 一栏显示。
 
@@ -407,12 +434,20 @@ I/iot: conack ok, subscribed=true, topics=[/sys/thing/gw/config/get/118020260926
 I/iot: pullcfg hello topic=/sys/thing/gw/config/hello/11802026092600016 sn=11802026092600016 imei=86xxxxxxxxxxxxx body={"vendor":"VKBoxLite",...,"topicFormat":"v3","onboardingMode":"platform"}
 I/iot: pullcfg recv topic=/sys/thing/gw/config/get/11802026092600016 len=812
 I/pullcfg: alias 非 UTF-8(平台编码问题), 退回 id: Ua      ← 有平台中文名才出现
-I/iot: pullcfg done 已忽略 0 条
+I/iot: pullcfg done 已自动保存生效
+I/iot: pullcfg 自动保存并生效: 寄存器 3->3, slave 1->1, baud 9600->9600, msgId=hello-3f9a2b1c
 I/iot: config/reply /sys/thing/gw/config/reply/11802026092600016 {"msgId":"hello-3f9a2b1c","code":200,"message":"config applied","status":"ok","appliedTs":1721884800}
 ```
 
-`config/reply` 那行**只在用户点过「保存配置」之后**才出现。没出现就说明配置还没被
-确认，平台会继续重推；这是预期行为，不是 bug。
+`config/reply` 那行**紧跟在 `自动保存并生效` 之后由设备自发**（前端拉取与平台主动重推
+都走这一条）。没出现就说明没落盘成功，平台会继续重推；此时 `state` 会是 `fail`
+并带原因（`自动保存失败: 配置不合法: ...` / `落盘失败: ...`）。**不需要用户操作。**
+
+平台主动重推的日志（`push recv`）：
+```
+I/iot: push recv msgId=hello-6e86d9f7 regs=3 skipped=0 (已自动保存)
+```
+后半段带 `(已自动保存)` = 这条路也落盘生效并回执了。
 
 不是本机 SN 的下行会被丢掉，日志：
 
@@ -428,7 +463,7 @@ I/iot: push during handshake(helloing), parked len=850       ← 拉取握手中
 W/iot: push parse fail: tsl.properties 为空                  ← 认出是配置包但读不懂
 ```
 
-`push recv` 出现后设备不自动落盘、不发 `config/reply`；要等用户在 GUI 点「保存配置」。
+`push recv` 出现后设备**立即**自动落盘、生效并回执 `config/reply`（与 `W:PULLCFG` 同一条 `auto_apply`），不需要用户在 GUI 操作；只有 `自动保存失败` 才需要介入。
 前端此时会弹黄色横幅提示。
 
 连不上 MQTT 时是 `pullcfg fail MQTT 连接失败: <原因>`（等 20s）。

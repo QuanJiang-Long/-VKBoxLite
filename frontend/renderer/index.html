@@ -117,8 +117,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .kv-grid .kv span.bad{color:#c0392b;}
 /* 下行订阅是多行 topic 清单，不换行会挤成一坨看不见 */
 #mqStSubs{white-space:pre-line;line-height:1.6;}
-/* 平台主动下发配置横幅。黄色底 = 有事情要做但还没做，
-   跟红色报错（#c0392b）区分开，别让用户以为设备坏了 */
+/* 平台主动下发配置横幅。黄底 = 通知（设备已自动保存生效）；
+   红底 = 需要用户介入（解析或保存失败）。两者都要跟纯报错区分层次 */
 .push-banner{display:flex;align-items:center;gap:10px;margin-bottom:10px;
     padding:8px 12px;background:#fdf6ec;border:1px solid #f0c36d;
     border-radius:4px;font-size:13px;color:#8a6116;}
@@ -126,6 +126,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .push-banner span{flex:1;}
 .push-banner .push-ignore{background:none;border:none;color:#a0855b;
     text-decoration:underline;cursor:pointer;font-size:12px;padding:0;}
+.push-banner.push-banner-bad{background:#fdecea;border-color:#f0a9a0;color:#a33327;}
+.push-banner.push-banner-bad .push-ignore{color:#a33327;}
 /* 报文视图 */
 .frame-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;}
 .frame-toolbar select,.frame-toolbar input{padding:3px 6px;border:1px solid #ccc;font-size:13px;}
@@ -332,8 +334,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                      「拉取配置」才查，等不到这个横幅，所以横幅挂在 5s 轮询上 -->
                 <div id="pushBanner" class="push-banner" hidden>
                     <span id="pushBannerText"></span>
-                    <button id="btnPushView" class="primary">查看并保存</button>
-                    <button id="btnPushIgnore" class="push-ignore">忽略</button>
+                    <button id="btnPushView" class="primary">查看详情</button>
+                    <button id="btnPushIgnore" class="push-ignore">知道了</button>
                 </div>
 
                 <div class="form-row">
@@ -458,6 +460,21 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                         <label>订阅 Topic</label>
                         <input id="mqSub" type="text" placeholder="/sys/thing/gw/config/get/{sn}" readonly>
                         <span class="hint" id="mqSubHint"></span>
+                    </div>
+                    <div class="form-row">
+                        <label>服务调用 Topic</label>
+                        <input id="mqFunc" type="text" placeholder="/sys/thing/gw/function/get/{sn}" readonly>
+                        <span class="hint" id="mqFuncHint"></span>
+                    </div>
+                    <div class="form-row">
+                        <label>属性设置 Topic</label>
+                        <input id="mqPset" type="text" placeholder="/sys/thing/gw/property/set/{sn}" readonly>
+                        <span class="hint" id="mqPsetHint"></span>
+                    </div>
+                    <div class="form-row">
+                        <label>属性查询 Topic</label>
+                        <input id="mqPget" type="text" placeholder="/sys/thing/gw/property/get/{sn}" readonly>
+                        <span class="hint" id="mqPgetHint"></span>
                     </div>
                     <div class="form-row">
                         <label>上报周期(秒)</label>

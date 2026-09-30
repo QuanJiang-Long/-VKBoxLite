@@ -103,6 +103,9 @@ const el = new Proxy({
   // hello topic：设备向平台自述身份用的发布 topic，与数据上报 topic 分开
   mqHelloTopic: $('mqHelloTopic'),
   mqPub: $('mqPub'), mqSub: $('mqSub'), mqInterval: $('mqInterval'),
+  // 补齐的 3 条下行订阅 topic。与 hello/pub/sub 同一套手动/自动语义，
+  // 不能再拆第二套开关，否则用户会疑惑"为什么这几个能改那几个只读"
+  mqFunc: $('mqFunc'), mqPset: $('mqPset'), mqPget: $('mqPget'),
   mqAllowNoSn: $('mqAllowNoSn'),
   // MQTT 会话管理：select（离线自动销毁=0 / 持久会话=1），不是开关
   mqKeepSession: $('mqKeepSession'),
@@ -274,6 +277,7 @@ function mqSnap() {
     user: g(el.mqUser), pass: g(el.mqPass), cid: g(el.mqClientId),
     hello: g(el.mqHelloTopic),
     pub: g(el.mqPub), sub: g(el.mqSub), iv: g(el.mqInterval),
+    func: g(el.mqFunc), pset: g(el.mqPset), pget: g(el.mqPget),
     noSn: c(el.mqAllowNoSn), keep: g(el.mqKeepSession),
     hHost: g(el.hMqHost), hPort: g(el.hMqPort)
   });
@@ -281,20 +285,21 @@ function mqSnap() {
 
 function snapMqClean() { S.mqSnap = mqSnap(); refreshMqDirty(); }
 
-const MQ_TOPIC_IDS = ['mqHelloTopic', 'mqPub', 'mqSub'];
+const MQ_TOPIC_IDS = ['mqHelloTopic', 'mqPub', 'mqSub', 'mqFunc', 'mqPset', 'mqPget'];
 
 // 每行 topic 右边跟一句"是谁定的"，比看主按钮更直接
 function mqTopicHints() {
   const H = S.mqManual ? '手动' : '设备拼';
-  const ids = ['mqHelloHint', 'mqPubHint', 'mqSubHint'];
+  const ids = ['mqHelloHint', 'mqPubHint', 'mqSubHint',
+               'mqFuncHint', 'mqPsetHint', 'mqPgetHint'];
   ids.forEach(id => { if (el[id]) el[id].textContent = H; });
 }
 
 //---------------------------------------------------------------------
 // MQTT topic 手动/自动切换
-//   自动（默认）：三个 topic 只读，显示设备拼好的值（SN 已代入），
+//   自动（默认）：6 个 topic 只读，显示设备拼好的值（SN 已代入），
 //              保存时不下发 topic，设备保留自己的模板
-//   手动：      三个 topic 可编辑，显示带 {sn} 的模板，保存时原样下发
+//   手动：      6 个 topic 可编辑，显示带 {sn} 的模板，保存时原样下发
 // 按钮文字/颜色 = 唯一的模式提示：蓝色「关闭手动配置」= 手动，灰色「手动配置」= 自动
 //---------------------------------------------------------------------
 function setManualMode(on, opts) {
@@ -320,10 +325,16 @@ function setManualMode(on, opts) {
       el.mqHelloTopic.value = c.hello_topic || '';
       el.mqPub.value = c.pub_topic || '';
       el.mqSub.value = c.sub_topic || '';
+      el.mqFunc.value = c.func_topic || '';
+      el.mqPset.value = c.pset_topic || '';
+      el.mqPget.value = c.pget_topic || '';
     } else {
       el.mqHelloTopic.value = (S.mqtt && S.mqtt.hello) || '';
       el.mqPub.value = (S.mqtt && S.mqtt.pub) || '';
       el.mqSub.value = (S.mqtt && S.mqtt.sub) || '';
+      el.mqFunc.value = (S.mqtt && S.mqtt.func) || '';
+      el.mqPset.value = (S.mqtt && S.mqtt.pset) || '';
+      el.mqPget.value = (S.mqtt && S.mqtt.pget) || '';
     }
   }
   // 换内容等于换了一遍表单，必须重新取基线，否则会误报"有未保存更改"
@@ -575,11 +586,7 @@ async function pullCfg() {
     if (btn) { btn.textContent = oldText; btn.disabled = !S.open; }
   };
   try {
-    // 横幅/view 按钮入口：设备里已经有解析好的推送结果，别再向平台要一遍
-    const pending = (S.stat && S.stat.mqtt && S.stat.mqtt.push_pending) ? S.stat.mqtt : null;
-    if (!pending) {
-      await sendCmd(Protocol.Enc.pullCfg(), 'PULLCFG', 8000);
-    }
+    await sendCmd(Protocol.Enc.pullCfg(), 'PULLCFG', 8000);
     // 设备端要先连 MQTT(PULL_CONNECT_MS=20s)再等平台下发(PULL_TIMEOUT_MS=15s),
     // 所以这里按总时长轮询, 不能用固定次数
     let r = null;
@@ -598,11 +605,10 @@ async function pullCfg() {
     }
     fillFormFromPlatform(d);
     // 拉取配置是"平台说了算"，抢过手动配置的话事权：强制关掉手动模式，
-    // 三个 topic 换成平台返回的那套（设备拼好、SN 已代入）
+    // topic 换成平台返回的那套（设备拼好、SN 已代入）
     if (S.mqManual) setManualMode(false);
     snapClean();                       // 拉回来的值成为新基线，不再是「未保存」
     snapMqClean();
-    S.pulled = true;                   // 存起来供 saveCfg 判断"要不要提回执"
     const skipped = (d.skipped || []).length;
     const n = (d.poll && d.poll.regs ? d.poll.regs.length : 0);
     // 平台把中文 name 按 GBK 下发时设备判为非法 UTF-8, 会自动把别名退回 id。
@@ -611,11 +617,14 @@ async function pullCfg() {
     const renamedTip = renamed.length
         ? '，' + renamed.length + ' 个平台别名不可用已退用 id（' + renamed.join('、') + '，中文需平台改 UTF-8）'
         : '';
-    // 未回执前必须说清：用户不点保存，平台就收不到 U6，会按未核销继续重推
-    const msgId = d.msg_id && d.msg_id !== 'unknown' ? ('（msgId ' + d.msg_id + '）') : '';
+    // 设备端解析成功即自动落盘并生效，也自动回执 U6。回声里说出来，
+    // 否则用户不知道刚才那一下已经把设备改了
+    const autoTip = d.autosaved
+        ? '，设备已自动保存并生效、已回执平台'
+        : '，未自动保存（需检查设备日志）';
     status('已拉取 ' + n + ' 个寄存器' + (skipped ? '，忽略 ' + skipped + ' 条' : '')
-           + renamedTip + msgId + '，请检查后保存', true);
-    toast('配置已拉取，点「保存配置」生效');
+           + renamedTip + autoTip, true);
+    toast(d.autosaved ? '配置已拉取并自动保存生效' : '配置已拉取，但未能自动保存');
   } catch (e) {
     status('拉取失败：' + e.message, false);
     toast('拉取失败：' + e.message);
@@ -634,11 +643,15 @@ function fillFormFromPlatform(d) {
   if (p.slave) el.inpSlave.value = p.slave;
   if (p.regs) { S.regs = p.regs; renderRegTable(); }
   if (d.mqtt) {
-    // 三个 topic 一起填：R:PULLCFG 的 mqtt 段已带 hello/pub/sub，
-    // 且都是设备拼好的成品（SN 已代入），自动模式下直接回显
+    // 拉取的 MQTT 段现在带 6 个 topic 成品（hello/pub/sub/func/pset/pget），
+    // 都是设备拼好的成品（SN 已代入）。只填不下发：topic 归设备管，
+    // 用户改的只是地址/账号这些，与自动模式语义一致
     if (d.mqtt.hello) el.mqHelloTopic.value = d.mqtt.hello;
     if (d.mqtt.pub) el.mqPub.value = d.mqtt.pub;
     if (d.mqtt.sub) el.mqSub.value = d.mqtt.sub;
+    if (d.mqtt.func) el.mqFunc.value = d.mqtt.func;
+    if (d.mqtt.pset) el.mqPset.value = d.mqtt.pset;
+    if (d.mqtt.pget) el.mqPget.value = d.mqtt.pget;
   }
 }
 
@@ -763,12 +776,6 @@ async function saveCfg() {
       snapClean();                     // 保存成功 = 表单和设备一致，清掉「未保存」标记
       status('配置已保存（串口参数变化时设备会自动重启轮询任务）', true);
       toast('保存成功');
-      // 刚从平台拉过来的配置：保存即"现场确认应用"，设备此刻向平台回 U6。
-      // 用 S.pulled 标记，避免普通保存也带一句无关的话
-      if (S.pulled) {
-        status('配置已保存，已向平台回执（平台会停止重推）', true);
-        S.pulled = false;
-      }
       await readMode();
     } catch (e) {
       const msg = cfgErr(e.message);
@@ -1081,14 +1088,16 @@ function renderHome() {
   renderPushBanner(mq);
 }
 
-// 平台主动重新下发配置的横幅。
-// 数据来自 R:STAT 的 mqtt 段（push_pending/push_n/push_seen/push_err），
+// 平台重新下发配置的横幅。
+// 数据来自 R:STAT 的 mqtt 段（push_n/push_seen/push_err/autosaved），
 // 跟着 5s 轮询走 —— R:PULLCFG 只在用户点「拉取配置」时才查，等不到这里。
-// 提示语要区分"新收到"和"早就收到没人管"，后者加一句已等多久
+// 拉取成功即自动保存，所以这里不再是"待确认"门控，而是"设备已被平台
+// 改过"的通知；只有解析/保存失败才是需要用户介入的红色告警
 function renderPushBanner(mq) {
   const box = el.pushBanner;
   if (!box || !el.pushBannerText) return;
-  if (!mq.push_pending) {
+  // 没有平台主动下发的记录就不显示（push_n=0 表示本机从未被平台推过）
+  if (!mq.push_n) {
     box.hidden = true;
     S.pushIgnored = false;      // 清了就重置忽略状态
     return;
@@ -1098,18 +1107,21 @@ function renderPushBanner(mq) {
   S.pushSeenN = mq.push_n;
   box.hidden = false;
 
-  let txt;
+  let txt, bad = false;
   if (mq.push_err) {
-    // 解析失败：设备认出了是配置包但读不懂。必须说出来，
+    // 解析或自动保存失败：设备认出了是配置包但没能落地。必须说出来，
     // 否则表现为"平台点了重新下发但前端毫无反应"
-    txt = '平台推送了配置，但设备解析失败：' + mq.push_err + '（见设备日志）';
+    bad = true;
+    txt = '平台推送了配置，但设备处理失败：' + mq.push_err + '（见设备日志）';
   } else {
     const secs = mq.push_seen ? Math.max(0, Math.floor(Date.now() / 1000) - mq.push_seen) : 0;
     const age = secs >= 60 ? Math.floor(secs / 60) + ' 分钟' : secs + ' 秒';
     const n = mq.push_n > 1 ? '（第 ' + mq.push_n + ' 份）' : '';
-    txt = '平台重新下发了配置' + n + '，已等待 ' + age + '。检查后点「保存配置」才会写入设备并向平台回执。';
+    txt = '平台重新下发了配置' + n + '，设备已自动保存并生效（' + age + '前）。';
   }
   el.pushBannerText.textContent = txt;
+  // 黄色=已生效的通知，红色=失败待处理
+  box.classList.toggle('push-banner-bad', bad);
 }
 
 function fillMqHome(mq) {
@@ -1204,6 +1216,16 @@ function renderMqtt() {
     if (fillOk(el.mqSub)) {
       el.mqSub.value = S.mqManual ? (c.sub_topic || '') : (r.sub || '');
     }
+    // 补齐的 3 条下行订阅：与上面完全同构，r.func/r.pset/r.pget 是设备拼好的成品
+    if (fillOk(el.mqFunc)) {
+      el.mqFunc.value = S.mqManual ? (c.func_topic || '') : (r.func || '');
+    }
+    if (fillOk(el.mqPset)) {
+      el.mqPset.value = S.mqManual ? (c.pset_topic || '') : (r.pset || '');
+    }
+    if (fillOk(el.mqPget)) {
+      el.mqPget.value = S.mqManual ? (c.pget_topic || '') : (r.pget || '');
+    }
     if (fillOk(el.mqInterval)) el.mqInterval.value = c.interval_s != null ? c.interval_s : 60;
     // QoS 已从界面移除：设备端发布/订阅固定用 QoS 1，
     // 这里不再显示也不再下发（设备 normalize 会退回默认值 1）。
@@ -1259,15 +1281,21 @@ async function readMqtt(quiet) {
 async function saveMqtt() {
   const host = el.mqHost.value.trim();
   if (!host) { toast('MQTT 服务器地址不能为空'); return; }
-  // 三个 topic 都先按"留空回退默认"归一，再判 {sn}。
+  // 6 个 topic 都先按"留空回退默认"归一，再判 {sn}。
   // 必须用归一后的值判：拿原始值判的话，清空输入框会被误报成"不含 {sn}"，
   // 而实际发下去的是含 {sn} 的默认模板
   const HELLO = '/sys/thing/gw/config/hello/{sn}';
   const PUB   = '/sys/thing/node/property/post/{sn}';
   const SUB   = '/sys/thing/gw/config/get/{sn}';
+  const FUNC  = '/sys/thing/gw/function/get/{sn}';
+  const PSET  = '/sys/thing/gw/property/set/{sn}';
+  const PGET  = '/sys/thing/gw/property/get/{sn}';
   const helloT = el.mqHelloTopic.value.trim() || HELLO;
   const pubT   = el.mqPub.value.trim() || PUB;
   const subT   = el.mqSub.value.trim() || SUB;
+  const funcT  = el.mqFunc.value.trim() || FUNC;
+  const psetT  = el.mqPset.value.trim() || PSET;
+  const pgetT  = el.mqPget.value.trim() || PGET;
   // {sn} 只是推荐（多台设备不撞 topic）。平台若要求固定格式
   // （如 /12/<sn>/property/post），用户直接把 SN 写进 topic 也放行。
   // 自动模式下三个 topic 不下发，这里的 {sn} 提示就没意义，跳过
@@ -1288,6 +1316,9 @@ async function saveMqtt() {
       hello_topic: helloT,
       pub_topic: pubT,
       sub_topic: subT,
+      func_topic: funcT,
+      pset_topic: psetT,
+      pget_topic: pgetT,
     } : {}),
     interval_s: parseInt(el.mqInterval.value, 10) || 0,
     // QoS 界面已移除，不再下发；设备端固定用 QoS 1
@@ -1551,6 +1582,9 @@ async function importCfg() {
           el.mqClientId.value = d.mqtt.client_id || '';
           el.mqPub.value = d.mqtt.pub_topic || '';
           el.mqSub.value = d.mqtt.sub_topic || '';
+          el.mqFunc.value = d.mqtt.func_topic || '';
+          el.mqPset.value = d.mqtt.pset_topic || '';
+          el.mqPget.value = d.mqtt.pget_topic || '';
           el.mqInterval.value = d.mqtt.interval_s != null ? d.mqtt.interval_s : 60;
           // QoS 界面已移除；老配置文件里若还带 qos 字段，忽略
           el.mqAllowNoSn.checked = !!d.mqtt.allow_no_sn;
@@ -1622,7 +1656,8 @@ if (el.btnPushIgnore) el.btnPushIgnore.onclick = () => {
 // 程序回填(renderMqtt/fillMqHome 赋 .value)不触发这两个事件，不会误标脏
 [el.mqHost, el.mqPort, el.mqSsl, el.mqUser, el.mqPass, el.mqClientId,
  el.mqHelloTopic, el.mqPub, el.mqSub, el.mqInterval, el.mqKeepSession,
- el.mqAllowNoSn, el.hMqHost, el.hMqPort].forEach(e => {
+ el.mqAllowNoSn, el.hMqHost, el.hMqPort,
+ el.mqFunc, el.mqPset, el.mqPget].forEach(e => {
   if (!e) return;
   e.addEventListener('input', refreshMqDirty);
   e.addEventListener('change', refreshMqDirty);
@@ -1691,6 +1726,9 @@ el.btnMqttReset.onclick = async () => {
   el.mqHelloTopic.value = '/sys/thing/gw/config/hello/{sn}';
   el.mqPub.value = '/sys/thing/node/property/post/{sn}';
   el.mqSub.value = '/sys/thing/gw/config/get/{sn}';
+  el.mqFunc.value = '/sys/thing/gw/function/get/{sn}';
+  el.mqPset.value = '/sys/thing/gw/property/set/{sn}';
+  el.mqPget.value = '/sys/thing/gw/property/get/{sn}';
   el.mqInterval.value = 60;
   // QoS 界面已移除，不再重置
   el.mqAllowNoSn.checked = false;

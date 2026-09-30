@@ -77,18 +77,18 @@ mklink /J D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules D:\VKBox_Lite\VKBo
 | 首页无"本地落盘"一栏、poll模式无"本地存储"面板 | **本地落盘功能已整体移除**（按需求，poll 模式不做本地保存）。设备端 `data/store.lua`、`R:DISK`、`W:STORE`、`R:STAT.store` 段及寄存器"落盘阈值"列均已删除。采集数据只走内存最新值（R:VAL）与 MQTT 上报 |
 | 标签页只有 4 个 | poll模式 / sniff模式 是合并后的结果：原「串口配置」改名 **poll模式**，原「实时报文」改名 **sniff模式**，原「MQTT上报」页取消 |
 | poll模式内有两个子标签 | 「串口1（485总线）」+「MQTT配置」，MQTT 内容已从串口1下面移到独立的「MQTT配置」子标签 |
-| poll模式有"读取配置"和"拉取配置"两个按钮 | 「读取配置」= R:CFG + R:REG 回填表单；「拉取配置」= 通过 MQTT 从平台拉配置并回填表单（需先配好 MQTT 服务器地址和端口），同样不自动保存 |
+| poll模式有"读取配置"和"拉取配置"两个按钮 | 「读取配置」= R:CFG + R:REG 回填表单；「拉取配置」= 通过 MQTT 从平台拉配置，**回填表单并自动落盘生效、自动回执平台**，不需要再点「保存配置」（需先配好 MQTT 服务器地址和端口） |
 | 点「拉取配置」提示"请先配置 MQTT 服务器地址/端口" | 拉取走 MQTT。先在首页或「MQTT配置」子标签填好服务器地址和端口并保存，再点拉取 |
-| 首页的 MQTT 地址端口和「MQTT配置」页是什么关系 | 同一份配置的两个入口。首页只改地址/端口（保存时先读全量再合并，不会冲掉用户名和 topic）；完整配置（含 ClientID、hello/发布/订阅 topic）在「poll模式 → MQTT配置」子标签 |
+| 首页的 MQTT 地址端口和「MQTT配置」页是什么关系 | 同一份配置的两个入口。首页只改地址/端口（保存时先读全量再合并，不会冲掉用户名和 topic）；完整配置（含 ClientID、hello/发布/订阅/服务调用/属性设置/属性查询 6 个 topic）在「poll模式 → MQTT配置」子标签 |
 | MQTT 显示"平台拒绝连接(CONACK 0x05 未授权)" | broker 拒绝了这个连接，**不代表一定要用户名密码**。排查顺序：① 首页看「实际使用」那行的 clientId，格式是否平台要求（如 `S&<SN>&12&1`）② 端口是否 MQTT 端口 ③ 设备是否已在平台注册 ④ 确实有账号再补用户名密码。详见 `../lua/README.md` 的「MQTT 连不上排查」 |
 | 点「拉取配置」提示"平台未下发配置(超时)" | 设备已连上 MQTT 并发过 hello，但平台 15s 内没回。检查平台是否在线、topic 是否匹配、SN 是否已烧 |
-| 拉取成功了但平台还在反复推配置 | 正常。回执 U6 要等用户点「保存配置」才发；没点就说明这套配置还没被确认。「连接与上报状态」的 **配置回执** 显示次数，为 0 = 尚未回执 |
-| 拉取成功后「下行订阅」只有 1 条 | 没连上 broker。连上后固定 4 条（config/get + function/get + property/set + property/get） |
+| 拉取成功了但平台还在反复推配置 | 不正常。回执 U6 由设备在自动落盘成功后自动发；平台还在推说明回执没成功（MQTT 断开/无 SN/msgId 不匹配），或仍在重推上一份。「连接与上报状态」的 **配置回执** 显示次数，为 0 = 尚未回执 |
+| 拉取成功后「下行订阅」只有 1 条 | 没连上 broker。连上后固定 4 条（config/get + function/get + property/set + property/get；若 sub_topic 改得与 config/get 不同形则 5 条） |
 | 拉取后有的点是中文乱码/别名栏莫名变成 id | 平台把中文 `name` 按 GBK（非 UTF-8）下发。设备判为非法 UTF-8 后退回 id 并提示"N 个平台别名不可用已退用 id"，同时日志有 `alias 非 UTF-8(平台编码问题), 退回 id: xxx`。MQTTX 独立订阅同样看到乱码 → 是平台的编码问题，不是设备；要平台侧改成 UTF-8 |
 | 拉取后某条寄存器少了，状态行说"忽略 1 条" | 该条平台配置不合法（如 `dataType` 用了 `-CDAB` 这类非大端字节序后缀、`address` 越界、`id` 含非字母数字），明细在"忽略"的 toast/日志。不会整包失败 |
-| 485 页顶部出现黄色横幅"平台重新下发了配置" | 平台侧点了「重新下发配置」按钮，设备已接住并解析好，暂存在内存里等确认。点横幅「查看并保存」或用「拉取配置」把表单填上，检查完点「保存配置」才真正写入设备并向平台回执。详见「平台主动重新下发配置」 |
-| 横幅说"解析失败"没别的反应 | 设备认出了这是配置包但读不懂（`configSnapshot` 里缺字段/`tsl.properties` 为空等），原因在横幅文案里，明细看设备日志 `push parse fail: xxx`。不会静默 |
-| 横幅点「忽略」后又想看看 | 忽略只对当前这一份生效。平台再点一次「重新下发」（`push_n` 会变）横幅会重新弹；或者直接点「拉取配置」也能看到已解析好的那份 |
+| 485 页顶部出现黄条"平台重新下发了配置" | 平台侧点了「重新下发配置」按钮，设备已接住并**自动落盘生效、自动回执平台**，横幅只是通知你设备被平台改过。点「查看详情」可把当前生效的那份读出来看。详见「平台主动重新下发配置」 |
+| 横幅说"处理失败"且是红底 | 设备认出了这是配置包但没能落地（`configSnapshot` 缺字段/`tsl.properties` 为空，或 fskv 写不下），原因在横幅文案里，明细看设备日志 `push parse fail: xxx` / `但自动保存失败: xxx`。不会静默 |
+| 横幅点「知道了」后又想看看 | 只对当前这一份生效。平台再点一次「重新下发」（`push_n` 会变）横幅会重新弹；或者直接点「拉取配置」也能看到当前生效的那份 |
 | 下拉框没有 COM32 | USB 未插好/未上电；或设备日志停在 `VUART task: 等待 USB 枚举...`，等 2~3 秒再刷新 |
 | 串口被占用 | Luatools / ssCOM 正开着同一 COM 口，先关掉 |
 | 打开白屏 | junction 断了，按上文重连或 `npm install` |
@@ -245,7 +245,7 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 | 读 sniff 配置 | `R:SNIFFCFG` | `RET:SNIFFCFG={json}` | 旁听模式的串口参数 |
 | 保存 sniff 配置 | `W:SNIFFCFG={json}` | `RET:SNIFFCFG=OK` | 旁听运行中会自动重启生效 |
 | 读实时值 | `R:VAL` | `RET:VAL=[json]` | `[{name,addr,value,hex,ts,dtype}]`，设备已解好值 |
-| 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,mqtt}` 全量状态；`mqtt` 段另带 `push_pending/push_n/push_seen/push_err`（平台主动重推横幅用，见下） |
+| 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,mqtt}` 全量状态；`mqtt` 段另带 `push_n/push_seen/push_err/autosaved/autosave_at`（平台主动重推横幅用，见下） |
 | 恢复默认配置 | `W:RST` | `RET:RST=OK` | 清除设备保存的 485/MQTT 配置 |
 
 ### 平台配置拉取
@@ -253,7 +253,7 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 | 前端动作 | 指令 | 应答 | 说明 |
 |---|---|---|---|
 | 发起拉取 | `W:PULLCFG` | `RET:PULLCFG=started` | 设备向平台发 hello 并等配置下发；未连 MQTT 直接回 `RET:FAIL:PULLCFG:原因` |
-| 查拉取状态 | `R:PULLCFG` | `RET:PULLCFG={json}` | `{state,msg,poll,skipped,renamed,mqtt,msg_id,replied,src,seen,push_pending,push_n,push_err}`；`state` = `helloing`/`waiting`/`done`/`fail`；`renamed` = 平台别名不可用、已退回 id 的条目名单；`src` = `pull`/`push`，`push` = 这份是平台主动重新下发的 |
+| 查拉取状态 | `R:PULLCFG` | `RET:PULLCFG={json}` | `{state,msg,poll,skipped,renamed,mqtt,msg_id,replied,src,seen,autosaved,autosave_at,autosave_regs,push_n,push_err}`；`state` = `helloing`/`waiting`/`done`/`fail`；`renamed` = 平台别名不可用、已退回 id 的条目名单；`src` = `pull`/`push`，`push` = 这份是平台主动重新下发的；`autosaved` = 已落盘生效并自动回执 |
 
 拉取流程与字段映射详见 `../lua/README.md` 的「平台配置拉取」章节。要点：
 
@@ -261,14 +261,15 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 - conack 时订 4 条 gw 前缀下行：`config/get` + `function/get` + `property/set` + `property/get`（全量见「连接与上报状态」的 **下行订阅** 一栏）。`config/get` **无条件订**：业务订阅 topic 被改到别处时，拉取链路仍要通
 - 非本机 SN（或 `{SN}-{n}`）的下行直接丢弃，不会拿去写寄存器
 - 只提取 `commInterfaces`（串口参数）与 `tsl.properties`（寄存器表），其余全部丢弃
-- 拉取结果里回的 topic：上报 `/sys/thing/node/property/post/{SN}-1`，下行 `/sys/thing/gw/config/get/{SN}`
-- **平台不下发 clientId / 订阅 topic / 上报间隔**（V3 契约），这三样仍是设备自拼
-- **拉取只回填表单，不自动保存**：需用户点「保存配置」才写入设备
-- **回执 U6 也要等用户保存**：`parse()` 成功后只提示"点保存后回执"，此时不回；
-  用户点「保存配置」（`W:CFG`）成功才向 `/sys/thing/gw/config/reply/{SN}` 发
-  `{"msgId":<下发原值>,"code":200,...}`。用户不保存就不回执，平台会继续重推
-  ——这是预期语义，不是卡住。「连接与上报状态」的 **配置回执** 一栏显示已回执次数
-- 拉取成功后 topic 由平台接管：三个 topic 换成设备拼好的成品，并自动关掉
+- 拉取结果里回的 topic：上报 `/sys/thing/node/property/post/{SN}-1`，下行 `/sys/thing/gw/config/get/{SN}`，
+  另加 hello 与服务调用 / 属性设置 / 属性查询三条，共 6 个成品（SN 已代入）
+- **平台不下发 clientId / 6 个订阅 topic / 上报间隔**（V3 契约），这些仍是设备自拼
+- **拉取成功即自动落盘、生效、回执**：解析通过就写 fskv、热更（串口参数变了则重启）
+  轮询任务，并自动向平台回执 U6。**不需要用户点「保存配置」**
+  （串口节奏 `interval_ms`/`timeout_ms` 仍取设备现值，平台改不了）。
+  落盘失败按 fail 报、不回执，平台会继续重推
+- 回执成功后「连接与上报状态」的 **配置回执** 一栏次数 +1
+- 拉取成功后 topic 由平台接管：6 个 topic 换成设备拼好的成品，并自动关掉
   「手动配置」（详见下面「MQTT topic 手动/自动切换」）
 - **平台中文名乱码 → 别名退回 id**：平台若把中文 `name` 按 GBK 而非 UTF-8 下发（MQTTX
   独立订阅同样看到乱码，与设备无关），设备判为非法 UTF-8 会把 `alias` 退回 `id`，并把
@@ -284,45 +285,51 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 横幅触发链（注意为什么必须挂在 `R:STAT` 上）：
 
 ```
-平台重推 → handle_downlink 认出 configSnapshot → 解析成功 → push_pending=true
-        → R:STAT 的 mqtt 段带 push_pending/push_n/push_seen/push_err
-        → 前端 5s 轮询 readHome → renderPushBanner → 485 页顶部黄条
+平台重推 → handle_downlink 认出 configSnapshot → 解析成功 → auto_apply 落盘生效
+        → iot.reply_config() 回执 U6 → push_n++
+        → R:STAT 的 mqtt 段带 push_n/push_seen/push_err/autosaved
+        → 前端 5s 轮询 readHome → renderPushBanner → 485 页顶部黄条（通知）
 ```
 
 `R:PULLCFG` 只在用户点「拉取配置」时才查，等不到这个横幅，所以横幅的数据挂在
 5s 轮询的 `R:STAT`（`readHome` 每 5s 一次）上。
 
+**横幅已从"待确认门控"改为"已自动保存的通知"**——拉取成功即自动落盘、生效、回执，
+前端不需要任何人操作；只有失败才是需要介入的红色告警。
+
 | 横幅状态 | `R:STAT.mqtt` 字段 | 横幅表现 |
 |---|---|---|
-| 正常待确认 | `push_pending:true, push_n:1, push_seen:<秒>` | "平台重新下发了配置，已等待 N 秒/分钟。检查后点「保存配置」才会写入设备并向平台回执" |
+| 已自动保存 | `push_n≥1, push_err:null` | 黄底："平台重新下发了配置，设备已自动保存并生效（N 秒/分钟前）" |
 | 连推多份 | `push_n >= 2` | 文案加「（第 N 份）」，msgId 取最新一份 |
-| 解析失败 | `push_err:"原因"` | "平台推送了配置，但设备解析失败：原因（见设备日志）" |
-| 已保存回执 | `push_pending:false` | 横幅消失 |
+| 解析/保存失败 | `push_err:"原因"` | **红底**："平台推送了配置，但设备处理失败：原因（见设备日志）" |
+| 从未被推过 | `push_n:0` | 横幅隐藏 |
 
 要点：
 
 - **pending 的推送不覆盖正在进行的拉取**。拉取握手途中（`connecting`/`helloing`）到达的
   推送会先寄存，等状态机走到 `waiting` 立刻消费——直接当推送处理会把 `state` 改成
   `done`、把握手掐断，用户点了「拉取配置」却拿到一份可能是旧的推送
-- **横幅「查看并保存」= 复用「拉取配置」按钮**：点它走同一个 `pullCfg()`，但会先看
-  `R:STAT` 的 `push_pending`，为 true 时**跳过 `W:PULLCFG` 握手**直接读 `R:PULLCFG`
-  ——否则会把设备已解析好的结果冲掉，白等 20s(连接)+15s(下发)
-- **「忽略」只对当前这一份生效**：`push_n` 不变就一直不弹；平台再推一份（`push_n`
+- **横幅「查看详情」= 复用「拉取配置」按钮**：点它走同一个 `pullCfg()`，
+  把设备当前生效的那份配置读出来回填表单查看（不额外向平台要）
+- **「知道了」只对当前这一份生效**：`push_n` 不变就一直不弹；平台再推一份（`push_n`
   变大）照旧弹
-- **横幅撤掉的三个时机**：用户在 `R:PULLCFG` 看到这份（拉取状态机 `done`）/ 保存并
-  回执成功 / 平台不再重推。回执失败（未连接）时不撤，还得提示用户
-- **横幅不自动写入设备**。解析成功后只暂存在设备内存里，用户点「保存配置」才会
-  落 fskv 并重启轮询——和前端拉取完全同一套语义
+- **横幅撤掉的时机**：用户点「知道了」/ `push_n` 归零。红底（失败）不停弹，直到
+  下一次推送成功把 `push_err` 清掉
+- **横幅背后设备已经落盘了**。解析成功即 `auto_apply`：写 fskv + 热更/重启轮询 +
+  自动回执 U6，和前端拉取完全同一套代码路径
 
 ### MQTT topic 手动/自动切换
 
-「MQTT配置」子标签左上方有个 **手动配置** 按钮，控制下面三个 topic（hello Topic /
-发布 Topic / 订阅 Topic）到底由谁定：
+「MQTT配置」子标签左上方有个 **手动配置** 按钮，控制下面 **6 个 topic**（hello Topic /
+发布 Topic / 订阅 Topic / 服务调用 Topic / 属性设置 Topic / 属性查询 Topic）到底由谁定：
 
-| 模式 | 按钮样子 | 三个 topic | 输入框里放什么 | 保存时 |
+| 模式 | 按钮样子 | 6 个 topic | 输入框里放什么 | 保存时 |
 |---|---|---|---|---|
-| 自动（默认） | 灰色「手动配置」 | **只读**，设备拼好 | 成品，SN 已代入 | **不下发**三个 topic 键，设备保留自己的模板 |
-| 手动 | 蓝色「关闭手动配置」 | 可编辑 | 带 `{sn}` 的模板 | 三个 topic 原样下发 |
+| 自动（默认） | 灰色「手动配置」 | **只读**，设备拼好 | 成品，SN 已代入 | **不下发**6 个 topic 键，设备保留自己的模板 |
+| 手动 | 蓝色「关闭手动配置」 | 可编辑 | 带 `{sn}` 的模板 | 6 个 topic 原样下发 |
+
+后三条（服务调用 / 属性设置 / 属性查询）原先写死在设备的订阅清单里、页面改不了，现在和
+前三条一样存在 `mqtt_cfg` 里由本页配置，`iot.build_subs()` 按配置拼订阅清单。
 
 要点：
 
@@ -333,8 +340,9 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 - **切模式前先过未保存守卫**。自动→手动、手动→自动都会弹自绘确认框
   （和「恢复默认」「首页保存」同一套 `guardUnsaved`），确认才切。
 - **拉取配置成功会强制关掉手动配置**。平台说了算：`R:PULLCFG` 回来的
-  `mqtt` 段（`hello`/`pub`/`sub` 三个，都是设备按 SN 拼好的）直接回显→三个输入框，
-  同时 `S.mqManual` 置回 `false`。现场手改的 topic 被平台覆盖是预期行为。
+  `mqtt` 段（`hello`/`pub`/`sub`/`func`/`pset`/`pget` 六个，都是设备按 SN 拼好的）
+  直接回显→六个输入框，同时 `S.mqManual` 置回 `false`。现场手改的 topic 被平台
+  覆盖是预期行为。
 - **「恢复默认」会先切手动模式**。自动模式下保存不写 topic，不切手动的话
   点了恢复默认也改不动 topic，属于白点。
 - **自动模式下 `{sn}` 缺失提示跳过**。那三个值是设备给的，没什么可提。
@@ -456,7 +464,11 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 7. **MQTT**：「MQTT配置」子标签填 MQTT 服务器地址 →「保存」→ 连接状态变「已连接」；
    改完参数想立即生效又不想整份覆盖时，点「重连」；
    下行发 `{"cmd":"REPORT"}` 可触发设备立即上报；
-8. 「保存配置」后断电重启，验证配置是否保留。
+   6 个 topic 自动模式只读（设备拼好），要改就点左上角「手动配置」；
+8. **拉配置**：点「拉取配置」→ 状态走完显示"设备已自动保存并生效、已回执平台"，
+   「下行订阅」应出 4 条（config/get + function/get + property/set + property/get），
+   「配置回执」次数 +1；断电重启后 485 参数表应是平台给的那套；
+9. 「保存配置」后断电重启，验证手动改的配置是否保留。
 
 ## 八、已知限制 / 后续
 

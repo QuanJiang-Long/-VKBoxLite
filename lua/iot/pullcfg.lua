@@ -183,19 +183,33 @@ local function props_to_regs(props, limit)
     return regs, skipped, renamed
 end
 
--- 拉取成功后回给前端展示的三个 topic，都是设备按 SN 拼好的成品。
+-- {sn}/{id} 换成设备 SN。{id} 兼容 fskv 里的旧模板，否则老配置会把
+-- 字面 {id} 发出去
+local function sub_sn(s, did)
+    if not s or s == "" or not did or did == "" then return s end
+    return (s:gsub("{sn}", did):gsub("{id}", did))
+end
+
+-- 拉取成功后回给前端展示的 topic，都是设备按 SN 拼好的成品。
 -- hello 走 mqttcfg.resolve_hello：用户可能在 MQTT 页改过 hello topic，
 -- 就得按改的拼，不能退回写死的平台常量。
+-- func/pset/pget 走 mqttcfg 对应模板：与 hello 同一套规则。
 -- pub 走 PLATFORM_POST_TOPIC（node 前缀 + {index}）：数据上报面。
 -- sub 走 PLATFORM_GET_TOPIC（gw 前缀）：平台下发面。
 --   原来是 PLATFORM_FUNC_TOPIC(node/function/get/-1)，两处都不对：
 --   doc「平台下发恒用 gw 前缀」（node 是子设备上行专用），而且我们真正
 --   订阅的主下行通道就是 config/get。订阅清单全量见 iot.build_subs()。
 local function topics(sn)
-    if not sn or sn == "" then return nil, nil, nil end
-    return mqttcfg.resolve_hello(sn),
-        string.format(cfg.PLATFORM_POST_TOPIC, sn),
-        string.format(cfg.PLATFORM_GET_TOPIC, sn)
+    if not sn or sn == "" then return nil end
+    local c = mqttcfg.load()
+    return {
+        hello = mqttcfg.resolve_hello(sn),
+        pub = string.format(cfg.PLATFORM_POST_TOPIC, sn),
+        sub = string.format(cfg.PLATFORM_GET_TOPIC, sn),
+        func = sub_sn(c.func_topic, sn),
+        pset = sub_sn(c.pset_topic, sn),
+        pget = sub_sn(c.pget_topic, sn),
+    }
 end
 M.topics = topics
 

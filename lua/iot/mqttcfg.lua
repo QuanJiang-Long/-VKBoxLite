@@ -26,10 +26,23 @@ M.default = {
     -- 与上报 topic 分开——一个是控制面, 一个是数据面, 平台两侧按不同
     -- 前缀解析, 混用会导致指令/数据都进错队列
     hello_topic = "/sys/thing/gw/config/hello/{sn}",
+    -- 另外 3 条下行订阅(V3 契约 gw 前缀)。原先写死在 iot.build_subs() 里,
+    -- 页面改不了; 挪到这里由前端一并配置, 语义与 hello/pub/sub 完全相同
+    func_topic = "/sys/thing/gw/function/get/{sn}",
+    pset_topic = "/sys/thing/gw/property/set/{sn}",
+    pget_topic = "/sys/thing/gw/property/get/{sn}",
     interval_s = cfg.MQTT_INTERVAL_S,
     qos = cfg.MQTT_QOS,
     allow_no_sn = cfg.MQTT_ALLOW_NO_SN,
     keep_session = false,
+}
+
+-- topic 字段统一表驱动: 6 条 topic 的长度校验与默认值回退逻辑完全一样,
+-- 逐个手写会重复 6 遍且容易漏改
+local TOPIC_KEYS = {
+    hello_topic = "hello_topic", func_topic = "func_topic",
+    pub_topic = "pub_topic", sub_topic = "sub_topic",
+    pset_topic = "pset_topic", pget_topic = "pget_topic",
 }
 
 local function num(v, d)
@@ -53,28 +66,24 @@ function M.normalize(c)
     if type(c.pass) == "string" then pass = c.pass:sub(1, 64) end
     local cid = ""
     if type(c.client_id) == "string" then cid = c.client_id:gsub("^%s*(.-)%s*$", "%1"):sub(1, 128) end
-    local pub = c.pub_topic
-    if type(pub) ~= "string" or pub == "" then pub = d.pub_topic end
-    if #pub > 128 then return nil, "bad pub_topic" end
-    local sub = c.sub_topic
-    if type(sub) ~= "string" or sub == "" then sub = d.sub_topic end
-    if #sub > 128 then return nil, "bad sub_topic" end
-    local hello = c.hello_topic
-    if type(hello) ~= "string" or hello == "" then hello = d.hello_topic end
-    if #hello > 128 then return nil, "bad hello_topic" end
-    local interval = math.floor(num(c.interval_s, d.interval_s))
-    if interval < 0 or interval > 86400 then return nil, "bad interval_s" end
-    local qos = math.floor(num(c.qos, d.qos))
-    if qos < 0 or qos > 2 then return nil, "bad qos" end
-    return {
+    local out = {
         host = host, port = port, user = user, pass = pass,
         ssl = c.ssl and true or false,
         client_id = cid,
-        hello_topic = hello, pub_topic = pub, sub_topic = sub,
-        interval_s = interval, qos = qos,
+        interval_s = math.floor(num(c.interval_s, d.interval_s)),
+        qos = math.floor(num(c.qos, d.qos)),
         allow_no_sn = c.allow_no_sn and true or false,
         keep_session = c.keep_session and true or false,
     }
+    if out.interval_s < 0 or out.interval_s > 86400 then return nil, "bad interval_s" end
+    if out.qos < 0 or out.qos > 2 then return nil, "bad qos" end
+    for _, k in pairs(TOPIC_KEYS) do
+        local v = c[k]
+        if type(v) ~= "string" or v == "" then v = d[k] end
+        if #v > 128 then return nil, "bad " .. k end
+        out[k] = v
+    end
+    return out
 end
 
 local function kv_flush()
@@ -104,7 +113,10 @@ function M.save(c)
     if not json then return false, "no json lib" end
     local oke, s = pcall(json.encode, n)
     if not oke or not s then return false, "encode fail" end
-    if #s > 512 then return false, "too large" end
+    -- 上限 2048。原 512 根本不够: host 最长 128 + clientId 最长 128 时,
+    -- 光是 3 条 topic 就已经 532B(实测), 加满 6 条到 673B。16.3KB 是
+    -- cfgstore 的 json 硬限, 2048 对 6 topic + 最长字段仍有 3 倍余量
+    if #s > 2048 then return false, "too large" end
     if not fskv then return false, "no fskv" end
     fskv.set(K_CFG, s)
     kv_flush()
@@ -132,11 +144,12 @@ end
 
 function M.resolve_topics(device_id)
     local c = M.load()
-    -- hello_topic 也要一起判: 它含 {sn} 却无 SN 时 try_connect 会放行,
-    -- 但拉取时 hello 发不出去, 报错点离现场太远
-    if (has_sn_ph(c.pub_topic) or has_sn_ph(c.sub_topic) or has_sn_ph(c.hello_topic))
-        and (not device_id or device_id == "") then
-        return nil, nil, "topic has {sn} but no SN"
+    -- 任一条 topic 含 {sn} 却无 SN 时都要报错。原先只查 pub/sub/hello 三条,
+    -- 补齐 6 条后漏查的会让 user/前端看到字面 {sn} 被当 SN 用
+    for _, k in pairs(TOPIC_KEYS) do
+        if has_sn_ph(c[k]) and (not device_id or device_id == "") then
+            return nil, nil, "topic has {sn} but no SN"
+        end
     end
     return sub_sn(c.pub_topic, device_id), sub_sn(c.sub_topic, device_id)
 end
@@ -154,8 +167,11 @@ function M.effective(device_id)
     return {
         cfg = c,
         pub = pub, sub = sub,
-        -- hello 也要给前端：自动模式下三个 topic 全由设备拼好回显
         hello = M.resolve_hello(device_id),
+        -- 补齐的 3 条下行订阅也要回显成品，前端自动模式下填只读框
+        func  = sub_sn(c.func_topic, device_id),
+        pset  = sub_sn(c.pset_topic, device_id),
+        pget  = sub_sn(c.pget_topic, device_id),
         err = err, ready = pub ~= nil,
     }
 end

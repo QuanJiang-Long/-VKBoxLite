@@ -13,6 +13,17 @@ local mqttcfg = require "iot/mqttcfg"
 local collector = require "data/collector"
 local cfgstore = require "cfg"
 local pullcfg = require "iot/pullcfg"
+-- 轮询引擎：拉取成功后自动落盘要能就地重启/热更轮询任务。
+-- 惰性 require（用时才取）而不是顶层，避免 main.lua 的初始化顺序
+-- 把 uart 还没 setup 的 poll 提前拖起来
+local poll
+local function get_poll()
+    if not poll then
+        local ok, p = pcall(require, "bus/poll")
+        poll = ok and p or false
+    end
+    return poll or nil
+end
 
 local M = {}
 
@@ -36,10 +47,11 @@ local function reset_state()
             seen = 0,              -- OS time，收到这份配置的时间
         },
         pull_payload = nil,
-        -- push_pending = 有平台主动下发的配置没人受理。
+        -- 平台主动下发、刚落地的配置（push_n/push_err/push_seen）。
         -- 前端靠 R:STAT 5s 轮询发现它（R:PULLCFG 只在用户点拉取时才查），
-        -- 所以必须单独挂在 status 段
-        push_pending = false, push_n = 0, push_err = nil,
+        -- 所以必须单独挂在 status 段。autosaved 系列告诉前端"这次改动已落盘"
+        push_n = 0, push_err = nil,
+        autosaved = false, autosave_at = 0, autosave_regs = 0,
     }
 end
 
@@ -154,7 +166,14 @@ M.publish = publish
 --      否则 handle_downlink 永远等不到 configSnapshot。
 --   ② function/get + property/set + property/get 是平台侧另外三类下行，
 --      也走 gw 前缀，不订就收不到服务调用/属性设置/全量查询。
+--      这三条的模板现在走 mqttcfg（前端可改），不再写死。
 --   ③ 与 S.sub 同形的先去重再订，同一个 topic 订两遍纯属浪费。
+local function sub_sn(s, did)
+    if not s or s == "" then return nil end
+    if not did or did == "" then return s end
+    return (s:gsub("{sn}", did):gsub("{id}", did))
+end
+
 local function build_subs()
     local subs = {}
     local function add(t)
@@ -169,10 +188,14 @@ local function build_subs()
         add(string.format(cfg.PLATFORM_GET_TOPIC, did))
     end
     add(S.sub)
+    -- 另外 3 条 gw 下行订阅。原先写死在这里, 页面改不了; 现在由 mqttcfg
+    -- 的 func/pset/pget_topic 提供(前端「MQTT配置」页可改), 拼法与其他
+    -- topic 一致: 模板里的 {sn}/{id} 换成设备 SN
     if did and did ~= "" then
-        add("/sys/thing/gw/function/get/" .. did)
-        add("/sys/thing/gw/property/set/" .. did)
-        add("/sys/thing/gw/property/get/" .. did)
+        local mc = mqttcfg.load()
+        add(sub_sn(mc.func_topic, did))
+        add(sub_sn(mc.pset_topic, did))
+        add(sub_sn(mc.pget_topic, did))
     end
     return subs
 end
@@ -400,20 +423,65 @@ end
 
 -- 平台主动重新下发配置（前端没点拉取，设备也没在等）。
 -- 判据就是 payload 里有 configSnapshot：这是 D1 快照的独有字段，
+-- 拉取成功后自动落盘并生效（用户要求：不再等前端「保存配置」确认）。
+-- 放在设备侧而不是前端侧，是为了让前端不在线时也生效——平台主动重推
+-- 走的是同一条路径，靠前端的话没开串口就永远不落地。
+--
+-- 三道安全边界（少一道就是把现场设备交给平台随便改）：
+--   ① normalize_poll 不过就整个不落盘，走 fail，skipped 明细照旧带回
+--   ② interval_ms / timeout_ms 取设备当前值，平台再怎么下发也不改轮询节奏
+--   ③ 打一行醒目的前后对比日志，否则现场无法追溯"配置什么时候被谁改的"
+local function auto_apply(r)
+    if not r or not r.poll then return false, "无可应用的配置" end
+    local n, nerr = cfgstore.normalize_poll(r.poll)
+    if not n then return false, "配置不合法: " .. tostring(nerr) end
+    -- 平台不给轮询节奏：保留设备自己的 interval/timeout，只换串口参数和寄存器表
+    local base = cfgstore.load_poll()
+    n.interval_ms = base.interval_ms
+    n.timeout_ms = base.timeout_ms
+
+    local before = { slave = base.slave, baud = base.baud, regs = #(base.regs or {}) }
+    local ok, serr = cfgstore.save_poll(n)
+    if not ok then return false, "落盘失败: " .. tostring(serr) end
+
+    local pe = get_poll()
+    if pe then
+        -- 串口参数变了才值得重启轮询任务；只换寄存器表时 apply_cfg 就够了，
+        -- 重启会硬断一次正在进行的 Modbus 事务
+        if pe.needs_restart(n) then
+            if pe.is_running() then
+                pe.stop()
+                pe.apply_cfg(n)
+                pe.start()
+            else
+                pe.apply_cfg(n)
+            end
+        else
+            pe.apply_cfg(n)
+        end
+    end
+
+    S.autosaved = true
+    S.autosave_at = os.time()
+    S.autosave_regs = #n.regs
+    log.info("iot", string.format(
+        "pullcfg 自动保存并生效: 寄存器 %d->%d, slave %d->%d, baud %d->%d, msgId=%s",
+        before.regs, #n.regs, before.slave or 0, n.slave or 0,
+        before.baud or 0, n.baud or 0, tostring(S.pull.msg_id)))
+    return true
+end
+
 -- REPORT/WRITE/裸值都不带它，不可能误判。
 -- 收到后不落盘：落盘会把正在跑的 485 配置换掉，属于改设备行为，
 -- 必须有现场确认（与"点保存才回执"同一条原则）。
 -- 做法是把它塞进拉取结果槽位、以 done 态呈现，前端复用同一套回填渲染
 local function recv_push(t)
-    local r, err = pullcfg.parse_snap(t)
     if not r then
         S.push_err = tostring(err)
         log.warn("iot", "push parse fail: " .. tostring(err))
         return false
     end
     S.push_err = nil
-    S.push_pending = true
-    S.push_n = S.push_n + 1
     S.pull.state = "done"
     S.pull.src = "push"
     S.pull.seen = os.time()
@@ -421,9 +489,21 @@ local function recv_push(t)
     S.pull.result = r
     S.pull.msg_id = r.msg_id
     S.pull.replied = false
-    log.info("iot", string.format("push recv msgId=%s regs=%d skipped=%d",
-        r.msg_id, #(r.poll.regs or {}), #(r.skipped or {})))
-    return true
+    -- 与前端拉取完全同一套语义：解析成功就自动保存并回执。
+    -- 平台点了「重新下发」期望的就是立即生效，再要人去开软件确认就没意义了
+    local aok, aerr = auto_apply(r)
+    if aok then
+        S.pull.msg = "平台配置已自动保存生效"
+        pcall(reply_config)
+        S.push_n = S.push_n + 1
+        log.info("iot", string.format("push recv msgId=%s regs=%d skipped=%d (已自动保存)",
+            r.msg_id, #(r.poll.regs or {}), #(r.skipped or {})))
+    else
+        S.push_err = "自动保存失败: " .. tostring(aerr)
+        S.push_n = S.push_n + 1
+        log.warn("iot", string.format("push recv msgId=%s 但自动保存失败: %s", r.msg_id, tostring(aerr)))
+    end
+    return aok
 end
 
 function M.handle_downlink(topic, payload)
@@ -515,17 +595,22 @@ function M.pull_status()
         r.skipped = p.result.skipped
         r.renamed = p.result.renamed
         -- 三个 topic 全带上, 前端自动模式要回显"设备拼好的"那三个
-        local hello, pub, sub = pullcfg.topics(device_id())
-        r.mqtt = { hello = hello, pub = pub, sub = sub }
+        local t6 = pullcfg.topics(device_id())
+        r.mqtt = {
+            hello = t6 and t6.hello, pub = t6 and t6.pub, sub = t6 and t6.sub,
+            func = t6 and t6.func, pset = t6 and t6.pset, pget = t6 and t6.pget,
+        }
     end
-    -- 回执状态单独给：前端要提示"未保存前不回执平台"
+    -- 回执状态单独给：前端据此提示"已回执"还是"平台还在重推"
     r.msg_id = p.msg_id
     r.replied = p.replied
-    -- src/seen 只对平台主动下发有意义：前端据此把提示语从"已拉取"
-    -- 换成"平台重新下发"，并显示等了多久
+    -- src/seen/autosaved：前端据此把提示语从"已拉取待保存"换成
+    -- "已自动保存生效"，并显示是哪来的、什么时候落的
     r.src = p.src or "pull"
     r.seen = p.seen
-    r.push_pending = S.push_pending
+    r.autosaved = S.autosaved
+    r.autosave_at = S.autosave_at
+    r.autosave_regs = S.autosave_regs
     r.push_n = S.push_n
     r.push_err = S.push_err
     return r
@@ -535,10 +620,8 @@ local function pull_finish(state, msg, result)
     S.pull.state = state
     S.pull.msg = msg
     S.pull.result = result
-    -- 用户点了拉取并通过 R:PULLCFG 看到结果 = 这份配置已被受理，
-    -- 横幅该撤了（前端拉取失败则不撤，等用户再点）
+    -- 拉取结果已被前端看到 = 这条通知的使命完成，撤掉
     if state == "done" then
-        S.push_pending = false
         S.push_err = nil
     end
     log.info("iot", "pullcfg", state, msg)
@@ -580,22 +663,29 @@ local function pull_step()
             S.pull_payload = nil
             local r, err = pullcfg.parse(payload)
             if not r then return pull_finish("fail", tostring(err)) end
-            -- msgId 留着不发：按用户要求，要等前端提示用户确认（点保存配置）
-            -- 才回执。用户不保存就说明这套配置没落地，不回执平台会继续重推
             p.src = "pull"
             p.seen = os.time()
             p.msg_id = r.msg_id
             p.replied = false
-            return pull_finish("done", #r.skipped > 0 and ("已忽略 " .. #r.skipped .. " 条") or "", r)
+            -- 用户要求：拉取成功即自动保存，不再等前端「保存配置」确认。
+            -- 落盘失败（配置不合法/存不下）不当成功：平台会继续重推，
+            -- 而设备留着的还是旧配置，此时报 fail 比假装成功好排查
+            local aok, aerr = auto_apply(r)
+            if not aok then
+                return pull_finish("fail", "自动保存失败: " .. tostring(aerr))
+            end
+            -- 保存已生效 = 这套配置被现场认可，此刻回执 U6，平台据此停止重推
+            pcall(reply_config)
+            return pull_finish("done", "已自动保存生效" .. (#r.skipped > 0 and ("，忽略 " .. #r.skipped .. " 条") or ""), r)
         end
         if os.time() >= p.deadline then pull_finish("fail", "平台未下发配置(超时)") end
     end
 end
 
--- U6 应用回执。由 W:CFG（前端「保存配置」）在成功后调用：
--- 用户点保存 = 现场确认把这套平台配置落到设备上，此时才回执。
+-- U6 应用回执。由自动落盘成功或 W:CFG（前端「保存配置」）调用：
+-- 现在拉取成功即自动保存生效，所以回执也跟着自动发。
 -- 只回一次（p.replied 去重）；msgId 与 D1 下发包里的一致，平台据此核销。
--- 不发就说明用户没确认，平台继续重推——这正是我们想要的语义。
+-- 不发就说明这套配置没落地，平台会继续重推。
 local function reply_config()
     local p = S.pull
     if p.replied then return true end
@@ -611,9 +701,6 @@ local function reply_config()
     local ok, err = pcall(function() S.client:publish(topic, body, 1) end)
     if not ok then return false, tostring(err) end
     p.replied = true
-    -- 回执成功 = 平台已核销这条 msgId，横幅可以撤了。
-    -- 回执失败（未连接/无 SN）时不撤：前端还得提示用户"待确认"
-    S.push_pending = false
     S.replied = S.replied + 1
     return true
 end
@@ -737,12 +824,16 @@ function M.status()
         last_pub = S.last_pub,
         last_err = S.last_err,
         reject_reason = S.reject_reason,
-        -- 平台主动下发、还没人受理的配置。R:PULLCFG 只在用户点「拉取配置」
-        -- 时才查，等不到这里的横幅——所以必须挂在 5s 轮询的 R:STAT 上
-        push_pending = S.push_pending,
+        -- 平台主动下发、刚落地的配置。挂在 5s 轮询的 R:STAT 上：
+        -- R:PULLCFG 只在用户点「拉取配置」时才查，等不到这里的通知。
+        -- push_n/push_err/push_seen 是"设备被平台改过"的事实记录，
+        -- autosaved 让前端知道这次改动已经落盘，不用再提示去保存
         push_n = S.push_n,
         push_seen = S.pull.seen,
         push_err = S.push_err,
+        autosaved = S.autosaved,
+        autosave_at = S.autosave_at,
+        autosave_regs = S.autosave_regs,
         sn = _G.get_device_sn and tostring(_G.get_device_sn()) or nil,
         heap = (function() local a, b = heap_info(); return { total = a, used = b } end)(),
     }

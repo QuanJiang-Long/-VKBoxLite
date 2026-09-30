@@ -235,6 +235,11 @@ local function reg_cmds()
             cfg = e.cfg,
             pub = e.pub,
             sub = e.sub,
+            hello = e.hello,
+            -- 补齐的 3 条下行订阅成品(SN 已代入), 自动模式回显用
+            func = e.func,
+            pset = e.pset,
+            pget = e.pget,
             ready = e.ready,
             err = e.err,
             stat = iot and iot.status() or nil,
