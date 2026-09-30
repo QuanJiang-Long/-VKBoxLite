@@ -311,14 +311,38 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 | `name` | `alias` | 为空则退化为 `id` |
 | `modbus.address` | `addr` | 0~65535 |
 | `modbus.quantity` | `count` | **地址长度取这个字段**，1~125 |
-| `modbus.dataType` | `dtype` | `ushort`→uint16、`short`→int16、`ulong`→uint32、`long`→int32、`float`→float32、`double`→float64 |
+| `modbus.dataType` | `dtype` | 见下方「dataType 拼法」 |
+| `msgId` | `msg_id` | 不参与 485 配置，仅供 U6 回执原样回带；缺失记 `"unknown"` |
 
-**msgId** → 解析结果里的 `msg_id`（不参与 485 配置，仅供 U6 回执原样回带；缺失记 `"unknown"`）
+**dataType 拼法**：`modbus.dataType`（**不是**外层 `dataType`，外层是物模型口径）
+有两套拼法在同时流通——doc 的 D1/U2 示例用 `uint16`/`float`，现网运维平台实测用
+`ushort`/`long-ABCD`，所以两套都收。带字节序后缀时本框架只认 `-ABCD`，
+`-CDAB/-BADC/-DCBA` 一律拒收（按错字节序解出来的值看起来合理但是错的，比报错更难查）。
+
+| 平台写法 | 收成 | 来源 |
+|---|---|---|
+| `ushort` / `short` / `ulong` / `long` | uint16 / int16 / uint32 / int32 | 现网实测 |
+| `uint16` / `float` | 同上 / float32 | doc D1、U2 示例 |
+| `int16` / `uint32` / `int32` / `float32` / `float64` / `double` | 对应类型 | 常见写法补齐 |
+| 以上任一带 `-ABCD` 后缀 | 按裸类型收 | 现网实测 `long-ABCD`→int32 |
+| 带上其他字节序后缀 | **拒收** | `long-CDAB` 拒绝 |
+| 空 / 其他 | **拒收** | 如外层误传的 `decimal` |
+
+**`modbus.address` 的两种口径（未定，需平台确认）**：doc 的示例是 4xxxx 逻辑地址
+（`40001`/`40003`），现网运维平台实测是 0-based PDU 地址（`14`/`15`/`16`）。
+本框架**原样存**（`addr = num(mb.address)`），因为现网数据按 0-based 处理是对的，
+一旦改成"≥40001 就减 40001"反而会把现网数据弄错。若平台哪天开始下发 `40001`
+这种逻辑地址，设备会去读 40001 号寄存器读到错误的数据（地址合法、无报错，
+最难查的一类问题）——需要平台侧明确口径，或在设备侧按 `type == 2` 判定后再减。
+**这是目前唯一一个"只能在平台侧定"的口径分歧，也是要平台侧确认的首要问题。**
 
 **丢弃**：`ts`、`mqttPlatform`（保持现有 broker）、`tslName`、
 `devices[].name/protocol/comm`、`modbus.type`、`modbus.slave`、外层 `dataType`。
 
 非法条目不整包失败：跳过并记入 `skipped`，前端提示"已忽略 N 条"。
+**平台别名不可用**：平台若把中文 `name` 按 GBK 而非 UTF-8 下发，设备判为非法 UTF-8 并把
+`alias` 退回 `id`，同时把该 id 记入 `renamed` 名单。前端据此提示"平台改 UTF-8"，否则用户
+只会看见别名栏莫名其妙变成了 id。详见下方「平台中文名乱码」。
 寄存器数超过 `MAX_REGS=128` 截断。`interval_ms`/`timeout_ms` 沿用设备当前值，不随平台变更。
 
 ### 日志（`I/iot`）
@@ -329,6 +353,7 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 I/iot: conack ok, subscribed=true, topics=[/sys/thing/gw/config/get/11802026092600016 /sys/thing/gw/function/get/11802026092600016 /sys/thing/gw/property/set/11802026092600016 /sys/thing/gw/property/get/11802026092600016]
 I/iot: pullcfg hello topic=/sys/thing/gw/config/hello/11802026092600016 sn=11802026092600016 imei=86xxxxxxxxxxxxx body={"vendor":"VKBoxLite",...,"topicFormat":"v3","onboardingMode":"platform"}
 I/iot: pullcfg recv topic=/sys/thing/gw/config/get/11802026092600016 len=812
+I/pullcfg: alias 非 UTF-8(平台编码问题), 退回 id: Ua      ← 有平台中文名才出现
 I/iot: pullcfg done 已忽略 0 条
 I/iot: config/reply /sys/thing/gw/config/reply/11802026092600016 {"msgId":"hello-3f9a2b1c","code":200,"message":"config applied","status":"ok","appliedTs":1721884800}
 ```
@@ -346,6 +371,33 @@ I/iot: downlink dropped, not ours: /sys/thing/gw/function/get/V239342435
 
 topic 里的 `{SN}` 取的是**烧号的 SN**（`_G.get_device_sn()`），与 payload 里的
 `deviceId`（IMEI）**不是同一个标识**。所有 topic 用的都是同一个 SN，对不上时先看这行日志确认。
+
+### 平台中文名乱码
+
+**现象**：`R:PULLCFG` 回来 `alias` 不是中文而是一串替代符；前端提示
+"N 个平台别名不可用已退用 id"。MQTTX 直接订阅同样看到乱码。
+
+**结论：不是设备的原因。** 平台把中文 `name` 按 GBK/GB2312 写进了本该是 UTF-8 的
+JSON 字符串字段。"电压" 的 GBK 字节是 `B5 E7 D1 B9`，按 UTF-8 弱解码得到的是
+`U+FFFD U+FFFD U+0479`（两个 Unicode 替代符 + 一个伪西里尔字母 `ѹ`，在终端里显示成
+`??ѹ`），与现场看到的逐字符一致。任何按标准解 UTF-8 的客户端（MQTTX / Electron /
+本设备）都会看到同样结果，因为字节在到达订阅方之前就已经坏了——MQTTX 是完全独立的
+客户端，它坏就证明与读取方无关。
+
+**设备侧的对策**（`pullcfg.utf8_ok()`）：只做校验不做转码。GBK→UTF-8 需要几万条
+映射表，塞不进 300KB 的 Lua 堆。校验不过就把 `alias` 退回 `id`——这样至少不会把
+坏字节当成 `name` 发回平台，也不在前端显示乱码。
+
+**要平台侧改的地方**（三件事，按优先级）：
+
+1. **把下发 JSON 的字符集统一成 UTF-8**，特别是 `configSnapshot.tsl.properties[].name`。
+   现在中文按 GBK 下发，MQTTX / Electron / 本设备三方都看到乱码。
+2. **明确 `modbus.address` 的口径**：doc 示例写 `40001`（逻辑地址），现网实测写
+   `14`（0-based PDU）。设备现在原样存、按 PDU 用；如果平台要发 4xxxx，需要约定
+   好减不减偏移，否则设备会"合法地"读到错的寄存器、不报任何错。
+3. `modbus.dataType` 与 doc 的裸 `uint16`/`float` 不一致，实际发 `ushort`/`long-ABCD`
+   （带字节序后缀）。设备已两套都收（`-ABCD` 与裸类型），但最好统一成 doc 的写法；
+   另外请勿发 `-CDAB/-BADC/-DCBA`，设备会按"字节序不支持"拒收。
 
 ## 本地落盘（已移除）
 按需求，poll 模式**不做本地保存**，采集数据只走两条路：

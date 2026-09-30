@@ -84,6 +84,8 @@ mklink /J D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules D:\VKBox_Lite\VKBo
 | 点「拉取配置」提示"平台未下发配置(超时)" | 设备已连上 MQTT 并发过 hello，但平台 15s 内没回。检查平台是否在线、topic 是否匹配、SN 是否已烧 |
 | 拉取成功了但平台还在反复推配置 | 正常。回执 U6 要等用户点「保存配置」才发；没点就说明这套配置还没被确认。「连接与上报状态」的 **配置回执** 显示次数，为 0 = 尚未回执 |
 | 拉取成功后「下行订阅」只有 1 条 | 没连上 broker。连上后固定 4 条（config/get + function/get + property/set + property/get） |
+| 拉取后有的点是中文乱码/别名栏莫名变成 id | 平台把中文 `name` 按 GBK（非 UTF-8）下发。设备判为非法 UTF-8 后退回 id 并提示"N 个平台别名不可用已退用 id"，同时日志有 `alias 非 UTF-8(平台编码问题), 退回 id: xxx`。MQTTX 独立订阅同样看到乱码 → 是平台的编码问题，不是设备；要平台侧改成 UTF-8 |
+| 拉取后某条寄存器少了，状态行说"忽略 1 条" | 该条平台配置不合法（如 `dataType` 用了 `-CDAB` 这类非大端字节序后缀、`address` 越界、`id` 含非字母数字），明细在"忽略"的 toast/日志。不会整包失败 |
 | 下拉框没有 COM32 | USB 未插好/未上电；或设备日志停在 `VUART task: 等待 USB 枚举...`，等 2~3 秒再刷新 |
 | 串口被占用 | Luatools / ssCOM 正开着同一 COM 口，先关掉 |
 | 打开白屏 | junction 断了，按上文重连或 `npm install` |
@@ -248,7 +250,7 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 | 前端动作 | 指令 | 应答 | 说明 |
 |---|---|---|---|
 | 发起拉取 | `W:PULLCFG` | `RET:PULLCFG=started` | 设备向平台发 hello 并等配置下发；未连 MQTT 直接回 `RET:FAIL:PULLCFG:原因` |
-| 查拉取状态 | `R:PULLCFG` | `RET:PULLCFG={json}` | `{state,msg,poll,skipped,mqtt,msg_id,replied}`；`state` = `helloing`/`waiting`/`done`/`fail` |
+| 查拉取状态 | `R:PULLCFG` | `RET:PULLCFG={json}` | `{state,msg,poll,skipped,renamed,mqtt,msg_id,replied}`；`state` = `helloing`/`waiting`/`done`/`fail`；`renamed` = 平台别名不可用、已退回 id 的条目名单 |
 
 拉取流程与字段映射详见 `../lua/README.md` 的「平台配置拉取」章节。要点：
 
@@ -265,6 +267,10 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
   ——这是预期语义，不是卡住。「连接与上报状态」的 **配置回执** 一栏显示已回执次数
 - 拉取成功后 topic 由平台接管：三个 topic 换成设备拼好的成品，并自动关掉
   「手动配置」（详见下面「MQTT topic 手动/自动切换」）
+- **平台中文名乱码 → 别名退回 id**：平台若把中文 `name` 按 GBK 而非 UTF-8 下发（MQTTX
+  独立订阅同样看到乱码，与设备无关），设备判为非法 UTF-8 会把 `alias` 退回 `id`，并把
+  该 id 放进 `renamed`。状态行会多说一句"1 个平台别名不可用已退用 id（Ua，中文需平台
+  改 UTF-8）"——别当成 bug。要平台侧改成 UTF-8 才能拿到真中文名
 
 ### MQTT topic 手动/自动切换
 

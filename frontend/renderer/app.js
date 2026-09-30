@@ -597,10 +597,16 @@ async function pullCfg() {
     S.pulled = true;                   // 存起来供 saveCfg 判断"要不要提回执"
     const skipped = (d.skipped || []).length;
     const n = (d.poll && d.poll.regs ? d.poll.regs.length : 0);
+    // 平台把中文 name 按 GBK 下发时设备判为非法 UTF-8, 会自动把别名退回 id。
+    // 必须说出来, 否则用户只会看见别名栏莫名其妙变成了 id
+    const renamed = (d.renamed || []).filter(x => typeof x === 'string' && x.trim());
+    const renamedTip = renamed.length
+        ? '，' + renamed.length + ' 个平台别名不可用已退用 id（' + renamed.join('、') + '，中文需平台改 UTF-8）'
+        : '';
     // 未回执前必须说清：用户不点保存，平台就收不到 U6，会按未核销继续重推
     const msgId = d.msg_id && d.msg_id !== 'unknown' ? ('（msgId ' + d.msg_id + '）') : '';
     status('已拉取 ' + n + ' 个寄存器' + (skipped ? '，忽略 ' + skipped + ' 条' : '')
-           + msgId + '，请检查后保存', true);
+           + renamedTip + msgId + '，请检查后保存', true);
     toast('配置已拉取，点「保存配置」生效');
   } catch (e) {
     status('拉取失败：' + e.message, false);

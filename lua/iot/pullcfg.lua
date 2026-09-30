@@ -2,6 +2,7 @@ local corelib = require "core/corelib"
 local cfg = require "core/config"
 local cfgstore = require "cfg"
 local mqttcfg = require "iot/mqttcfg"
+local log = corelib.log()
 local json = corelib.try("json")
 
 local M = {}
@@ -44,16 +45,78 @@ local function comm_to_poll(p, slave)
     return d
 end
 
+-- 判字符串是不是合法 UTF-8。
+-- 现场实测：平台把中文 name 按 GBK 下发（"电压" → 字节 B5 E7 D1 B9，按
+-- UTF-8 弱解码正好是 "??ѹ"，与 MQTTX/前端看到的完全一致）。MQTTX 是独立
+-- 订阅方、不经我们设备，它也看到同样乱码 → 字节在到达任何读取方之前就已经
+-- 坏了，与读取方是谁无关，是平台的编码问题。
+-- 这里只校验不转码：GBK→UTF-8 要几万条映射表，塞不进 300KB 的 Lua 堆。
+local function utf8_ok(s)
+    if type(s) ~= "string" or s == "" then return true end
+    local i, n = 1, #s
+    while i <= n do
+        local b = s:byte(i)
+        if b < 0x80 then
+            i = i + 1
+        elseif b <= 0xC1 then            -- 孤立延续字节 / 超长序列头，必非法
+            return false
+        elseif b <= 0xDF then            -- 2 字节序列
+            if i + 1 > n then return false end
+            local c = s:byte(i + 1)
+            if c < 0x80 or c > 0xBF then return false end
+            i = i + 2
+        elseif b <= 0xEF then            -- 3 字节序列（中文落在这里）
+            if i + 2 > n then return false end
+            for k = 1, 2 do
+                local c = s:byte(i + k)
+                if c < 0x80 or c > 0xBF then return false end
+            end
+            i = i + 3
+        elseif b <= 0xF4 then            -- 4 字节序列
+            if i + 3 > n then return false end
+            for k = 1, 3 do
+                local c = s:byte(i + k)
+                if c < 0x80 or c > 0xBF then return false end
+            end
+            i = i + 4
+        else
+            return false
+        end
+    end
+    return true
+end
+
+-- 平台 modbus.dataType 有裸类型(ushort)与带字节序后缀(long-ABCD)两种形态。
+-- 本框架字节序/字序已从全链路删除、解码固定大端(即 ABCD)，所以只有 -ABCD
+-- 与裸类型能收；-CDAB/-BADC/-DCBA 一律拒收 —— 按错的字节序解出来的值看起来
+-- 合理但是错的，比直接报"不支持"危险得多。
+local function map_dtype(raw)
+    local s = trim(raw):lower()
+    if s == "" then return nil, "dataType 为空" end
+    local base, order = s:match("^([%w]+)%-(%a+)$")
+    if base and order then
+        if not cfg.PULL_ORDER_OK[order] then
+            return nil, "dataType 后缀 -" .. order:upper() .. " 字节序不支持(本框架固定 ABCD)"
+        end
+        s = base
+    end
+    local d = cfg.PULL_DTYPE[s]
+    if not d then return nil, nil end
+    return d, nil
+end
+
 -- 平台 tsl.properties -> 本框架寄存器表
+-- 第三返回值 renamed = 因平台编码问题把 alias 退回 id 的条目名单，
+-- 前端要提示用户「平台别名不可用」，否则用户只会看到 alias 莫名变成了 id
 local function props_to_regs(props, limit)
-    local regs, skipped = {}, {}
+    local regs, skipped, renamed = {}, {}, {}
     for i, pr in ipairs(props or {}) do
         if type(pr) ~= "table" or type(pr.modbus) ~= "table" then
             skipped[#skipped + 1] = "第" .. i .. "条缺少 modbus 段"
         else
             local mb = pr.modbus
             local id = trim(pr.id)
-            local dt = cfg.PULL_DTYPE[trim(mb.dataType):lower()]
+            local dt, dtwhy = map_dtype(mb.dataType)
             local addr = num(mb.address)
             local qty = num(mb.quantity)
             if id == "" then
@@ -61,7 +124,7 @@ local function props_to_regs(props, limit)
             elseif not id:match("^%w+$") or #id > 16 then
                 skipped[#skipped + 1] = "第" .. i .. "条 id「" .. id .. "」含非字母数字或超 16 字符"
             elseif not dt then
-                skipped[#skipped + 1] = id .. "：不支持的 dataType「" .. tostring(mb.dataType) .. "」"
+                skipped[#skipped + 1] = id .. "：" .. (dtwhy or ("不支持的 dataType「" .. tostring(mb.dataType) .. "」"))
             elseif not addr or addr < 0 or addr > 65535 then
                 skipped[#skipped + 1] = id .. "：address 非法"
             elseif not qty or qty < 1 or qty > 125 then
@@ -70,6 +133,14 @@ local function props_to_regs(props, limit)
                 skipped[#skipped + 1] = id .. "：超过 " .. limit .. " 个上限，已截断"
             else
                 local alias = trim(pr.name)
+                -- 非 UTF-8(GBK 乱码)时 alias 退回 id。有两个好处：参数表不显示
+                -- 乱码；也不会被 build_payload 当 name 原样发回平台，把坏字节
+                -- 循环发上去。平台哪天改用 UTF-8，这条自动失效
+                if not utf8_ok(alias) then
+                    alias = ""
+                    renamed[#renamed + 1] = id
+                    log.info("pullcfg", "alias 非 UTF-8(平台编码问题), 退回 id: " .. id)
+                end
                 regs[#regs + 1] = {
                     addr = addr, count = qty, name = id,
                     alias = alias ~= "" and alias or id,
@@ -78,7 +149,7 @@ local function props_to_regs(props, limit)
             end
         end
     end
-    return regs, skipped
+    return regs, skipped, renamed
 end
 
 -- 拉取成功后回给前端展示的三个 topic，都是设备按 SN 拼好的成品。
@@ -114,7 +185,7 @@ function M.parse(payload)
     local props = type(snap.tsl) == "table" and snap.tsl.properties or nil
     if type(props) ~= "table" or #props == 0 then return nil, "tsl.properties 为空" end
 
-    local regs, skipped = props_to_regs(props, cfg.MAX_REGS)
+    local regs, skipped, renamed = props_to_regs(props, cfg.MAX_REGS)
     if #regs == 0 then return nil, "没有可用的寄存器条目" end
 
     local base = cfgstore.load_poll()
@@ -128,7 +199,7 @@ function M.parse(payload)
     local msg_id = t.msgId
     if type(msg_id) ~= "string" or msg_id == "" then msg_id = "unknown" end
 
-    return { poll = poll, skipped = skipped, msg_id = msg_id }, nil
+    return { poll = poll, skipped = skipped, renamed = renamed, msg_id = msg_id }, nil
 end
 
 return M

@@ -40,12 +40,23 @@ M.PLATFORM_REPLY_TOPIC = "/sys/thing/gw/config/reply/%s"
 M.PULL_TIMEOUT_MS = 15000
 -- 拉取前自动连 MQTT 的等待上限(设备可能刚上电, 网络还没就绪)
 M.PULL_CONNECT_MS = 20000
--- 平台 modbus.dataType -> 本框架 dtype
+-- 平台 modbus.dataType -> 本框架 dtype。
+-- 两套拼法都要收：doc 的 D1/U2 示例用 uint16/float，现网实测的运维平台用
+-- ushort/long-ABCD。两套并存（实测 13:29 那次 Ua=long-ABCD、PT/CT=ushort，
+-- 而 doc 示例是 uint16/float），只认一套就会把同样的配置丢掉一半。
+-- int16/uint32/int32/float64/double/float32 是补齐的常见写法，doc 未举但别拒。
 M.PULL_DTYPE = {
-    ushort = "uint16", short = "int16",
-    ulong = "uint32", long = "int32",
-    float = "float32", double = "float64",
+    ushort = "uint16", uint16 = "uint16",
+    short = "int16", int16 = "int16",
+    ulong = "uint32", uint32 = "uint32",
+    long = "int32", int32 = "int32",
+    float = "float32", float32 = "float32",
+    double = "float64", float64 = "float64",
 }
+-- dataType 的字节序后缀白名单。本框架字节序/字序已从全链路删除、解码固定
+-- 大端(即 ABCD)，所以只有 -ABCD 与裸类型能收；-CDAB/-BADC/-DCBA 一律拒收。
+-- 按错字节序解出来的值看起来合理但是错的，比直接报错更难查。
+M.PULL_ORDER_OK = { abcd = true }
 -- 平台 parity -> 本框架 parity
 M.PULL_PARITY = { none = 0, even = 1, odd = 2 }
 
