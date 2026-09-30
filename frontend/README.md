@@ -79,7 +79,7 @@ mklink /J D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules D:\VKBox_Lite\VKBo
 | poll模式内有两个子标签 | 「串口1（485总线）」+「MQTT配置」，MQTT 内容已从串口1下面移到独立的「MQTT配置」子标签 |
 | poll模式有"读取配置"和"拉取配置"两个按钮 | 「读取配置」= R:CFG + R:REG 回填表单；「拉取配置」= 通过 MQTT 从平台拉配置并回填表单（需先配好 MQTT 服务器地址和端口），同样不自动保存 |
 | 点「拉取配置」提示"请先配置 MQTT 服务器地址/端口" | 拉取走 MQTT。先在首页或「MQTT配置」子标签填好服务器地址和端口并保存，再点拉取 |
-| 首页的 MQTT 地址端口和「MQTT配置」页是什么关系 | 同一份配置的两个入口。首页改地址/端口/ClientID（保存时先读全量再合并，不会冲掉用户名和 topic）；完整配置仍在「poll模式 → MQTT配置」子标签 |
+| 首页的 MQTT 地址端口和「MQTT配置」页是什么关系 | 同一份配置的两个入口。首页只改地址/端口（保存时先读全量再合并，不会冲掉用户名和 topic）；完整配置（含 ClientID、hello/发布/订阅 topic）在「poll模式 → MQTT配置」子标签 |
 | MQTT 显示"平台拒绝连接(CONACK 0x05 未授权)" | broker 拒绝了这个连接，**不代表一定要用户名密码**。排查顺序：① 首页看「实际使用」那行的 clientId，格式是否平台要求（如 `S&<SN>&12&1`）② 端口是否 MQTT 端口 ③ 设备是否已在平台注册 ④ 确实有账号再补用户名密码。详见 `../lua/README.md` 的「MQTT 连不上排查」 |
 | 点「拉取配置」提示"平台未下发配置(超时)" | 设备已连上 MQTT 并发过 hello，但平台 15s 内没回。检查平台是否在线、topic 是否匹配、SN 是否已烧 |
 | 下拉框没有 COM32 | USB 未插好/未上电；或设备日志停在 `VUART task: 等待 USB 枚举...`，等 2~3 秒再刷新 |
@@ -178,7 +178,7 @@ npm run dist:portable   # 或输出绿色单文件 exe
 
 | 环节 | 行为 |
 |---|---|
-| 检测 | `mqSnap()` 把 MQTT 页 11 个字段（地址/端口/SSL/用户名/密码/ClientID/上报 topic/下行 topic/上报间隔/允许无 SN/持久会话）+ 首页 MQTT 那一栏 3 个输入框（地址/端口/ClientID）归一化成快照，和上次「干净」快照比对。14 个字段逐个挂 `input`/`change` 监听；程序回填（`renderMqtt`/`fillMqHome` 赋 `.value`）不触发这两个事件，不会误标脏 |
+| 检测 | `mqSnap()` 把 MQTT 页 12 个字段（地址/端口/SSL/用户名/密码/ClientID/hello topic/上报 topic/下行 topic/上报间隔/允许无 SN/持久会话）+ 首页 MQTT 那一栏 2 个输入框（地址/端口）归一化成快照，和上次「干净」快照比对。14 个字段逐个挂 `input`/`change` 监听；程序回填（`renderMqtt`/`fillMqHome` 赋 `.value`）不触发这两个事件，不会误标脏 |
 | 提示 | MQTT 页「保存」变 **保存 ***、首页「保存并重连」变 **保存并重连 ***，两边同时加橙色 `.dirty` 底色，状态栏同步提示 |
 | 拦截 | **MQTT 页刷新 / 恢复默认 / 首页保存** 三个会整份覆盖表单的动作，脏状态下先弹自绘确认框 |
 | 清除 | 保存成功、读 MQTT 完成后重新取基线 |
@@ -250,10 +250,11 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 
 拉取流程与字段映射详见 `../lua/README.md` 的「平台配置拉取」章节。要点：
 
-- 设备 publish `hello` 到 `/sys/thing/gw/config/hello/{SN}`，订阅 `/sys/thing/gw/config/get/{SN}`
+- 设备 publish `hello` 到 `mqttcfg.hello_topic`（默认 `/sys/thing/gw/config/hello/{SN}`，可在「MQTT配置」页的 **hello Topic** 输入框改），订阅 `/sys/thing/gw/config/get/{SN}`
 - 只提取 `commInterfaces`（串口参数）与 `tsl.properties`（寄存器表），其余全部丢弃
 - 拉取结果里回的 topic：上报 `/sys/thing/node/property/post/{SN}-1`，下行 `/sys/thing/node/function/get/{SN}-1`
 - **拉取只回填表单，不自动保存**：需用户点「保存配置」「保存」才写入设备
+- 不想从平台拉，就点「MQTT配置」页左上方的 **手动配置**，跳去「串口1（485总线）」自己填串口参数和参数表——「拉取」和「手动」是同一份配置的两个来源，二选一
 
 ### 模式控制
 

@@ -83,15 +83,18 @@ const el = new Proxy({
   // 首页
   btnHomeRefresh: $('btnHomeRefresh'), homeKv: $('homeKv'),
   hMqHost: $('hMqHost'), hMqPort: $('hMqPort'), hMqErr: $('hMqErr'),
-  hMqClientId: $('hMqClientId'), hMqRealId: $('hMqRealId'),
+  hMqRealId: $('hMqRealId'),
   btnHomeMqttSave: $('btnHomeMqttSave'),
   // MQTT 页
+  btnManualCfg: $('btnManualCfg'),
   btnMqttRefresh: $('btnMqttRefresh'), btnMqttSave: $('btnMqttSave'),
   btnMqttReport: $('btnMqttReport'), btnMqttReset: $('btnMqttReset'),
   mqHost: $('mqHost'), mqPort: $('mqPort'), mqSsl: $('mqSsl'), mqUser: $('mqUser'),
   mqPass: $('mqPass'), mqClientId: $('mqClientId'),
   // 密码框右侧小眼睛：显/隐切换
   btnMqttPassEye: $('btnMqttPassEye'),
+  // hello topic：设备向平台自述身份用的发布 topic，与数据上报 topic 分开
+  mqHelloTopic: $('mqHelloTopic'),
   mqPub: $('mqPub'), mqSub: $('mqSub'), mqInterval: $('mqInterval'),
   mqAllowNoSn: $('mqAllowNoSn'),
   // MQTT 会话管理：select（离线自动销毁=0 / 持久会话=1），不是开关
@@ -252,9 +255,9 @@ async function guardUnsaved(dirty, what, btn, clear) {
 //---------------------------------------------------------------------
 // MQTT 页「未保存改动」检测（与 485 页同一套思路）
 //   MQTT 页不会被 5s 定时刷新打（readMqtt 只在点刷新/切子标签/保存后调），
-//   可以放心用快照比对。首页那 3 个 MQTT 输入框会被 renderHome 每 5s 回填，
+//   可以放心用快照比对。首页那 2 个 MQTT 输入框会被 renderHome 每 5s 回填，
 //   所以在 fillMqHome 里额外加一道"脏了就不覆盖"，否则用户改了一半的
-//   地址/端口/ClientID 会被设备旧值冲掉且毫无提示。
+//   地址/端口会被设备旧值冲掉且毫无提示。
 //---------------------------------------------------------------------
 function mqSnap() {
   const g = e => (e ? e.value : '');
@@ -262,9 +265,10 @@ function mqSnap() {
   return JSON.stringify({
     host: g(el.mqHost), port: g(el.mqPort), ssl: c(el.mqSsl),
     user: g(el.mqUser), pass: g(el.mqPass), cid: g(el.mqClientId),
+    hello: g(el.mqHelloTopic),
     pub: g(el.mqPub), sub: g(el.mqSub), iv: g(el.mqInterval),
     noSn: c(el.mqAllowNoSn), keep: g(el.mqKeepSession),
-    hHost: g(el.hMqHost), hPort: g(el.hMqPort), hCid: g(el.hMqClientId)
+    hHost: g(el.hMqHost), hPort: g(el.hMqPort)
   });
 }
 
@@ -994,18 +998,13 @@ function renderHome() {
 
 function fillMqHome(mq) {
   if (!el.hMqHost) return;
-  const c = (S.mqtt && S.mqtt.cfg) || {};
-  // 有未保存改动时，5s 定时刷新不许覆盖首页这三个 MQTT 输入框。
+  // 有未保存改动时，5s 定时刷新不许覆盖首页这两个 MQTT 输入框。
   // fillOk 只挡"焦点正在里面"——用户点一下别处焦点就丢了，下一轮刷新
-  // 照样把改了一半的地址/端口/ClientID 冲成设备旧值，而且毫无提示。
+  // 照样把改了一半的地址/端口冲成设备旧值，而且毫无提示。
   // 切到别的标签页时 tab0 不可见，fillOk 本来就会挡住，两道一起才全覆盖
   if (!S.mqDirty) {
     if (fillOk(el.hMqHost)) el.hMqHost.value = mq.host || '';
     if (fillOk(el.hMqPort)) el.hMqPort.value = mq.port != null ? mq.port : 1883;
-    // client_id 只在 R:MQTT 的 cfg 段有, R:STAT 的 mqtt 段没有; 没有就不动输入框
-    if (el.hMqClientId && fillOk(el.hMqClientId)) {
-      el.hMqClientId.value = c.client_id || '';
-    }
   }
   if (el.hMqErr) {
     el.hMqErr.textContent = mq.reject_reason || '';
@@ -1018,7 +1017,7 @@ function fillMqHome(mq) {
   }
 }
 
-// 首页只改地址/端口/ClientID。先读全量配置再合并, 否则把用户名/主题等字段冲掉
+// 首页只改地址/端口。先读全量配置再合并, 否则把用户名/主题等字段冲掉
 async function saveHomeMqtt() {
   // 必须守卫：合并用的基线来自 R:MQTT（设备当前值），不是表单。
   // 如果用户在 MQTT 页改了 topic/用户名没保存，这里一保存就把那些改动冲掉了
@@ -1030,9 +1029,7 @@ async function saveHomeMqtt() {
     const r = await sendCmd(Protocol.Enc.mqtt(), 'MQTT', 4000);
     const c = (r.data && r.data.cfg) || {};
     if (r.data) { S.mqtt = r.data; renderMqtt(); }
-    const patch = { host: host, port: port };
-    if (el.hMqClientId) patch.client_id = el.hMqClientId.value.trim();
-    await sendCmd(Protocol.Enc.writeMqtt(Object.assign({}, c, patch)), 'MQTT', 5000);
+    await sendCmd(Protocol.Enc.writeMqtt(Object.assign({}, c, { host: host, port: port })), 'MQTT', 5000);
     snapMqClean();
     status('MQTT 配置已保存，设备正在重连', true);
     toast('已保存，设备重连中');
@@ -1078,6 +1075,8 @@ function renderMqtt() {
     if (fillOk(el.mqUser)) el.mqUser.value = c.user || '';
     if (fillOk(el.mqPass)) el.mqPass.value = c.pass || '';
     if (fillOk(el.mqClientId)) el.mqClientId.value = c.client_id || '';
+    // hello topic 排在发布 Topic 上面：一个是拉配置时自述身份，一个是数据上报
+    if (fillOk(el.mqHelloTopic)) el.mqHelloTopic.value = c.hello_topic || '';
     if (fillOk(el.mqPub)) el.mqPub.value = c.pub_topic || '';
     if (fillOk(el.mqSub)) el.mqSub.value = c.sub_topic || '';
     if (fillOk(el.mqInterval)) el.mqInterval.value = c.interval_s != null ? c.interval_s : 60;
@@ -1122,10 +1121,19 @@ async function readMqtt(quiet) {
 async function saveMqtt() {
   const host = el.mqHost.value.trim();
   if (!host) { toast('MQTT 服务器地址不能为空'); return; }
+  // 三个 topic 都先按"留空回退默认"归一，再判 {sn}。
+  // 必须用归一后的值判：拿原始值判的话，清空输入框会被误报成"不含 {sn}"，
+  // 而实际发下去的是含 {sn} 的默认模板
+  const HELLO = '/sys/thing/gw/config/hello/{sn}';
+  const PUB   = '/sys/thing/node/property/post/{sn}';
+  const SUB   = '/sys/thing/gw/config/get/{sn}';
+  const helloT = el.mqHelloTopic.value.trim() || HELLO;
+  const pubT   = el.mqPub.value.trim() || PUB;
+  const subT   = el.mqSub.value.trim() || SUB;
   // {sn} 只是推荐（多台设备不撞 topic）。平台若要求固定格式
   // （如 /12/<sn>/property/post），用户直接把 SN 写进 topic 也放行。
-  if (!hasSnPh(el.mqPub.value) && !hasSnPh(el.mqSub.value)) {
-    if (!await askConfirm('发布/订阅 Topic 都不含 {sn} 占位符。\n若 topic 里没写设备 SN，多台设备会共用同一 topic 导致数据互相覆盖。\n确定继续吗？', 'Topic 未含 {sn}')) return;
+  if (!hasSnPh(pubT) && !hasSnPh(subT) && !hasSnPh(helloT)) {
+    if (!await askConfirm('发布/订阅/hello Topic 都不含 {sn} 占位符。\n若 topic 里没写设备 SN，多台设备会共用同一 topic 导致数据互相覆盖。\n确定继续吗？', 'Topic 未含 {sn}')) return;
   }
   const cfg = {
     host: host,
@@ -1135,8 +1143,9 @@ async function saveMqtt() {
     pass: el.mqPass.value,
     client_id: el.mqClientId.value.trim(),
     // 留空时用设备端默认模板，两边必须一致
-    pub_topic: el.mqPub.value.trim() || '/sys/thing/node/property/post/{sn}',
-    sub_topic: el.mqSub.value.trim() || '/sys/thing/gw/config/get/{sn}',
+    hello_topic: helloT,
+    pub_topic: pubT,
+    sub_topic: subT,
     interval_s: parseInt(el.mqInterval.value, 10) || 0,
     // QoS 界面已移除，不再下发；设备端固定用 QoS 1
     allow_no_sn: el.mqAllowNoSn.checked,
@@ -1457,12 +1466,12 @@ el.comSel.onchange = () => { S.port = el.comSel.value; };
 });
 
 // MQTT 未保存检测：MQTT 页(#sp-s2) + 首页 MQTT 那一栏(#tab0)分属两个容器，
-// 用事件代理得挂到 body 上，反而绕。这里直接把 14 个可编辑字段逐个挂监听，
+// 用事件代理得挂到 body 上，反而绕。这里直接把可编辑字段逐个挂监听，
 // 一目了然，新增字段时漏不了（编译器不会提醒，但列表就摆在眼前）。
 // 程序回填(renderMqtt/fillMqHome 赋 .value)不触发这两个事件，不会误标脏
 [el.mqHost, el.mqPort, el.mqSsl, el.mqUser, el.mqPass, el.mqClientId,
- el.mqPub, el.mqSub, el.mqInterval, el.mqKeepSession, el.mqAllowNoSn,
- el.hMqHost, el.hMqPort, el.hMqClientId].forEach(e => {
+ el.mqHelloTopic, el.mqPub, el.mqSub, el.mqInterval, el.mqKeepSession,
+ el.mqAllowNoSn, el.hMqHost, el.hMqPort].forEach(e => {
   if (!e) return;
   e.addEventListener('input', refreshMqDirty);
   e.addEventListener('change', refreshMqDirty);
@@ -1497,6 +1506,9 @@ document.querySelectorAll('.mode-card').forEach(c => {
 });
 // MQTT 页
 el.btnMqttRefresh.onclick = readMqtt;
+// 「手动配置」：不往平台拉，跳去 485 页自己填串口参数 + 参数表。
+// 和「拉取配置」是同一条配置的两个来源，二选一
+el.btnManualCfg.onclick = () => switchSerialTab('s1');
 el.btnMqttSave.onclick = saveMqtt;
 el.btnMqttReport.onclick = reportNow;
 el.btnMqttReconnect.onclick = mqttReconnect;
@@ -1510,6 +1522,7 @@ el.btnMqttReset.onclick = async () => {
   el.mqUser.value = '';
   el.mqPass.value = '';
   el.mqClientId.value = '';
+  el.mqHelloTopic.value = '/sys/thing/gw/config/hello/{sn}';
   el.mqPub.value = '/sys/thing/node/property/post/{sn}';
   el.mqSub.value = '/sys/thing/gw/config/get/{sn}';
   el.mqInterval.value = 60;
@@ -1544,17 +1557,19 @@ tabItems.forEach(item => {
 
 // poll模式子标签切换：串口1（485总线）/ MQTT配置
 const serialTabs = document.querySelectorAll('.serial-tab');
+// 抽成函数：MQTT 页的「手动配置」按钮也要切到 s1，两边不能各写一遍
+function switchSerialTab(key) {
+  serialTabs.forEach(s => s.classList.remove('active'));
+  const tab = document.querySelector('.serial-tab[data-serial="' + key + '"]');
+  if (tab) tab.classList.add('active');
+  document.querySelectorAll('.serial-pane').forEach(p => p.classList.remove('active'));
+  const pane = document.getElementById('sp-' + key);
+  if (pane) pane.classList.add('active');
+  // 切到 MQTT配置 时拉一次，避免刚切过去是空的
+  if (key === 's2' && S.open) readMqtt();
+}
 serialTabs.forEach(tab => {
-  tab.onclick = () => {
-    serialTabs.forEach(s => s.classList.remove('active'));
-    tab.classList.add('active');
-    const key = tab.getAttribute('data-serial');   // s1 / s2
-    document.querySelectorAll('.serial-pane').forEach(p => p.classList.remove('active'));
-    const pane = document.getElementById('sp-' + key);
-    if (pane) pane.classList.add('active');
-    // 切到 MQTT配置 时拉一次，避免刚切过去是空的
-    if (key === 's2' && S.open) readMqtt();
-  };
+  tab.onclick = () => switchSerialTab(tab.getAttribute('data-serial'));   // s1 / s2
 });
 
 // 串口接收

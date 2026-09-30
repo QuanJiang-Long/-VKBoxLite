@@ -247,7 +247,7 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 |---|---|---|
 | 上报（发布） | `/sys/thing/node/property/post/{sn}` | 前端留空时的默认模板，`{sn}` = 设备 SN |
 | 订阅（下行） | `/sys/thing/gw/config/get/{sn}` | 前端留空时的默认模板 |
-| hello | `/sys/thing/gw/config/hello/{SN}` | 拉取握手，`{SN}` = 设备 SN |
+| hello | `/sys/thing/gw/config/hello/{sn}` | 拉取握手，`{sn}` = 设备 SN。**前端可改**（`mqttcfg.hello_topic`，「MQTT配置」页的 **hello Topic** 输入框），留空回落此默认 |
 | 配置下发 | `/sys/thing/gw/config/get/{SN}` | conack 时与下行 topic 一起订阅 |
 | 上报（平台） | `/sys/thing/node/property/post/{SN}-1` | 拉取结果里回给前端展示，当前不订阅 |
 | 下行命令（平台） | `/sys/thing/node/function/get/{SN}-1` | 拉取结果里回给前端展示，当前不订阅 |

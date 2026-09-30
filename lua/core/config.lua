@@ -33,7 +33,6 @@ M.MQTT_ALLOW_NO_SN = false
 -- 平台配置拉取(W:PULLCFG)
 M.PLATFORM_VENDOR = "VKBoxLite"
 M.PLATFORM_MODEL = "VKBox-Lite"
-M.PLATFORM_HELLO_TOPIC = "/sys/thing/gw/config/hello/%s"
 M.PLATFORM_GET_TOPIC = "/sys/thing/gw/config/get/%s"
 M.PLATFORM_POST_TOPIC = "/sys/thing/node/property/post/%s-1"
 M.PLATFORM_FUNC_TOPIC = "/sys/thing/node/function/get/%s-1"

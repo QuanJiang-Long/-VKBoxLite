@@ -427,7 +427,10 @@ local function pull_step()
         end
     elseif p.state == "helloing" then
         local did = device_id()
-        local topic = string.format(cfg.PLATFORM_HELLO_TOPIC, did)
+        -- hello topic 走配置(mqttcfg.hello_topic, 前端可改);
+        -- 含 {sn} 却没 SN 时返回 nil, 这时候发出去会把字面 {sn} 当 SN 用
+        local topic = mqttcfg.resolve_hello(did)
+        if not topic then return pull_finish("fail", "hello topic 含 {sn} 但无 SN") end
         local body = string.format('{"vendor":%s,"model":%s,"fwVersion":%s,"deviceId":%s}',
             jstr(cfg.PLATFORM_VENDOR), jstr(cfg.PLATFORM_MODEL), jstr(_G.VERSION or "0.0.0"), jstr(imei()))
         log.info("iot", string.format("pullcfg hello topic=%s sn=%s imei=%s body=%s",
