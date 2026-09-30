@@ -75,7 +75,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:REG / W:REG=[json] | 寄存器表读写 |
 | R:VAL | 实时值快照 |
 | R:STAT | 运行状态汇总（mode/data/guard/mqtt） |
-| W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt}`）。前提只需配好 MQTT 服务器地址和端口，设备会自己连 |
+| W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt}`，`mqtt` 段含 `hello`/`pub`/`sub` 三个拼好的 topic）。前提只需配好 MQTT 服务器地址和端口，设备会自己连 |
 | W:WRITE=slave,addr,value / W:WRITEJ={json} | 写寄存器（idle 也可写，经写事务队列在安全点注入） |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配” |
 | R:MQTT / W:MQTT={json} | MQTT 配置读写，读返回 `{cfg,pub,sub,ready,err,stat}` |
@@ -227,7 +227,8 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 
 平台  ──publish────────────────▶  设备  /sys/thing/gw/config/get/{SN}  （连上即订阅）
 
-前端  回填 485 表单 + 寄存器表 + MQTT pub/sub 输入框
+前端  回填 485 表单 + 寄存器表 + MQTT hello/pub/sub 输入框，
+      并强制关掉「手动配置」——三个 topic 换成平台给的那套成品
 用户  点「保存配置」/「保存」→ W:CFG / W:REG / W:MQTT
 （「重连」按钮单独发 W:MQTTRC，只重连不动配置）
 ```

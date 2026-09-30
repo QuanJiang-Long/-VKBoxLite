@@ -1,6 +1,7 @@
 local corelib = require "core/corelib"
 local cfg = require "core/config"
 local cfgstore = require "cfg"
+local mqttcfg = require "iot/mqttcfg"
 local json = corelib.try("json")
 
 local M = {}
@@ -80,9 +81,15 @@ local function props_to_regs(props, limit)
     return regs, skipped
 end
 
+-- 拉取成功后回给前端展示的 topic 形状。
+-- hello 走 mqttcfg.resolve_hello：R:PULLCFG 拉回来的是"设备侧实际会用的
+-- topic", 不是平台契约常量——用户在 MQTT 页改过 hello topic 就得按改的拼。
+-- 三个都带 SN, 前端自动模式下直接回显。
 local function topics(sn)
-    if not sn or sn == "" then return nil, nil end
-    return string.format(cfg.PLATFORM_POST_TOPIC, sn), string.format(cfg.PLATFORM_FUNC_TOPIC, sn)
+    if not sn or sn == "" then return nil, nil, nil end
+    return mqttcfg.resolve_hello(sn),
+        string.format(cfg.PLATFORM_POST_TOPIC, sn),
+        string.format(cfg.PLATFORM_FUNC_TOPIC, sn)
 end
 M.topics = topics
 

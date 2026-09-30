@@ -151,7 +151,13 @@ end
 function M.effective(device_id)
     local c = M.load()
     local pub, sub, err = M.resolve_topics(device_id)
-    return { cfg = c, pub = pub, sub = sub, err = err, ready = pub ~= nil }
+    return {
+        cfg = c,
+        pub = pub, sub = sub,
+        -- hello 也要给前端：自动模式下三个 topic 全由设备拼好回显
+        hello = M.resolve_hello(device_id),
+        err = err, ready = pub ~= nil,
+    }
 end
 
 return M

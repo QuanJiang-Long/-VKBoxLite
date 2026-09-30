@@ -74,6 +74,12 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .panel{border:1px solid #dde2ea;padding:12px;margin:12px 0;border-radius:4px;background:#fbfcfe;}
 .panel-title{font-weight:bold;margin-bottom:10px;display:flex;align-items:center;gap:8px;}
 .panel-title .spacer{margin-left:auto;}
+/* 手动配置开关：点亮 = 手动模式（topic 可改），灰色 = 自动模式（topic 由设备拼）。
+   颜色是唯一的模式提示，不能只靠文字——用户切过去时不一定盯着按钮看 */
+.panel-title button.sm.on{background:#409eff;border-color:#409eff;color:#fff;}
+.panel-title button.sm.on:hover{background:#2b8aef;color:#fff;}
+/* 只读的 MQTT topic：浅灰底 + 禁则光标，肉眼一眼分得清"这块不给你动" */
+.form-row input.ro{background:#f4f6f9;color:#888;cursor:not-allowed;}
 /* 串口子标签 */
 .serial-tabs{display:flex;border-bottom:1px solid #ddd;margin-bottom:10px;}
 .serial-tab{padding:6px 10px;border:1px solid #ddd;border-bottom:none;margin-right:4px;cursor:pointer;background:#f3f5f8;}
@@ -383,7 +389,7 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                 <div class="serial-pane" id="sp-s2">
                 <div class="panel">
                     <div class="panel-title">MQTT 连接
-                        <button class="sm" id="btnManualCfg" title="跳去「串口1（485总线）」手动填串口参数和参数表，不从平台拉取">手动配置</button>
+                        <button class="sm" id="btnManualCfg" title="手动配置：自己填下面的 topic；关闭手动配置：topic 由设备自动拼接">手动配置</button>
                         <div class="spacer"></div>
                         <button class="sm" id="btnMqttRefresh">刷新</button>
                     </div>
@@ -420,15 +426,18 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                     </div>
                     <div class="form-row">
                         <label>hello Topic</label>
-                        <input id="mqHelloTopic" type="text" placeholder="/sys/thing/gw/config/hello/{sn}">
+                        <input id="mqHelloTopic" type="text" placeholder="/sys/thing/gw/config/hello/{sn}" readonly>
+                        <span class="hint" id="mqHelloHint"></span>
                     </div>
                     <div class="form-row">
                         <label>发布 Topic</label>
-                        <input id="mqPub" type="text" placeholder="/sys/thing/node/property/post/{sn}">
+                        <input id="mqPub" type="text" placeholder="/sys/thing/node/property/post/{sn}" readonly>
+                        <span class="hint" id="mqPubHint"></span>
                     </div>
                     <div class="form-row">
                         <label>订阅 Topic</label>
-                        <input id="mqSub" type="text" placeholder="/sys/thing/gw/config/get/{sn}">
+                        <input id="mqSub" type="text" placeholder="/sys/thing/gw/config/get/{sn}" readonly>
+                        <span class="hint" id="mqSubHint"></span>
                     </div>
                     <div class="form-row">
                         <label>上报周期(秒)</label>

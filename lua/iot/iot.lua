@@ -401,8 +401,9 @@ function M.pull_status()
     if p.result then
         r.poll = p.result.poll
         r.skipped = p.result.skipped
-        local pub, sub = pullcfg.topics(device_id())
-        r.mqtt = { pub = pub, sub = sub }
+        -- 三个 topic 全带上, 前端自动模式要回显"设备拼好的"那三个
+        local hello, pub, sub = pullcfg.topics(device_id())
+        r.mqtt = { hello = hello, pub = pub, sub = sub }
     end
     return r
 end

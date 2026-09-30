@@ -32,6 +32,8 @@ const S = {
                        // ⚠️ 不能只存 r.data.mode：data/guard 两段会被丢掉，
                        //    首页"看门狗/数据点数"会永远显示未启用/--。
   mqtt: null,          // R:MQTT 返回的状态
+  mqManual: false,     // MQTT topic 是否手动配置。false=自动（设备拼好、只读），
+                       // true=手动（用户自己填）。见 setManualMode()
   sniffCfg: null,      // R:SNIFFCFG 返回的配置
   frames: [],          // 最近解译帧
   infer: null,         // R:INFER 返回的推断结果
@@ -273,6 +275,55 @@ function mqSnap() {
 }
 
 function snapMqClean() { S.mqSnap = mqSnap(); refreshMqDirty(); }
+
+const MQ_TOPIC_IDS = ['mqHelloTopic', 'mqPub', 'mqSub'];
+
+// 每行 topic 右边跟一句"是谁定的"，比看主按钮更直接
+function mqTopicHints() {
+  const H = S.mqManual ? '手动' : '设备拼';
+  const ids = ['mqHelloHint', 'mqPubHint', 'mqSubHint'];
+  ids.forEach(id => { if (el[id]) el[id].textContent = H; });
+}
+
+//---------------------------------------------------------------------
+// MQTT topic 手动/自动切换
+//   自动（默认）：三个 topic 只读，显示设备拼好的值（SN 已代入），
+//              保存时不下发 topic，设备保留自己的模板
+//   手动：      三个 topic 可编辑，显示带 {sn} 的模板，保存时原样下发
+// 按钮文字/颜色 = 唯一的模式提示：蓝色「关闭手动配置」= 手动，灰色「手动配置」= 自动
+//---------------------------------------------------------------------
+function setManualMode(on, opts) {
+  opts = opts || {};
+  S.mqManual = !!on;
+  MQ_TOPIC_IDS.forEach(id => {
+    const e = el[id];
+    if (!e) return;
+    e.readOnly = !S.mqManual;
+    e.classList.toggle('ro', !S.mqManual);
+  });
+  el.btnManualCfg.textContent = S.mqManual ? '关闭手动配置' : '手动配置';
+  el.btnManualCfg.classList.toggle('on', S.mqManual);
+  el.btnManualCfg.title = S.mqManual
+      ? '关闭后 topic 改回由设备自动拼接'
+      : '手动配置：自己填下面的 topic';
+  mqTopicHints();
+  // 两种模式下输入框里放的东西不一样：自动=成品(SN 已拼)，手动=模板(带 {sn})。
+  // 切过去就得顺手把内容也换掉，否则用户会拿成品去存，把 {sn} 模板存死成固定值
+  if (opts.refill !== false) {
+    const c = (S.mqtt && S.mqtt.cfg) || {};
+    if (S.mqManual) {
+      el.mqHelloTopic.value = c.hello_topic || '';
+      el.mqPub.value = c.pub_topic || '';
+      el.mqSub.value = c.sub_topic || '';
+    } else {
+      el.mqHelloTopic.value = (S.mqtt && S.mqtt.hello) || '';
+      el.mqPub.value = (S.mqtt && S.mqtt.pub) || '';
+      el.mqSub.value = (S.mqtt && S.mqtt.sub) || '';
+    }
+  }
+  // 换内容等于换了一遍表单，必须重新取基线，否则会误报"有未保存更改"
+  if (opts.snap !== false) snapMqClean();
+}
 
 function refreshMqDirty() {
   const d = S.mqSnap !== null && mqSnap() !== S.mqSnap;
@@ -536,7 +587,11 @@ async function pullCfg() {
       return;
     }
     fillFormFromPlatform(d);
+    // 拉取配置是"平台说了算"，抢过手动配置的话事权：强制关掉手动模式，
+    // 三个 topic 换成平台返回的那套（设备拼好、SN 已代入）
+    if (S.mqManual) setManualMode(false);
     snapClean();                       // 拉回来的值成为新基线，不再是「未保存」
+    snapMqClean();
     const skipped = (d.skipped || []).length;
     const n = (d.poll && d.poll.regs ? d.poll.regs.length : 0);
     status('已拉取 ' + n + ' 个寄存器' + (skipped ? '，忽略 ' + skipped + ' 条' : '') + '，请检查后保存', true);
@@ -559,6 +614,9 @@ function fillFormFromPlatform(d) {
   if (p.slave) el.inpSlave.value = p.slave;
   if (p.regs) { S.regs = p.regs; renderRegTable(); }
   if (d.mqtt) {
+    // 三个 topic 一起填：R:PULLCFG 的 mqtt 段已带 hello/pub/sub，
+    // 且都是设备拼好的成品（SN 已代入），自动模式下直接回显
+    if (d.mqtt.hello) el.mqHelloTopic.value = d.mqtt.hello;
     if (d.mqtt.pub) el.mqPub.value = d.mqtt.pub;
     if (d.mqtt.sub) el.mqSub.value = d.mqtt.sub;
   }
@@ -1075,10 +1133,19 @@ function renderMqtt() {
     if (fillOk(el.mqUser)) el.mqUser.value = c.user || '';
     if (fillOk(el.mqPass)) el.mqPass.value = c.pass || '';
     if (fillOk(el.mqClientId)) el.mqClientId.value = c.client_id || '';
-    // hello topic 排在发布 Topic 上面：一个是拉配置时自述身份，一个是数据上报
-    if (fillOk(el.mqHelloTopic)) el.mqHelloTopic.value = c.hello_topic || '';
-    if (fillOk(el.mqPub)) el.mqPub.value = c.pub_topic || '';
-    if (fillOk(el.mqSub)) el.mqSub.value = c.sub_topic || '';
+    // hello topic 排在发布 Topic 上面：一个是拉配置时自述身份，一个是数据上报。
+    // 自动模式填设备拼好的成品(SN 已代入)，手动模式填带 {sn} 的模板
+    if (fillOk(el.mqHelloTopic)) {
+      el.mqHelloTopic.value = S.mqManual
+          ? (c.hello_topic || '')
+          : (r.hello || '');
+    }
+    if (fillOk(el.mqPub)) {
+      el.mqPub.value = S.mqManual ? (c.pub_topic || '') : (r.pub || '');
+    }
+    if (fillOk(el.mqSub)) {
+      el.mqSub.value = S.mqManual ? (c.sub_topic || '') : (r.sub || '');
+    }
     if (fillOk(el.mqInterval)) el.mqInterval.value = c.interval_s != null ? c.interval_s : 60;
     // QoS 已从界面移除：设备端发布/订阅固定用 QoS 1，
     // 这里不再显示也不再下发（设备 normalize 会退回默认值 1）。
@@ -1102,6 +1169,13 @@ function renderMqtt() {
   setKv('mqStErr', s.reject_reason || s.last_err || '', !!(s.reject_reason || s.last_err));
   setKv('mqStSn', r.ready ? '已烧号' : (r.err || '未烧号'), !r.ready);
   renderHome();
+  mqTopicHints();
+  // 只在第一次渲染时套一次模式：只读属性/颜色/回显来源都要跟 S.mqManual 走。
+  // 后面每次 readMqtt 都重套会覆盖用户在本次会话里点的「手动配置」
+  if (S._mqModeInit !== true) {
+    S._mqModeInit = true;
+    setManualMode(S.mqManual);
+  }
 }
 
 // quiet=true 跳过「有未保存更改」确认（保存/上报/重连之后的回读，以及
@@ -1132,7 +1206,8 @@ async function saveMqtt() {
   const subT   = el.mqSub.value.trim() || SUB;
   // {sn} 只是推荐（多台设备不撞 topic）。平台若要求固定格式
   // （如 /12/<sn>/property/post），用户直接把 SN 写进 topic 也放行。
-  if (!hasSnPh(pubT) && !hasSnPh(subT) && !hasSnPh(helloT)) {
+  // 自动模式下三个 topic 不下发，这里的 {sn} 提示就没意义，跳过
+  if (S.mqManual && !hasSnPh(pubT) && !hasSnPh(subT) && !hasSnPh(helloT)) {
     if (!await askConfirm('发布/订阅/hello Topic 都不含 {sn} 占位符。\n若 topic 里没写设备 SN，多台设备会共用同一 topic 导致数据互相覆盖。\n确定继续吗？', 'Topic 未含 {sn}')) return;
   }
   const cfg = {
@@ -1142,10 +1217,14 @@ async function saveMqtt() {
     user: el.mqUser.value.trim(),
     pass: el.mqPass.value,
     client_id: el.mqClientId.value.trim(),
-    // 留空时用设备端默认模板，两边必须一致
-    hello_topic: helloT,
-    pub_topic: pubT,
-    sub_topic: subT,
+    // 留空时用设备端默认模板，两边必须一致。
+    // 自动模式下根本不下发这三个键：mqttcfg.save 对缺失键用设备现值补，
+    // 语义正好是"topic 归设备管，用户改的只是地址/账号这些"
+    ...(S.mqManual ? {
+      hello_topic: helloT,
+      pub_topic: pubT,
+      sub_topic: subT,
+    } : {}),
     interval_s: parseInt(el.mqInterval.value, 10) || 0,
     // QoS 界面已移除，不再下发；设备端固定用 QoS 1
     allow_no_sn: el.mqAllowNoSn.checked,
@@ -1506,9 +1585,22 @@ document.querySelectorAll('.mode-card').forEach(c => {
 });
 // MQTT 页
 el.btnMqttRefresh.onclick = readMqtt;
-// 「手动配置」：不往平台拉，跳去 485 页自己填串口参数 + 参数表。
-// 和「拉取配置」是同一条配置的两个来源，二选一
-el.btnManualCfg.onclick = () => switchSerialTab('s1');
+// 「手动配置」是 topic 的手动/自动开关，不是跳页按钮：
+//   点开(蓝)=手动，三个 topic 可自己填；点关(灰)=自动，topic 由设备拼好只读回显。
+//   串口1那边「拉取配置」成功时会自动把它关掉并回填平台给的三个 topic
+el.btnManualCfg.onclick = async () => {
+  if (!S.mqManual) {
+    // 开手动：可能有未保存改动，开着会丢
+    if (!await guardUnsaved(S.mqDirty, 'MQTT', '保存', () => { S.mqSnap = null; })) return;
+    setManualMode(true);
+    status('已开启手动配置，可修改下面的 topic', true);
+  } else {
+    // 关手动：屏幕上那三个成品值会被设备模板顶掉，同样要先问
+    if (!await guardUnsaved(S.mqDirty, 'MQTT', '保存', () => { S.mqSnap = null; })) return;
+    setManualMode(false);
+    status('已关闭手动配置，topic 由设备自动拼接', true);
+  }
+};
 el.btnMqttSave.onclick = saveMqtt;
 el.btnMqttReport.onclick = reportNow;
 el.btnMqttReconnect.onclick = mqttReconnect;
@@ -1516,6 +1608,8 @@ el.btnMqttPassEye.onclick = togglePassEye;
 el.btnMqttReset.onclick = async () => {
   if (!await guardUnsaved(S.mqDirty, 'MQTT', '保存', () => { S.mqSnap = null; })) return;
   if (!await askConfirm('确定恢复 MQTT 默认配置？', '恢复默认配置')) return;
+  // 恢复默认会重写 topic，必须先切手动，否则自动模式下 topic 不下发，白改
+  if (!S.mqManual) setManualMode(true, { snap: false });
   el.mqHost.value = 'test.mosquitto.org';
   el.mqPort.value = 1883;
   el.mqSsl.checked = false;
@@ -1557,19 +1651,17 @@ tabItems.forEach(item => {
 
 // poll模式子标签切换：串口1（485总线）/ MQTT配置
 const serialTabs = document.querySelectorAll('.serial-tab');
-// 抽成函数：MQTT 页的「手动配置」按钮也要切到 s1，两边不能各写一遍
-function switchSerialTab(key) {
-  serialTabs.forEach(s => s.classList.remove('active'));
-  const tab = document.querySelector('.serial-tab[data-serial="' + key + '"]');
-  if (tab) tab.classList.add('active');
-  document.querySelectorAll('.serial-pane').forEach(p => p.classList.remove('active'));
-  const pane = document.getElementById('sp-' + key);
-  if (pane) pane.classList.add('active');
-  // 切到 MQTT配置 时拉一次，避免刚切过去是空的
-  if (key === 's2' && S.open) readMqtt();
-}
 serialTabs.forEach(tab => {
-  tab.onclick = () => switchSerialTab(tab.getAttribute('data-serial'));   // s1 / s2
+  tab.onclick = () => {
+    serialTabs.forEach(s => s.classList.remove('active'));
+    tab.classList.add('active');
+    const key = tab.getAttribute('data-serial');   // s1 / s2
+    document.querySelectorAll('.serial-pane').forEach(p => p.classList.remove('active'));
+    const pane = document.getElementById('sp-' + key);
+    if (pane) pane.classList.add('active');
+    // 切到 MQTT配置 时拉一次，避免刚切过去是空的
+    if (key === 's2' && S.open) readMqtt();
+  };
 });
 
 // 串口接收
