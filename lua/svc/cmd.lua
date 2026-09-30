@@ -122,6 +122,9 @@ local function reg_cmds()
         else
             poll.apply_cfg(n)
         end
+        -- 用户点「保存配置」= 现场确认应用这套平台配置，此时才向平台回执 U6。
+        -- 提前到 parse 成功时回执会误报"已应用"——用户可能看完又改了
+        if iot and iot.reply_config then pcall(iot.reply_config) end
         M.reply("RET:CFG=OK")
     end)
 

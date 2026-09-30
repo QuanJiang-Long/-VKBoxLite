@@ -82,6 +82,8 @@ mklink /J D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules D:\VKBox_Lite\VKBo
 | 首页的 MQTT 地址端口和「MQTT配置」页是什么关系 | 同一份配置的两个入口。首页只改地址/端口（保存时先读全量再合并，不会冲掉用户名和 topic）；完整配置（含 ClientID、hello/发布/订阅 topic）在「poll模式 → MQTT配置」子标签 |
 | MQTT 显示"平台拒绝连接(CONACK 0x05 未授权)" | broker 拒绝了这个连接，**不代表一定要用户名密码**。排查顺序：① 首页看「实际使用」那行的 clientId，格式是否平台要求（如 `S&<SN>&12&1`）② 端口是否 MQTT 端口 ③ 设备是否已在平台注册 ④ 确实有账号再补用户名密码。详见 `../lua/README.md` 的「MQTT 连不上排查」 |
 | 点「拉取配置」提示"平台未下发配置(超时)" | 设备已连上 MQTT 并发过 hello，但平台 15s 内没回。检查平台是否在线、topic 是否匹配、SN 是否已烧 |
+| 拉取成功了但平台还在反复推配置 | 正常。回执 U6 要等用户点「保存配置」才发；没点就说明这套配置还没被确认。「连接与上报状态」的 **配置回执** 显示次数，为 0 = 尚未回执 |
+| 拉取成功后「下行订阅」只有 1 条 | 没连上 broker。连上后固定 4 条（config/get + function/get + property/set + property/get） |
 | 下拉框没有 COM32 | USB 未插好/未上电；或设备日志停在 `VUART task: 等待 USB 枚举...`，等 2~3 秒再刷新 |
 | 串口被占用 | Luatools / ssCOM 正开着同一 COM 口，先关掉 |
 | 打开白屏 | junction 断了，按上文重连或 `npm install` |
@@ -246,14 +248,21 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 | 前端动作 | 指令 | 应答 | 说明 |
 |---|---|---|---|
 | 发起拉取 | `W:PULLCFG` | `RET:PULLCFG=started` | 设备向平台发 hello 并等配置下发；未连 MQTT 直接回 `RET:FAIL:PULLCFG:原因` |
-| 查拉取状态 | `R:PULLCFG` | `RET:PULLCFG={json}` | `{state,msg,poll,skipped,mqtt}`；`state` = `helloing`/`waiting`/`done`/`fail` |
+| 查拉取状态 | `R:PULLCFG` | `RET:PULLCFG={json}` | `{state,msg,poll,skipped,mqtt,msg_id,replied}`；`state` = `helloing`/`waiting`/`done`/`fail` |
 
 拉取流程与字段映射详见 `../lua/README.md` 的「平台配置拉取」章节。要点：
 
-- 设备 publish `hello` 到 `mqttcfg.hello_topic`（默认 `/sys/thing/gw/config/hello/{SN}`，可在「MQTT配置」页的 **hello Topic** 输入框改），订阅 `/sys/thing/gw/config/get/{SN}`
+- 设备 publish `hello` 到 `mqttcfg.hello_topic`（默认 `/sys/thing/gw/config/hello/{SN}`，可在「MQTT配置」页的 **hello Topic** 输入框改），payload 带 `topicFormat:"v3"` 与 `onboardingMode:"platform"`
+- conack 时订 4 条 gw 前缀下行：`config/get` + `function/get` + `property/set` + `property/get`（全量见「连接与上报状态」的 **下行订阅** 一栏）。`config/get` **无条件订**：业务订阅 topic 被改到别处时，拉取链路仍要通
+- 非本机 SN（或 `{SN}-{n}`）的下行直接丢弃，不会拿去写寄存器
 - 只提取 `commInterfaces`（串口参数）与 `tsl.properties`（寄存器表），其余全部丢弃
-- 拉取结果里回的 topic：上报 `/sys/thing/node/property/post/{SN}-1`，下行 `/sys/thing/node/function/get/{SN}-1`
-- **拉取只回填表单，不自动保存**：需用户点「保存配置」「保存」才写入设备
+- 拉取结果里回的 topic：上报 `/sys/thing/node/property/post/{SN}-1`，下行 `/sys/thing/gw/config/get/{SN}`
+- **平台不下发 clientId / 订阅 topic / 上报间隔**（V3 契约），这三样仍是设备自拼
+- **拉取只回填表单，不自动保存**：需用户点「保存配置」才写入设备
+- **回执 U6 也要等用户保存**：`parse()` 成功后只提示"点保存后回执"，此时不回；
+  用户点「保存配置」（`W:CFG`）成功才向 `/sys/thing/gw/config/reply/{SN}` 发
+  `{"msgId":<下发原值>,"code":200,...}`。用户不保存就不回执，平台会继续重推
+  ——这是预期语义，不是卡住。「连接与上报状态」的 **配置回执** 一栏显示已回执次数
 - 拉取成功后 topic 由平台接管：三个 topic 换成设备拼好的成品，并自动关掉
   「手动配置」（详见下面「MQTT topic 手动/自动切换」）
 

@@ -35,7 +35,8 @@ M.PLATFORM_VENDOR = "VKBoxLite"
 M.PLATFORM_MODEL = "VKBox-Lite"
 M.PLATFORM_GET_TOPIC = "/sys/thing/gw/config/get/%s"
 M.PLATFORM_POST_TOPIC = "/sys/thing/node/property/post/%s-1"
-M.PLATFORM_FUNC_TOPIC = "/sys/thing/node/function/get/%s-1"
+-- U6 应用回执：msgId 必须与 D1 下发包里的一致，平台据此核销待下发登记
+M.PLATFORM_REPLY_TOPIC = "/sys/thing/gw/config/reply/%s"
 M.PULL_TIMEOUT_MS = 15000
 -- 拉取前自动连 MQTT 的等待上限(设备可能刚上电, 网络还没就绪)
 M.PULL_CONNECT_MS = 20000

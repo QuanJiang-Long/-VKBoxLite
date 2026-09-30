@@ -115,6 +115,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .kv-grid .kv b{color:#555;font-weight:normal;min-width:96px;}
 .kv-grid .kv span{color:#0a7d2c;font-weight:bold;word-break:break-all;}
 .kv-grid .kv span.bad{color:#c0392b;}
+/* 下行订阅是多行 topic 清单，不换行会挤成一坨看不见 */
+#mqStSubs{white-space:pre-line;line-height:1.6;}
 /* 报文视图 */
 .frame-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;}
 .frame-toolbar select,.frame-toolbar input{padding:3px 6px;border:1px solid #ccc;font-size:13px;}
@@ -472,6 +474,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                         <div class="kv"><b>生效发布</b><span id="mqStPub">--</span></div>
                         <div class="kv"><b>生效订阅</b><span id="mqStSub">--</span></div>
                         <div class="kv"><b>已订阅</b><span id="mqStSubed">--</span></div>
+                        <div class="kv"><b>下行订阅</b><span id="mqStSubs">--</span></div>
+                        <div class="kv"><b>配置回执</b><span id="mqStReplied">--</span></div>
                         <div class="kv"><b>已上报条数</b><span id="mqStPubed">--</span></div>
                         <div class="kv"><b>失败次数</b><span id="mqStFailed">--</span></div>
                         <div class="kv"><b>最近上报</b><span id="mqStLast">--</span></div>

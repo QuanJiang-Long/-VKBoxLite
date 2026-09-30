@@ -22,11 +22,14 @@ local function reset_state()
     S = {
         want_run = false, connected = false, subscribed = false,
         client = nil, dirty = false, backoff = 1,
-        published = 0, failed = 0, kick_flag = false,
-        recv_pending = nil, pub = nil, sub = nil, device_id = nil,
+        published = 0, failed = 0, replied = 0, kick_flag = false,
+        recv_pending = nil, pub = nil, sub = nil, subs = nil, device_id = nil,
         last_pub = 0, last_err = nil, client_id = nil,
         reject_reason = nil,
-        pull = { state = "idle", msg = "", result = nil, deadline = 0 },
+        pull = {
+            state = "idle", msg = "", result = nil, deadline = 0,
+            msg_id = nil, replied = false,
+        },
         pull_payload = nil,
     }
 end
@@ -134,17 +137,44 @@ local function publish(force)
 end
 M.publish = publish
 
+-- conack 时的下行订阅清单（文档"订阅关系"）。
+-- 平台下发恒用 gw 前缀，且每条末段都是目标裸 SN。
+-- 三条要点：
+--   ① D1(/gw/config/get/{sn}) 必须无条件订上：它是"拉取配置"链路唯一的
+--      入口。业务 sub_topic 虽默认同形，但用户改到别处时不能跟着丢，
+--      否则 handle_downlink 永远等不到 configSnapshot。
+--   ② function/get + property/set + property/get 是平台侧另外三类下行，
+--      也走 gw 前缀，不订就收不到服务调用/属性设置/全量查询。
+--   ③ 与 S.sub 同形的先去重再订，同一个 topic 订两遍纯属浪费。
+local function build_subs()
+    local subs = {}
+    local function add(t)
+        if not t or t == "" then return end
+        for _, x in ipairs(subs) do
+            if x == t then return end
+        end
+        subs[#subs + 1] = t
+    end
+    local did = S.device_id
+    if did and did ~= "" then
+        add(string.format(cfg.PLATFORM_GET_TOPIC, did))
+    end
+    add(S.sub)
+    if did and did ~= "" then
+        add("/sys/thing/gw/function/get/" .. did)
+        add("/sys/thing/gw/property/set/" .. did)
+        add("/sys/thing/gw/property/get/" .. did)
+    end
+    return subs
+end
+
 local function on_mqtt(cli, event, data, payload)
     if event == "conack" then
         S.connected = true
         S.backoff = 1
         S.reject_reason = nil
-        local subs = {}
-        -- 业务订阅与平台配置订阅默认同形(/sys/thing/gw/config/get/{sn}),
-        -- 同一个 topic 订两次纯属浪费, 去重后再订
-        if S.sub then subs[#subs + 1] = S.sub end
-        local gtopic = get_topic()
-        if gtopic and gtopic ~= S.sub then subs[#subs + 1] = gtopic end
+        local subs = build_subs()
+        S.subs = subs
         S.subscribed = false
         for _, t in ipairs(subs) do
             local sok, serr = pcall(function() cli:subscribe(t, mqttcfg.load().qos) end)
@@ -333,7 +363,29 @@ local function downlink_write(items)
     return nok, nfail
 end
 
+-- SN 归属过滤（文档"订阅关系" + "{targetSN} = 网关 SN 或其子设备 SN"）：
+-- 下行 topic 末段必须等于本机 SN 或 {gwSn}-{n}。
+-- 同 broker 上多台网关时会收到别人的指令，不过滤就是拿别人的指令写本地寄存器。
+-- 两条例外，都会导致合法下行被静默丢弃，必须放行：
+--   ① 无 SN：无从判断（allow_no_sn 模式下设备本来就不带 SN）
+--   ② 非 /sys/thing/ 命名空间：用户自己配的订阅 topic，不在 V3 契约内
+local function claim_ok(topic)
+    if type(topic) ~= "string" then return true end
+    if topic:sub(1, 11) ~= "/sys/thing/" then return true end
+    local did = S.device_id or device_id()
+    if not did or did == "" then return true end
+    local last = topic:match("([^/]+)$")
+    if not last then return false end
+    if last == did then return true end
+    -- 子设备形态：{gwSn}-{nodeIndex}，如 11802026092600016-1
+    return last:sub(1, #did + 1) == (did .. "-")
+end
+
 function M.handle_downlink(topic, payload)
+    if not claim_ok(topic) then
+        log.info("iot", "downlink dropped, not ours: " .. tostring(topic))
+        return
+    end
     -- 平台配置下发与业务指令下行默认共用同一 topic
     -- (/sys/thing/gw/config/get/{sn}), 不能一见这个前缀就当配置包收下,
     -- 否则 REPORT/WRITE 指令全被吞掉。
@@ -389,6 +441,7 @@ function M.pull_start()
     S.pull = {
         state = "connecting", msg = "", result = nil,
         deadline = os.time() + math.floor(cfg.PULL_CONNECT_MS / 1000),
+        msg_id = nil, replied = false,
     }
     -- 未连上时打断退避等待, 让 task_main 立刻重连, 不必等下一个周期
     if not S.connected then M.kick() end
@@ -405,6 +458,9 @@ function M.pull_status()
         local hello, pub, sub = pullcfg.topics(device_id())
         r.mqtt = { hello = hello, pub = pub, sub = sub }
     end
+    -- 回执状态单独给：前端要提示"未保存前不回执平台"
+    r.msg_id = p.msg_id
+    r.replied = p.replied
     return r
 end
 
@@ -432,7 +488,12 @@ local function pull_step()
         -- 含 {sn} 却没 SN 时返回 nil, 这时候发出去会把字面 {sn} 当 SN 用
         local topic = mqttcfg.resolve_hello(did)
         if not topic then return pull_finish("fail", "hello topic 含 {sn} 但无 SN") end
-        local body = string.format('{"vendor":%s,"model":%s,"fwVersion":%s,"deviceId":%s}',
+        -- topicFormat/onboardingMode 是文档 U1 的"自述字段"，缺了平台可能
+        -- 按旧版格式猜下行 topic 导致指令全丢且无报错。本链路就是找平台要
+        -- 配置的那一路，固定报 v3/platform。
+        -- 不报 sniff：文档明确"平台见 sniff 跳过推送配置"，Pull 会直接废。
+        local body = string.format(
+            '{"vendor":%s,"model":%s,"fwVersion":%s,"deviceId":%s,"topicFormat":"v3","onboardingMode":"platform"}',
             jstr(cfg.PLATFORM_VENDOR), jstr(cfg.PLATFORM_MODEL), jstr(_G.VERSION or "0.0.0"), jstr(imei()))
         log.info("iot", string.format("pullcfg hello topic=%s sn=%s imei=%s body=%s",
             topic, tostring(did), imei(), body))
@@ -446,11 +507,39 @@ local function pull_step()
             S.pull_payload = nil
             local r, err = pullcfg.parse(payload)
             if not r then return pull_finish("fail", tostring(err)) end
+            -- msgId 留着不发：按用户要求，要等前端提示用户确认（点保存配置）
+            -- 才回执。用户不保存就说明这套配置没落地，不回执平台会继续重推
+            p.msg_id = r.msg_id
+            p.replied = false
             return pull_finish("done", #r.skipped > 0 and ("已忽略 " .. #r.skipped .. " 条") or "", r)
         end
         if os.time() >= p.deadline then pull_finish("fail", "平台未下发配置(超时)") end
     end
 end
+
+-- U6 应用回执。由 W:CFG（前端「保存配置」）在成功后调用：
+-- 用户点保存 = 现场确认把这套平台配置落到设备上，此时才回执。
+-- 只回一次（p.replied 去重）；msgId 与 D1 下发包里的一致，平台据此核销。
+-- 不发就说明用户没确认，平台继续重推——这正是我们想要的语义。
+local function reply_config()
+    local p = S.pull
+    if p.replied then return true end
+    if not p.msg_id or p.msg_id == "" then return true end
+    if not S.connected or not S.client then return false, "MQTT 未连接" end
+    local did = device_id()
+    if not did or did == "" then return false, "无 SN" end
+    local topic = string.format(cfg.PLATFORM_REPLY_TOPIC, did)
+    local body = string.format(
+        '{"msgId":%s,"code":200,"message":"config applied","status":"ok","appliedTs":%d}',
+        jstr(p.msg_id), os.time())
+    log.info("iot", "config/reply " .. topic .. " " .. body)
+    local ok, err = pcall(function() S.client:publish(topic, body, 1) end)
+    if not ok then return false, tostring(err) end
+    p.replied = true
+    S.replied = S.replied + 1
+    return true
+end
+M.reply_config = reply_config
 
 local function task_main()
     S.want_run = true
@@ -563,6 +652,8 @@ function M.status()
         qos = c.qos,
         published = S.published,
         failed = S.failed,
+        replied = S.replied,
+        subs = S.subs,
         backoff = S.backoff,
         dirty = S.dirty,
         last_pub = S.last_pub,

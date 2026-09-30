@@ -81,15 +81,19 @@ local function props_to_regs(props, limit)
     return regs, skipped
 end
 
--- 拉取成功后回给前端展示的 topic 形状。
--- hello 走 mqttcfg.resolve_hello：R:PULLCFG 拉回来的是"设备侧实际会用的
--- topic", 不是平台契约常量——用户在 MQTT 页改过 hello topic 就得按改的拼。
--- 三个都带 SN, 前端自动模式下直接回显。
+-- 拉取成功后回给前端展示的三个 topic，都是设备按 SN 拼好的成品。
+-- hello 走 mqttcfg.resolve_hello：用户可能在 MQTT 页改过 hello topic，
+-- 就得按改的拼，不能退回写死的平台常量。
+-- pub 走 PLATFORM_POST_TOPIC（node 前缀 + {index}）：数据上报面。
+-- sub 走 PLATFORM_GET_TOPIC（gw 前缀）：平台下发面。
+--   原来是 PLATFORM_FUNC_TOPIC(node/function/get/-1)，两处都不对：
+--   doc「平台下发恒用 gw 前缀」（node 是子设备上行专用），而且我们真正
+--   订阅的主下行通道就是 config/get。订阅清单全量见 iot.build_subs()。
 local function topics(sn)
     if not sn or sn == "" then return nil, nil, nil end
     return mqttcfg.resolve_hello(sn),
         string.format(cfg.PLATFORM_POST_TOPIC, sn),
-        string.format(cfg.PLATFORM_FUNC_TOPIC, sn)
+        string.format(cfg.PLATFORM_GET_TOPIC, sn)
 end
 M.topics = topics
 
@@ -119,7 +123,12 @@ function M.parse(payload)
     poll.timeout_ms = base.timeout_ms
     poll.regs = regs
 
-    return { poll = poll, skipped = skipped }, nil
+    -- msgId 原样带出去：U6 回执必须回同一个值，平台据此核销。
+    -- 取不到就记 "unknown"（老平台/自测不带 msgId），回执照样发得出去
+    local msg_id = t.msgId
+    if type(msg_id) ~= "string" or msg_id == "" then msg_id = "unknown" end
+
+    return { poll = poll, skipped = skipped, msg_id = msg_id }, nil
 end
 
 return M

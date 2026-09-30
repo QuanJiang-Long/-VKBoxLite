@@ -38,6 +38,8 @@ const S = {
   frames: [],          // 最近解译帧
   infer: null,         // R:INFER 返回的推断结果
   pullBusy: false,     // 拉取配置进行中（防连点）
+  pulled: false,       // 刚拉过平台配置且尚未保存确认。
+                       // true 时 saveCfg 要提示"已向平台回执"，见 saveCfg()
   mock: !window.serial // 浏览器预览模式
 };
 
@@ -592,9 +594,13 @@ async function pullCfg() {
     if (S.mqManual) setManualMode(false);
     snapClean();                       // 拉回来的值成为新基线，不再是「未保存」
     snapMqClean();
+    S.pulled = true;                   // 存起来供 saveCfg 判断"要不要提回执"
     const skipped = (d.skipped || []).length;
     const n = (d.poll && d.poll.regs ? d.poll.regs.length : 0);
-    status('已拉取 ' + n + ' 个寄存器' + (skipped ? '，忽略 ' + skipped + ' 条' : '') + '，请检查后保存', true);
+    // 未回执前必须说清：用户不点保存，平台就收不到 U6，会按未核销继续重推
+    const msgId = d.msg_id && d.msg_id !== 'unknown' ? ('（msgId ' + d.msg_id + '）') : '';
+    status('已拉取 ' + n + ' 个寄存器' + (skipped ? '，忽略 ' + skipped + ' 条' : '')
+           + msgId + '，请检查后保存', true);
     toast('配置已拉取，点「保存配置」生效');
   } catch (e) {
     status('拉取失败：' + e.message, false);
@@ -743,6 +749,12 @@ async function saveCfg() {
       snapClean();                     // 保存成功 = 表单和设备一致，清掉「未保存」标记
       status('配置已保存（串口参数变化时设备会自动重启轮询任务）', true);
       toast('保存成功');
+      // 刚从平台拉过来的配置：保存即"现场确认应用"，设备此刻向平台回 U6。
+      // 用 S.pulled 标记，避免普通保存也带一句无关的话
+      if (S.pulled) {
+        status('配置已保存，已向平台回执（平台会停止重推）', true);
+        S.pulled = false;
+      }
       await readMode();
     } catch (e) {
       const msg = cfgErr(e.message);
@@ -1160,6 +1172,12 @@ function renderMqtt() {
   setKv('mqStPub', r.pub || '');
   setKv('mqStSub', r.sub || '');
   setKv('mqStSubed', s.subscribed ? '是' : '否', !s.subscribed);
+  // 下行订阅全量：设备 conack 时订的 4 条 gw 前缀通道。只列 topic 不列数，
+  // 现场直接照着对 broker 上有没有这条订阅
+  const subs = Array.isArray(s.subs) ? s.subs : [];
+  setKv('mqStSubs', subs.length ? subs.join('\n') : '未连接', subs.length === 0);
+  // 配置回执：拉取配置成功后要点保存才会 +1，为 0 说明平台还在等核销
+  setKv('mqStReplied', s.replied ? s.replied + ' 次' : '0 次', !s.replied);
   setKv('mqStPubed', s.published);
   setKv('mqStFailed', s.failed, s.failed > 0);
   setKv('mqStLast', s.last_pub ? new Date(s.last_pub * 1000).toLocaleTimeString() : '');

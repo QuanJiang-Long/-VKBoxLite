@@ -75,7 +75,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:REG / W:REG=[json] | 寄存器表读写 |
 | R:VAL | 实时值快照 |
 | R:STAT | 运行状态汇总（mode/data/guard/mqtt） |
-| W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt}`，`mqtt` 段含 `hello`/`pub`/`sub` 三个拼好的 topic）。前提只需配好 MQTT 服务器地址和端口，设备会自己连 |
+| W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt}`，`mqtt` 段含 `hello`/`pub`/`sub` 三个拼好的 topic；另有 `msg_id`/`replied` 反映回执）。前提只需配好 MQTT 服务器地址和端口，设备会自己连 |
 | W:WRITE=slave,addr,value / W:WRITEJ={json} | 写寄存器（idle 也可写，经写事务队列在安全点注入） |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配” |
 | R:MQTT / W:MQTT={json} | MQTT 配置读写，读返回 `{cfg,pub,sub,ready,err,stat}` |
@@ -229,9 +229,22 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 
 前端  回填 485 表单 + 寄存器表 + MQTT hello/pub/sub 输入框，
       并强制关掉「手动配置」——三个 topic 换成平台给的那套成品
-用户  点「保存配置」/「保存」→ W:CFG / W:REG / W:MQTT
+用户  点「保存配置」→ W:CFG 成功 → iot.reply_config()
+设备  ──publish────────────────▶  平台  /sys/thing/gw/config/reply/{SN}
+       {"msgId":<下发原值>,"code":200,"status":"ok","appliedTs":<now>}
 （「重连」按钮单独发 W:MQTTRC，只重连不动配置）
 ```
+
+> 回执刻意放在**用户保存之后**：`parse()` 成功只代表报文解析通过，不代表现场
+> 认可这套配置。用户不点保存就不回执，平台会继续重推——这正是想要的语义。
+> 只回一次（`pull.replied` 去重），同一 msgId 重复回执会让平台重复核销。
+> 新一轮 `W:PULLCFG` 会重置 `msg_id`/`replied`。
+>
+> hello payload 带 6 个字段（V3 契约 U1）：`vendor`/`model`/`fwVersion`/`deviceId`
+> 加 **`topicFormat:"v3"`** 与 **`onboardingMode:"platform"`** 两个自述字段。
+> 缺了平台可能按旧版格式猜下行 topic，导致指令全丢且无报错；`onboardingMode`
+> 若写 `sniff`，平台会跳过推送配置，拉取直接废——我们这条链路就是找平台要配置，
+> 所以固定 `platform`。
 
 > `W:PULLCFG` 处理器在 VUART 回调上下文，**不能 `sys.wait`**，所以握手跑在
 > `iot.task_main` 协程里；指令只置状态并立即应答，前端轮询拿结果。
@@ -251,10 +264,31 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 | hello | `/sys/thing/gw/config/hello/{sn}` | 拉取握手，`{sn}` = 设备 SN。**前端可改**（`mqttcfg.hello_topic`，「MQTT配置」页的 **hello Topic** 输入框），留空回落此默认 |
 | 配置下发 | `/sys/thing/gw/config/get/{SN}` | conack 时与下行 topic 一起订阅 |
 | 上报（平台） | `/sys/thing/node/property/post/{SN}-1` | 拉取结果里回给前端展示，当前不订阅 |
-| 下行命令（平台） | `/sys/thing/node/function/get/{SN}-1` | 拉取结果里回给前端展示，当前不订阅 |
+| 下行命令（平台） | `/sys/thing/gw/function/get/{SN}` | 拉取结果里回给前端展示，当前不订阅 |
 
 > 业务订阅模板默认与「配置下发」topic 同形，所以 conack 时会去重（同一 topic 只订一次），
 > 且下行分流只在拉取状态机 `waiting` 时才把该 topic 的报文当配置包收，其余按普通指令解析。
+
+#### conack 时的下行订阅清单（`iot.build_subs()`）
+
+平台下发恒用 **gw 前缀**（`node` 前缀是子设备上行专用，不能混），末段是目标裸 SN：
+
+| topic | 用途 |
+|---|---|
+| `/sys/thing/gw/config/get/{SN}` | **无条件订阅**。业务 `sub_topic` 被用户改到别处时，这条仍要订，否则拉取链路断了 |
+| `{sub}` | 用户自配的业务订阅（改过 sub_topic 时才会与上一条不同） |
+| `/sys/thing/gw/function/get/{SN}` | 服务调用 |
+| `/sys/thing/gw/property/set/{SN}` | 属性设置 |
+| `/sys/thing/gw/property/get/{SN}` | 属性查询（空 body = 读全量） |
+
+清单全量回在 `R:MQTT` 的 `stat.subs`（数组），前端「连接与上报状态」的 **下行订阅** 一栏显示。
+
+#### SN 归属过滤（`iot.claim_ok()`）
+
+同 broker 上多台网关时，别人网关的下行也会被 EMQX 送过来。`handle_downlink` 入口按
+「topic 末段 == 本机 SN 或 `{gwSn}-{n}`」判定，不是自己的直接丢弃。两条例外：
+无 SN（`allow_no_sn`）和非 `/sys/thing/` 命名空间（用户自配 topic）都放行，
+否则改了 `sub_topic` 会静默收不到指令。
 
 ### 字段提取（`lua/iot/pullcfg.lua`）
 
@@ -279,7 +313,9 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 | `modbus.quantity` | `count` | **地址长度取这个字段**，1~125 |
 | `modbus.dataType` | `dtype` | `ushort`→uint16、`short`→int16、`ulong`→uint32、`long`→int32、`float`→float32、`double`→float64 |
 
-**丢弃**：`msgId`、`ts`、`mqttPlatform`（保持现有 broker）、`tslName`、
+**msgId** → 解析结果里的 `msg_id`（不参与 485 配置，仅供 U6 回执原样回带；缺失记 `"unknown"`）
+
+**丢弃**：`ts`、`mqttPlatform`（保持现有 broker）、`tslName`、
 `devices[].name/protocol/comm`、`modbus.type`、`modbus.slave`、外层 `dataType`。
 
 非法条目不整包失败：跳过并记入 `skipped`，前端提示"已忽略 N 条"。
@@ -290,10 +326,20 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 点「拉取配置」后 OS log 里依次出现：
 
 ```
-I/iot: conack ok, subscribed=true, topics=[/sys/thing/gw/config/get/11802026092600016]
-I/iot: pullcfg hello topic=/sys/thing/gw/config/hello/11802026092600016 sn=11802026092600016 imei=86xxxxxxxxxxxxx body={"vendor":"VKBoxLite",...}
+I/iot: conack ok, subscribed=true, topics=[/sys/thing/gw/config/get/11802026092600016 /sys/thing/gw/function/get/11802026092600016 /sys/thing/gw/property/set/11802026092600016 /sys/thing/gw/property/get/11802026092600016]
+I/iot: pullcfg hello topic=/sys/thing/gw/config/hello/11802026092600016 sn=11802026092600016 imei=86xxxxxxxxxxxxx body={"vendor":"VKBoxLite",...,"topicFormat":"v3","onboardingMode":"platform"}
 I/iot: pullcfg recv topic=/sys/thing/gw/config/get/11802026092600016 len=812
 I/iot: pullcfg done 已忽略 0 条
+I/iot: config/reply /sys/thing/gw/config/reply/11802026092600016 {"msgId":"hello-3f9a2b1c","code":200,"message":"config applied","status":"ok","appliedTs":1721884800}
+```
+
+`config/reply` 那行**只在用户点过「保存配置」之后**才出现。没出现就说明配置还没被
+确认，平台会继续重推；这是预期行为，不是 bug。
+
+不是本机 SN 的下行会被丢掉，日志：
+
+```
+I/iot: downlink dropped, not ours: /sys/thing/gw/function/get/V239342435
 ```
 
 连不上 MQTT 时是 `pullcfg fail MQTT 连接失败: <原因>`（等 20s）。
