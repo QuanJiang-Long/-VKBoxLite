@@ -208,6 +208,21 @@ local function build_subs()
     return subs
 end
 
+-- 销毁 client。on_mqtt 的 error 分支也要调, 所以必须定义在它之前
+-- (local function 是词法作用域, 写在后面会让 on_mqtt 里那个名字解析到全局 nil)
+local function destroy_client()
+    if S.client then
+        -- 先关自动重连再断开, 否则断开后库仍会自行重连, 留下僵尸 client 占十几 KB
+        pcall(function() S.client:autoreconn(false) end)
+        pcall(function() S.client:disconnect() end)
+        pcall(function() S.client:close() end)
+        S.client = nil
+    end
+    S.connected = false
+    S.subscribed = false
+    collectgarbage("collect")
+end
+
 local function on_mqtt(cli, event, data, payload)
     if event == "conack" then
         S.connected = true
@@ -255,6 +270,12 @@ local function on_mqtt(cli, event, data, payload)
                     S.reject_reason = "连不上服务器(" .. d .. "): 域名解析不到或端口不通, 核对 host 拼写"
                 end
             end
+            -- 立刻销毁 client, 不要再等 try_connect 满 15s:
+            -- broker 拒绝是毫秒级就给出结论的(实测 293ms 回 CONACK 0x05),
+            -- 而 autoreconn(false) 已设、库不会重连, 留着它纯占十几 KB 堆,
+            -- 还让"被拒"看起来像"没响应" —— 现场改完配置要多等一轮 15s 才生效。
+            -- S.client 置 nil 同时是 try_connect 等待循环的失败判据
+            destroy_client()
         end
         log.warn("iot", event, tostring(data))
     end
@@ -267,19 +288,6 @@ local function heap_info()
     local ok, a, b = pcall(rtos.meminfo, "sys")
     if not ok or type(a) ~= "number" then return nil, nil end
     return a, b
-end
-
-local function destroy_client()
-    if S.client then
-        -- 先关自动重连再断开, 否则断开后库仍会自行重连, 留下僵尸 client 占十几 KB
-        pcall(function() S.client:autoreconn(false) end)
-        pcall(function() S.client:disconnect() end)
-        pcall(function() S.client:close() end)
-        S.client = nil
-    end
-    S.connected = false
-    S.subscribed = false
-    collectgarbage("collect")
 end
 
 local function net_ready()
@@ -339,14 +347,22 @@ local function try_connect()
         destroy_client()
         return false, "connect 失败: " .. tostring(e)
     end
+    -- 等 CONNACK。client 被销毁即已失败(on_mqtt 的 error 分支会立刻销毁),
+    -- 这时要立即返回真实原因: 拒绝是毫秒级结论, 等满 15s 只会让 backoff
+    -- 叠加上去, 现场改完配置慢一轮才生效, last_err 还会被假写成超时
     local waited = 0
     while waited < 15000 do
         if S.connected then return true end
+        if not S.client then break end
         if sys then sys.wait(100) end
         waited = waited + 100
     end
-    destroy_client()
-    return false, "conack timeout"
+    if not S.connected then
+        destroy_client()
+        -- 有 reject_reason 就用它, 它比这句兜底准确得多
+        return false, S.reject_reason or "conack timeout"
+    end
+    return true
 end
 
 local function wait_kickable(ms)
