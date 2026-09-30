@@ -10,7 +10,12 @@ local M = {}
 local K_CFG = "mqtt_cfg"
 
 M.default = {
-    host = "test.mosquitto.org",
+    -- 默认指向本项目的 V3 平台。原先默认 test.mosquitto.org 是联调期
+    -- 留下的: 它导致"清配置/新设备"会连到 mosquitto 测试盘而不是自己
+    -- 平台(明文且无需认证, 静默连上就开始上报, 现场很难发现)。
+    -- 平台地址是公开信息, 与 user/pass 分开 —— 账号密码按约定不进默认值,
+    -- 需要每台在「MQTT配置」页填一次并存 fskv。
+    host = "dz.voltkun.com",
     port = 1883,
     user = "",
     pass = "",

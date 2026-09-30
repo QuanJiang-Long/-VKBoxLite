@@ -1717,7 +1717,9 @@ el.btnMqttReset.onclick = async () => {
   if (!await askConfirm('确定恢复 MQTT 默认配置？', '恢复默认配置')) return;
   // 恢复默认会重写 topic，必须先切手动，否则自动模式下 topic 不下发，白改
   if (!S.mqManual) setManualMode(true, { snap: false });
-  el.mqHost.value = 'test.mosquitto.org';
+  // 与设备端 mqttcfg.default 保持一致(见 lua/iot/mqttcfg.lua 的注释):
+  // 默认指向本项目 V3 平台, 不是 mosquitto 测试盘
+  el.mqHost.value = 'dz.voltkun.com';
   el.mqPort.value = 1883;
   el.mqSsl.checked = false;
   el.mqUser.value = '';
@@ -1814,7 +1816,7 @@ const MOCK = {
       { addr: 4, count: 2, name: 'temp', alias: '温度', dtype: 'float32' }
     ]
   },
-  mqtt: { host: 'test.mosquitto.org', port: 1883, user: '', pass: '', ssl: false,
+  mqtt: { host: 'dz.voltkun.com', port: 1883, user: '', pass: '', ssl: false,
           pub_topic: '/sys/thing/node/property/post/{sn}',
           sub_topic: '/sys/thing/gw/config/get/{sn}',
           interval_s: 60, allow_no_sn: false, keep_session: false },

@@ -63,6 +63,15 @@ local function device_id()
     return nil
 end
 
+-- clientId 留空时的默认拼法。平台不认裸 SN —— 实测发纯 SN 与发
+-- S&<SN>&12&1 的差别就是 CONACK 0x00 与 0x05, 而格式不在任何一处
+-- 校验能覆盖的范围内(它是"格式对但内容不被接受"), 只能在这里兜住。
+-- 用户填了 client_id 就一律用填的, 这里只兜空值。
+local function default_client_id(did)
+    if not did or did == "" then return did end
+    return "S&" .. did .. "&12&1"
+end
+
 local function get_topic()
     local did = device_id()
     if not did or did == "" then return nil end
@@ -299,7 +308,7 @@ local function try_connect()
     local pub, sub, terr = mqttcfg.resolve_topics(did == "unknown" and nil or did)
     if not pub then return false, terr end
     S.pub, S.sub = pub, sub
-    local cid = c.client_id ~= "" and c.client_id or did
+    local cid = c.client_id ~= "" and c.client_id or default_client_id(did)
     S.client_id = cid
     -- Air780EP Lua 堆约 300KB, mqtt.create 需要连续块; 建连前先 GC + 记录堆
     collectgarbage("collect")
