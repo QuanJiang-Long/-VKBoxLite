@@ -45,14 +45,20 @@ local function comm_to_poll(p, slave)
     return d
 end
 
+-- U+FFFD 的 UTF-8 编码。平台若把 GBK 按 UTF-8 解码再重新编码发出，坏字节会
+-- 变成一串 EF BFBD —— 结构上是合法 UTF-8，只按结构校验会漏过去，把 "??ѹ"
+-- 当正常中文收下。正常参数名不可能含 U+FFFD，见到就拒
+local REPL = "\239\191\189"
+
 -- 判字符串是不是合法 UTF-8。
 -- 现场实测：平台把中文 name 按 GBK 下发（"电压" → 字节 B5 E7 D1 B9，按
 -- UTF-8 弱解码正好是 "??ѹ"，与 MQTTX/前端看到的完全一致）。MQTTX 是独立
 -- 订阅方、不经我们设备，它也看到同样乱码 → 字节在到达任何读取方之前就已经
 -- 坏了，与读取方是谁无关，是平台的编码问题。
--- 这里只校验不转码：GBK→UTF-8 要几万条映射表，塞不进 300KB 的 Lua 堆。
+-- 这里只校验不转码：GBK→UTF-8 要 1.4 万条映射表（~70KB），塞不进 300KB 的 Lua 堆。
 local function utf8_ok(s)
     if type(s) ~= "string" or s == "" then return true end
+    if s:find(REPL, 1, true) then return false end
     local i, n = 1, #s
     while i <= n do
         local b = s:byte(i)
@@ -105,6 +111,27 @@ local function map_dtype(raw)
     return d, nil
 end
 
+-- 原始字节 hex。只用于日志：报平台侧故障时必须说清收到的到底是什么，
+-- 只说"中文乱码"对方没法定位
+local function hex(s)
+    local t = {}
+    for i = 1, #s do t[i] = string.format("%02X", s:byte(i)) end
+    return table.concat(t, " ")
+end
+
+-- 乱码成因判据。两种情形在 MQTTX / 前端 / 本日志的 alias 上看起来完全一样
+-- （都是 "??ѹ"），但可修复性相反，报障时说错方向会让平台改错地方：
+--   未见 EFBFBD = 平台把 GBK 原始字节塞进 JSON（序列化选错 charset）。
+--                 汉字本身没坏，平台侧把序列化改成 UTF-8 就彻底好。
+--   含 EFBFBD   = 平台已把 GBK 按 UTF-8 解码再编码发出，坏字节变成一串
+--                 U+FFFD。原始汉字已丢失，要平台从数据库源头修
+local function enc_note(s)
+    if s:find(REPL, 1, true) then
+        return "含 EFBFBD(平台已做有损转码, 原始汉字已丢失, 需从数据源修复)"
+    end
+    return "未见 EFBFBD(GBK 原样字节, 数据未损, 平台序列化改用 UTF-8 即可)"
+end
+
 -- 平台 tsl.properties -> 本框架寄存器表
 -- 第三返回值 renamed = 因平台编码问题把 alias 退回 id 的条目名单，
 -- 前端要提示用户「平台别名不可用」，否则用户只会看到 alias 莫名变成了 id
@@ -140,6 +167,10 @@ local function props_to_regs(props, limit)
                     alias = ""
                     renamed[#renamed + 1] = id
                     log.info("pullcfg", "alias 非 UTF-8(平台编码问题), 退回 id: " .. id)
+                    -- 原始字节 + 成因判据：同一份配置手动下发正常、hello 触发乱码时，
+                    -- 靠这行确定是"GBK 原样"还是"已被有损转码"——两者显示一模一样
+                    log.info("pullcfg", string.format("  name 原始字节 %s (%dB) %s",
+                        hex(pr.name or ""), #tostring(pr.name or ""), enc_note(tostring(pr.name or ""))))
                 end
                 regs[#regs + 1] = {
                     addr = addr, count = qty, name = id,
