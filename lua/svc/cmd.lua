@@ -122,8 +122,8 @@ local function reg_cmds()
         else
             poll.apply_cfg(n)
         end
-        -- 用户点「保存配置」= 现场确认应用这套平台配置，此时才向平台回执 U6。
-        -- 提前到 parse 成功时回执会误报"已应用"——用户可能看完又改了
+        -- 手动保存也是应用确认，回一次 U6。与自动保存那条路径共用 reply_config，
+        -- 里面按 msgId + replied 去重，所以两份都走到也不会重发
         if iot and iot.reply_config then pcall(iot.reply_config) end
         M.reply("RET:CFG=OK")
     end)
@@ -165,7 +165,6 @@ local function reg_cmds()
         M.reply("RET:VAL=" .. jencode(collector.snapshot()))
     end)
 
-    -- R:STAT: 前端 renderHome 读
     -- R:STAT: 前端 readHome 读四段 mode/data/guard/mqtt
     --   ⚠️ mode 段必须是【对象】(与 R:MODE 同形: {mode,busy,poll,mon,write}),
     --     不能是字符串。前端 readHome 里 S.modeStat = r.data.mode 后

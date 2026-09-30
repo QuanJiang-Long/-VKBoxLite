@@ -94,6 +94,7 @@ local function process_frame(s)
     collector.push_frame(f)
     pcall(uart.write, mbus.VUART_DEBUG, "RX485:" .. f.hex .. "\r\n")
 end
+
 local function on_receive(id, len)
     if id ~= mbus.UART_ID then return end
     if type(len) ~= "number" or len <= 0 then return end
@@ -149,8 +150,7 @@ end
 -- 从旁听到的 REQ 帧反推轮询表(前端 R:INFER)
 -- 按 slave+addr+qty+fc 聚合命中次数
 function M.infer()
-    local agg = {}
-    local slaves = {}
+    local agg, slaves = {}, {}
     for _, f in ipairs(collector.get_frames()) do
         if f.kind == "req" and f.addr ~= nil and f.qty then
             local key = f.slave .. ":" .. f.addr .. ":" .. f.qty .. ":" .. f.fc
@@ -165,6 +165,7 @@ function M.infer()
     end
     local regs = {}
     for _, a in pairs(agg) do regs[#regs + 1] = a end
+    -- 先按从机再按地址排, 前端 R:INFER 直接按这个顺序显示
     table.sort(regs, function(x, y)
         if x.slave ~= y.slave then return x.slave < y.slave end
         return x.addr < y.addr
@@ -172,14 +173,11 @@ function M.infer()
     local sl = {}
     for s in pairs(slaves) do sl[#sl + 1] = s end
     table.sort(sl)
-    local st = stat
     return {
         regs = regs,
         slaves = sl,
-        stat = {
-            frames = st.frames, reqs = st.reqs, rsps = st.rsps,
-            errs = st.errs, paired = st.paired, orphans = st.orphans,
-        },
+        -- 统计段原样带出, 前端据此判断"旁听到的帧够不够多、配出来可不可信"
+        stat = stat,
     }
 end
 

@@ -2,6 +2,7 @@
 """Lua 框架静态检查：括号配平 / local function 前向引用 / 裸调用未定义全局 / require 路径存在性"""
 import os
 import re
+import subprocess
 import sys
 
 LUA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lua")
@@ -328,6 +329,266 @@ def check_core_lib_require(src, path, errors):
         errors.append(f"{path}:{line}: 注释里出现 require \"{mod}\" 字样, 实测 Luatools 静态扫描会读到并拒绝烧录, 必须改写措辞")
 
 
+def collect_declared(code, path, errors):
+    """本文件声明过的名字全集：local / 参数 / for 变量 / 函数名 / 模块局部 M、S 之类。
+    粗粒度(不分嵌套作用域)即可：判据是"读一个本文件从没声明过的自由变量"，
+    作用域边界不影响结论——嵌套块里的 local 在文件别处当然也可能合法。"""
+    names = set()
+    # local a / local a, b / local function f
+    for m in re.finditer(r"\blocal\s+(?!function\b)([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)", code):
+        for p in m.group(1).split(","):
+            names.add(p.strip())
+    for m in re.finditer(r"\blocal\s+function\s+([A-Za-z_]\w*)", code):
+        names.add(m.group(1))
+    # function(...) / local function f(...) 的参数
+    for m in re.finditer(r"\bfunction\s*[^(]*\(([^)]*)\)", code):
+        for p in m.group(1).split(","):
+            p = p.strip()
+            if re.match(r"^[A-Za-z_]\w*$", p):
+                names.add(p)
+    # for a / for a, b in ...
+    for m in re.finditer(r"\bfor\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s+in\b", code):
+        for p in m.group(1).split(","):
+            names.add(p.strip())
+    # 数值 for: for i = 0, 255 do
+    for m in re.finditer(r"\bfor\s+([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*=", code):
+        for p in m.group(1).split(","):
+            names.add(p.strip())
+    # 模块局部前缀：M.xxx = / S.xxx = / M.xxx, S.yyy =
+    for m in re.finditer(r"^\s*([A-Za-z_]\w*)\s*\.\s*[A-Za-z_]\w*\s*=", code, re.M):
+        names.add(m.group(1))
+    # 纯下划线占位 for _ = 1, n
+    names.add("_")
+    return names
+
+
+def check_undeclared_reads(code, path, errors):
+    """读一个本文件没声明过、也不是内置/已知全局的自由变量。
+
+    粗粒度版(整文件扫一遍): 只能抓"整个文件从没出现过 this 名字"的情况。
+    细粒度按作用域扫的版本见 check_scope_reads —— 那才是修 recv_push
+    丢行事故的规则: r/err 在本文件别处是 local, 粗粒度抓不到,
+    必须按"声明早于使用且在同一可见作用域内"判。"""
+    declared = collect_declared(code, path, errors)
+    allowed = declared | LUA_BUILTINS | LUA_KEYWORDS | KNOWN_GLOBALS
+    # 成员访问 obj.name / 调用 obj:name() 的 obj 不是自由变量
+    for m in re.finditer(r"(?<![.:\w])([A-Za-z_]\w*)\s*(?=[.\[:])", code):
+        if m.group(1) not in allowed:
+            line = code.count("\n", 0, m.start()) + 1
+            errors.append(f"{path}:{line}: 读了未声明的 '{m.group(1)}' (非局部/非内置/非已知全局)")
+    # 裸标识符：出现在运算符/关键字旁边的读，或者是第一个实参
+    for m in re.finditer(r"(?<![.:\w])([A-Za-z_]\w*)(?![.\w])", code):
+        name = m.group(1)
+        if name in allowed:
+            continue
+        # 形如 `M.xx =` 的值、`local` 声明、函数定义左侧都不算读
+        pre = code[max(0, m.start() - 30):m.start()]
+        post = code[m.end():m.end() + 30]
+        if re.search(r"\blocal\s+$", pre):
+            continue
+        if re.search(r"[.\[\w:]\s*$", pre):
+            continue
+        if re.match(r"^\s*([.=,)\]]|\bend\b|\bfunction\b)", post):
+            continue
+        line = code.count("\n", 0, m.start()) + 1
+        errors.append(f"{path}:{line}: 读了未声明的 '{name}' (非局部/非内置/非已知全局)")
+
+
+# 词法记号。顺序即优先级: "local function" 必须先于 "local" 匹配掉
+TOK = re.compile(r"""
+    (?P<lf>\blocal\s+function\s+(?P<lfname>[A-Za-z_]\w*))
+  | (?P<loc>\blocal\s+(?!function\b)(?P<lvars>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*))
+  | (?P<open>\b(?P<kw>function|if|for|while|do|repeat)\b)
+  | (?P<close>\b(?P<ender>end|until)\b)
+  | (?P<number>0[xX][0-9a-fA-F_]+|\d[\d_.]*(?:[eE][-+]?\d+)?)
+  | (?P<name>[A-Za-z_]\w*)
+""", re.X)
+
+
+def _params_after(code, pos):
+    """从 pos 起找函数的形参表。兼容 function f(a,b) / function M.f(a) /
+    function M:f(a) / function(a)。取不到就返回空。"""
+    m = re.match(r"\s*([A-Za-z_]\w*[\w.:]*)?\s*\(([^)]*)\)", code[pos:])
+    if not m:
+        return []
+    out = []
+    for p in m.group(2).split(","):
+        p = p.strip()
+        if re.match(r"^[A-Za-z_]\w*$", p):
+            out.append(p)
+    return out
+
+
+def _for_vars_after(code, pos):
+    """for 头部变量: for a, b in ... / for i = 1, 10 ..."""
+    m = re.match(r"\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*(?:in|=)", code[pos:])
+    if not m:
+        return []
+    return [p.strip() for p in m.group(1).split(",")]
+
+
+M_FIELDS = re.compile(r"(?<![.:\w])(M)\.([A-Za-z_]\w*)")
+
+
+def check_m_fields(code, path, errors):
+    """M.xxx 读的字段必须在同一文件里被赋值/定义过。
+
+    本工程所有模块都用 `local M = {} ... function M.foo()` 这套导出模式，
+    把导出改成 local（或反过来改调用方）时，另一边对不上只会得到 nil。
+    pcall(M.xxx) / M.xxx() 这种写法把错误彻底吞掉——真实事故：
+    iot.lua 把 handle_downlink 降级成 local function 后漏改调用点，
+    结果是所有 MQTT 下行都不再被处理，且无任何报错。
+    只查 M 这一个名字：它是本工程唯一的模块表约定，别的 obj.field
+    谁是谁根本看不出来，查了只会误报。"""
+    defined = set()
+    for m in re.finditer(r"\bM\.([A-Za-z_]\w*)\s*=", code):
+        defined.add(m.group(1))
+    for m in re.finditer(r"\bfunction\s+M\.([A-Za-z_]\w*)", code):
+        defined.add(m.group(1))
+    if not defined:
+        return
+    for m in M_FIELDS.finditer(code):
+        fld = m.group(2)
+        if fld in defined:
+            continue
+        post = code[m.end():m.end() + 20]
+        if re.match(r"^\s*=", post):            # M.xxx = 赋值本身
+            continue
+        line = code.count("\n", 0, m.start()) + 1
+        errors.append(f"{path}:{line}: 读了本文件未定义的 'M.{fld}' (字段没赋值/没定义, 运行时是 nil)")
+
+
+def _brace_depth(code, pos):
+    """pos 处的花括号嵌套深度(字符串已剥成空格, 计数安全)"""
+    return (code.count("{", 0, pos) - code.count("}", 0, pos)) // 1
+
+
+def check_scope_reads(code, path, errors):
+    """按作用域查"读了当前不可见的自由变量"。
+
+    这是本次 iot.lua recv_push 丢行事故的根因规则: 编辑时把
+    `local r, err = pullcfg.parse_snap(...)` 那行碰掉了，函数体里留着
+    `if not r then` —— r/err 变成全局，运行时恒 nil，表现是
+    "平台主动重推永远解析失败"且不报任何语法错。之前的规则都抓不到:
+    括号仍配平、r 不是调用所以"裸调用未定义"不命中、r 在本文件别处
+    确实是 local 所以整文件扫也看不出来。
+
+    作用域模型(故意简化，只保证不漏报、不误报最常见的形态):
+      push: function / if / for / while / do(非 for/while 的) / repeat
+      pop:  end / until
+      local 与形参加进当前栈顶; for 头变量加进 for 自己的作用域。
+    判定只看"名字在栈上任一层或内置/已知全局里"，所以 if/else 分支
+    之间串味只会造成漏报，不会误报。"""
+    stack = [set()]
+    header_do = False
+    for m in TOK.finditer(code):
+        kind = m.lastgroup
+        if kind == "lf":                                  # local function f
+            stack[-1].add(m.group("lfname"))
+            stack.append(set(_params_after(code, m.end())))
+        elif kind == "loc":                               # local a, b
+            for p in m.group("lvars").split(","):
+                stack[-1].add(p.strip())
+        elif kind == "open":
+            kw = m.group("kw")
+            if kw in ("for", "while"):
+                stack.append(set(_for_vars_after(code, m.end())))
+                header_do = True
+            elif kw == "do":
+                if header_do:
+                    header_do = False                   # for/while 的 do, 不另开作用域
+                else:
+                    stack.append(set())
+            else:                                        # function / if / repeat
+                stack.append(set(_params_after(code, m.end())))
+        elif kind == "close":
+            if len(stack) > 1:
+                stack.pop()
+            else:
+                line = code.count("\n", 0, m.start()) + 1
+                errors.append(f"{path}:{line}: 多出的 '{m.group('ender')}'(作用域栈已空)")
+        elif kind == "name":
+            name = m.group()
+            if name in LUA_KEYWORDS or name in LUA_BUILTINS or name in KNOWN_GLOBALS:
+                continue
+            visible = set()
+            for sc in stack:
+                visible |= sc
+            if name in visible:
+                continue
+            pre = code[max(0, m.start() - 30):m.start()]
+            post = code[m.end():m.end() + 30]
+            if re.search(r"[.:]\s*$", pre):              # obj.name 的 name 段
+                continue
+            # 表构造器里的键: { a = 1, b = 2 }。深度>0 且后跟 = 的是键不是读
+            if re.match(r"^\s*=", post) and _brace_depth(code, m.start()) > 0:
+                continue
+            line = code.count("\n", 0, m.start()) + 1
+            errors.append(f"{path}:{line}: 读了作用域内不可见的 '{name}' (未声明且非内置/已知全局)")
+
+
+def _block_delta(ln):
+    """一行对块嵌套深度的贡献。for/while 自带的那个 do 不能重复计数：
+    `while x do ... end` 只有一个 end 收尾。同行 if...end 自抵为 0。"""
+    toks = re.findall(r"\b(function|if|for|while|do|repeat|end|until)\b", ln)
+    opens = [t for t in toks if t in ("function", "if", "for", "while", "do", "repeat")]
+    closes = [t for t in toks if t in ("end", "until")]
+    if ("for" in toks or "while" in toks) and "do" in toks:
+        opens.remove("do")
+    return len(opens) - len(closes)
+
+
+def _fn_bodies(code):
+    """按 function 切出 [(名字, 归一化后的行集合)]。
+    归一化: 去空行/注释/首尾空白, 便于比较"形状"而不是排版。"""
+    lines = [ln.strip() for ln in code.split("\n")]
+    lines = [ln for ln in lines if ln and not ln.startswith("-")]
+    bodies = {}
+    cur_name, cur = None, []
+    depth = 0
+    for ln in lines:
+        m = re.match(r"^(?:local\s+)?function\s+([A-Za-z_][\w.:]*)", ln)
+        if m and depth == 0:
+            if cur_name and cur:
+                bodies.setdefault(cur_name, set()).update(cur)
+            cur_name, cur, depth = m.group(1), [ln], 1
+            continue
+        if cur_name:
+            cur.append(ln)
+            depth += _block_delta(ln)
+            if depth <= 0:
+                bodies.setdefault(cur_name, set()).update(cur)
+                cur_name, cur, depth = None, [], 0
+    if cur_name and cur:
+        bodies.setdefault(cur_name, set()).update(cur)
+    return bodies
+
+
+def check_dup_bodies(code, path, errors):
+    """两个函数体高度重复 -> 抄了两遍，改一处必漏另一处。
+
+    本工程的真实教训: poll.probe_raw 与 poll.tx_raw 各写了一整套
+    uart 准备/DE 拉高保保持/收发等待/恢复 on_receive, ~35 行重复,
+    只有"帧从哪来"不同。判据用过采样行集合重合度, 只报 >=12 行相似
+    且重合率 >=60% 的对, 不抓小巧合(几个 return false 谁都像)。
+    """
+    bodies = _fn_bodies(code)
+    names = [n for n in bodies if n]
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = bodies[names[i]], bodies[names[j]]
+            if not a or not b:
+                continue
+            inter = a & b
+            if len(inter) < 12:
+                continue
+            rate = len(inter) / min(len(a), len(b))
+            if rate >= 0.6:
+                errors.append(
+                    f"{path}: 函数 '{names[i]}' 与 '{names[j]}' 有 {len(inter)} 行重复"
+                    f"(重合率 {rate:.0%})，应考虑抽公共实现")
+
+
 def check_tonumber_nil(code, path, errors):
     """tonumber(x) 中 x 是裸 nil 字面量"""
     for m in re.finditer(r"\btonumber\(\s*nil\s*\)", code):
@@ -335,7 +596,97 @@ def check_tonumber_nil(code, path, errors):
         errors.append(f"{path}:{line}: tonumber(nil) 在 LuatOS 会崩 VM")
 
 
+def _restore(path, buf):
+    """写回原文。newline="" 保证不把 LF 改成 CRLF——lua 目录全是 LF 文件"""
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(buf)
+
+
+def _inject(buf, old_s, new_s):
+    """原文 -> 注入后的内容。换不上去说明源码已变(注入失效)。"""
+    if old_s not in buf:
+        return None
+    return buf.replace(old_s, new_s)
+
+
+def selftest():
+    """把历史上真实出过的事故注入一遍，确认对应规则真的会报错。
+
+    不测"规则存在"，只测"规则对这类代码亮红灯"。每条注入跑完都还原，
+    并在还原后再跑一次确认工作树干净。
+    用法: python check_lua.py --selftest
+    """
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    iot = os.path.join(LUA_DIR, "iot", "iot.lua")
+    poll = os.path.join(LUA_DIR, "bus", "poll.lua")
+    # 规则 -> (目标文件, [(注入前, 注入后)], 输出里必须出现的关键词)
+    cases = {
+        "scope_reads": (iot, [
+            # 事故: recv_push 的 `local r, err = pullcfg.parse_snap(...)` 被碰掉，
+            # 函数体留着 `if not r then` -> r/err 变全局恒 nil，推送永远解析失败
+            ("    local r, err = pullcfg.parse_snap(t, t.configSnapshot)\n", ""),
+        ], "r"),
+        "m_fields": (iot, [
+            # 事故: handle_downlink 降级成 local function 后漏改调用点，
+            # pcall(M.handle_downlink) 传 nil -> 所有 MQTT 下行都不再被处理
+            ("pcall(handle_downlink, rp.topic, rp.payload)",
+             "pcall(M.handle_downlink, rp.topic, rp.payload)"),
+        ], "handle_downlink"),
+        "dup_bodies": (poll, [
+            # 事故: probe_raw / tx_raw 各写一整套 uart 准备 + DE 时序 + 收发窗口
+            ("__git__", ""),
+        ], "probe_raw"),
+    }
+
+    fails = []
+    for rule, (path, samples, keyword) in cases.items():
+        with open(path, "r", encoding="utf-8", newline="") as fh:
+            orig = fh.read()
+        buf = orig
+        for old_s, new_s in samples:
+            buf = subprocess.run(["git", "show", "a55100f:lua/bus/poll.lua"],
+                                 capture_output=True).stdout.decode("utf-8") \
+                if old_s == "__git__" else _inject(buf, old_s, new_s)
+            if buf is None:
+                fails.append(f"{rule} 样本没拼上(注入失效, 源码可能已变)")
+                break
+        if buf is None:
+            print(f"[{rule}] 跳过")
+            continue
+        _restore(path, buf)
+        rc, sout = _run_check(env)
+        hit = [ln for ln in sout.splitlines()
+               if "不可见" in ln or "字段" in ln or "重复" in ln]
+        print(f"[{rule}] exit={rc}")
+        for ln in hit:
+            print("   " + ln.strip())
+        _restore(path, orig)
+        rc2, sout2 = _run_check(env)
+        if rc2 != 0:
+            print(f"[还原] {os.path.basename(path)} 还原后 check_lua 不通过:\n{sout2}")
+            sys.exit(1)
+        print(f"[还原] {os.path.basename(path)} 通过")
+        if rc == 0 or not any(keyword in ln for ln in hit):
+            fails.append(f"{rule} 对注入的 bug 未报错")
+        else:
+            print("   抓到")
+
+    if fails:
+        print("\n失败: " + "; ".join(fails))
+        sys.exit(1)
+    print("\nselftest 全部通过：注入的历史事故都被对应规则抓到")
+
+
+def _run_check(env):
+    p = subprocess.run([sys.executable, __file__], cwd=os.path.dirname(os.path.abspath(__file__)),
+                       capture_output=True, env=env)
+    return p.returncode, p.stdout.decode("utf-8", "replace")
+
+
 def main():
+    if "--selftest" in sys.argv:
+        selftest()
+        return
     import io as _io
     sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     all_errors = []
@@ -358,6 +709,9 @@ def main():
         check_balance(code, rel, all_errors)
         check_forward_refs(code, rel, all_errors)
         check_undefined_calls(code, rel, all_errors)
+        check_scope_reads(code, rel, all_errors)
+        check_m_fields(code, rel, all_errors)
+        check_dup_bodies(code, rel, all_errors)
         check_requires(files, raw_files, all_errors)
         check_string_format(src, rel, all_errors)
         check_tonumber_nil(src, rel, all_errors)
@@ -370,7 +724,7 @@ def main():
         for e in all_errors:
             print("  " + e)
         sys.exit(1)
-    print("全部通过：括号配平 / 无前向引用 / 无裸调用未定义 / require 路径存在 / 无危险 format / 无 tonumber(nil)")
+    print("全部通过：括号配平 / 无前向引用 / 无裸调用未定义 / 无作用域外读 / 无 M.字段缺失 / 无函数体重复 / require 路径存在 / 无危险 format / 无 tonumber(nil)")
 
 
 if __name__ == "__main__":

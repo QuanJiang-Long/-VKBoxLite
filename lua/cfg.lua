@@ -142,14 +142,31 @@ function M.normalize_sys(c)
     return { boot_mode = mode }
 end
 
-function M.load_poll()
-    local raw = load_json(K_POLL, {})
-    local ok, c = pcall(M.normalize_poll, raw)
-    if not ok or not c then
-        log.warn("cfg", "poll normalize fail, use default")
-        return M.default_poll
+-- 三套配置(poll/sniff/sys)的读写除了键、归一化函数、默认值以外完全同构，
+-- 各写一遍就是三处要同步改。这里合成一张表驱动，函数名是它们唯一的差别。
+-- 注意 load 失败时静默退回默认值(load 用在启动路径, 崩了整个设备起不来),
+-- 而 save 失败必须把原因带回去给 W:CFG 显示
+local SECTIONS = {
+    poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll },
+    sniff = { key = K_SNIFF, norm = M.normalize_sniff, default = M.default_sniff },
+    sys = { key = K_SYS, norm = M.normalize_sys, default = M.default_sys },
+}
+
+for name, sec in pairs(SECTIONS) do
+    M["load_" .. name] = function()
+        local raw = load_json(sec.key, {})
+        local ok, c = pcall(sec.norm, raw)
+        if not ok or not c then
+            log.warn("cfg", name, "normalize fail, use default")
+            return sec.default
+        end
+        return c
     end
-    return c
+    M["save_" .. name] = function(c)
+        local n, err = sec.norm(c)
+        if not n then return false, err end
+        return save_json(sec.key, n)
+    end
 end
 
 -- 配置来源: fskv 里从未写过就是 default(前端据此提示"尚未保存过配置")
@@ -158,38 +175,6 @@ function M.poll_src()
     local v = fskv.get(K_POLL)
     if v == nil or v == "" then return "default" end
     return "fskv"
-end
-
-function M.load_sniff()
-    local raw = load_json(K_SNIFF, {})
-    local ok, c = pcall(M.normalize_sniff, raw)
-    if not ok or not c then return M.default_sniff end
-    return c
-end
-
-function M.load_sys()
-    local raw = load_json(K_SYS, {})
-    local ok, c = pcall(M.normalize_sys, raw)
-    if not ok or not c then return M.default_sys end
-    return c
-end
-
-function M.save_poll(c)
-    local n, err = M.normalize_poll(c)
-    if not n then return false, err end
-    return save_json(K_POLL, n)
-end
-
-function M.save_sniff(c)
-    local n, err = M.normalize_sniff(c)
-    if not n then return false, err end
-    return save_json(K_SNIFF, n)
-end
-
-function M.save_sys(c)
-    local n, err = M.normalize_sys(c)
-    if not n then return false, err end
-    return save_json(K_SYS, n)
 end
 
 function M.reset()

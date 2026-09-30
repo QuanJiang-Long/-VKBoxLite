@@ -25,6 +25,7 @@ local function feed_loop()
         if sys then sys.wait(cfg.WDT_FEED_MS) end
     end
 end
+
 local function tick_loop()
     while true do
         ticks = ticks + 1

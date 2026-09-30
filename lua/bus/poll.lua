@@ -162,29 +162,27 @@ local function do_write(w)
     return false
 end
 
-local function drain_write_queue(mygen)
-    while #writeQ > 0 do
-        if gen ~= mygen or not running then return end
-        local w = table.remove(writeQ, 1)
-        do_write(w)
-    end
-end
-
 local function mon_running()
     local ok, ctrl = pcall(require, "bus/ctrl")
     if ok and ctrl and ctrl.get_mode() == "sniff" then return true end
     return false
 end
 
+-- 排空写队列。mygen ~= gen 时立即返回(stop/切换模式会 bump gen)。
+-- stop 一定会 bumps gen，所以 gen 变化即代表"本次任务已作废"。
+-- sniff_yield = true 时旁听一旦接管总线就停手，不再发写帧
+-- (两种模式共用同一条物理串口, 抢着发会让旁听帧里混进写请求)
+local function drain_write_queue(mygen, sniff_yield)
+    while #writeQ > 0 do
+        if gen ~= mygen or not running then return end
+        if sniff_yield and mon_running() then return end
+        do_write(table.remove(writeQ, 1))
+    end
+end
+
 local function worker()
     writeTaskRun = true
-    local mygen = gen
-    while #writeQ > 0 do
-        if gen ~= mygen then break end
-        local w = table.remove(writeQ, 1)
-        if mon_running() then break end
-        do_write(w)
-    end
+    drain_write_queue(gen, true)
     de_low()
     writeTaskRun = false
 end
@@ -201,7 +199,7 @@ local function poll_task()
     while gen == mygen and running do
         for _, reg in ipairs(regs) do
             if gen ~= mygen or not running then break end
-            if #writeQ > 0 then drain_write_queue(mygen) end
+            drain_write_queue(mygen)      -- 空队列时立刻返回, 不必先判长度
             poll_reg(reg)
             if guard then guard.alive() end
             if sys then sys.wait(5) end
@@ -240,61 +238,12 @@ local function raw_on_receive(id, len)
     end
 end
 
-function M.probe_raw(slave, addr, qty, timeout_ms)
-    slave = slave or (lastCfg and lastCfg.slave) or cfg.SLAVE_ADDR
-    addr = addr or 0
-    qty = qty or 1
-    timeout_ms = timeout_ms or (lastCfg and lastCfg.timeout_ms) or cfg.TIMEOUT_MS
-    local frame, err = mbus.build_read(slave, addr, qty)
-    if not frame then return nil, tostring(err) end
-    if not running then
-        local ok, e = pcall(uart.setup, mbus.UART_ID, lastCfg and lastCfg.baud or cfg.BAUD,
-            lastCfg and lastCfg.databits or cfg.DATABITS,
-            lastCfg and lastCfg.stopbits or cfg.STOPBITS,
-            mbus.parity_to_uart(lastCfg and lastCfg.parity or cfg.PARITY))
-        if not ok then return nil, "uart setup fail: " .. tostring(e) end
-        if gpio then pcall(gpio.setup, mbus.DE_PIN, 0) end
-    end
-    drain()
-    rawCap = ""
-    pcall(uart.on, mbus.UART_ID, "receive", raw_on_receive)
-    local txok, txerr = pcall(uart.write, mbus.UART_ID, frame)
-    txok = txok and true or false
-    de_high()
-    local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD)
-    if sys then sys.wait(hold) end
-    de_low()
-    local waited = 0
-    while waited < timeout_ms do
-        if #rawCap > 0 and mbus.parse_frame(rawCap) then break end
-        if sys then sys.wait(5) end
-        waited = waited + 5
-    end
-    local cap = rawCap or ""
-    rawCap = nil
-    if running then pcall(uart.on, mbus.UART_ID, "receive", on_receive) end
-    return {
-        tx_ok = txok,
-        tx_err = txok and "" or tostring(txerr),
-        tx_hex = hexs(frame),
-        rx_len = #cap,
-        rx_hex = hexs(cap),
-        parsed = mbus.parse_frame(cap) ~= nil,
-        slave = slave, addr = addr, qty = qty,
-    }
-end
-
--- 裸发一串 hex 字节(前端 W:TX), 抓回原始响应, 返回 rx_len/rx_hex/parsed
-function M.tx_raw(hex, timeout_ms)
-    if type(hex) ~= "string" then return nil, "bad hex" end
-    local bytes = {}
-    for h in hex:gmatch("%x%x") do
-        local v = tonumber(h, 16)
-        if not v then return nil, "bad hex" end
-        bytes[#bytes + 1] = string.char(v)
-    end
-    if #bytes == 0 then return nil, "empty hex" end
-    local frame = table.concat(bytes)
+-- 裸发一帧、抓回原始字节。W:RAWTEST 与 W:TX 完全共用：
+-- 两者只差"帧从哪来"(build_read 拼 / 前端 hex 解) 和回显里带不带
+-- slave/addr/qty，DE 时序、DE 极性、收发窗口、恢复 on_receive 全都一样，
+-- 抄两遍必然改一处漏一处。
+-- 返回 {tx_ok, tx_err, tx_hex, rx_len, rx_hex, parsed, ...}；失败返回 nil, 原因
+local function raw_tx(frame, timeout_ms, extra)
     if not running then
         local ok, e = pcall(uart.setup, mbus.UART_ID, lastCfg and lastCfg.baud or cfg.BAUD,
             lastCfg and lastCfg.databits or cfg.DATABITS,
@@ -315,21 +264,55 @@ function M.tx_raw(hex, timeout_ms)
     timeout_ms = timeout_ms or (lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS)
     local waited = 0
     while waited < timeout_ms do
+        -- 只要出现一个 CRC 自洽的帧就算收够了: 现场要看的是"有没有回、回得对不对"
         if #rawCap > 0 and mbus.parse_frame(rawCap) then break end
         if sys then sys.wait(5) end
         waited = waited + 5
     end
     local cap = rawCap or ""
     rawCap = nil
+    -- 轮询在跑就把接收回调还回去, 否则轮询从此收不到响应(表现为全 timeout)
     if running then pcall(uart.on, mbus.UART_ID, "receive", on_receive) end
-    return {
+    local out = {
         tx_ok = txok,
         tx_err = txok and "" or tostring(txerr),
-        tx_hex = hex,
+        tx_hex = hexs(frame),
         rx_len = #cap,
         rx_hex = hexs(cap),
         parsed = mbus.parse_frame(cap) ~= nil,
     }
+    if extra then
+        for k, v in pairs(extra) do out[k] = v end
+    end
+    return out
+end
+
+-- 总线裸探针: 发一帧读请求, 抓回所有原始字节(不做 CRC 判定),
+-- 用于现场区分"没发出去/从机没回"与"回了但参数不匹配"
+function M.probe_raw(slave, addr, qty, timeout_ms)
+    slave = slave or (lastCfg and lastCfg.slave) or cfg.SLAVE_ADDR
+    addr = addr or 0
+    qty = qty or 1
+    timeout_ms = timeout_ms or (lastCfg and lastCfg.timeout_ms) or cfg.TIMEOUT_MS
+    local frame, err = mbus.build_read(slave, addr, qty)
+    if not frame then return nil, tostring(err) end
+    return raw_tx(frame, timeout_ms, { slave = slave, addr = addr, qty = qty })
+end
+
+-- 裸发一串 hex 字节(前端 W:TX), 抓回原始响应, 返回 rx_len/rx_hex/parsed
+function M.tx_raw(hex, timeout_ms)
+    if type(hex) ~= "string" then return nil, "bad hex" end
+    local bytes = {}
+    for h in hex:gmatch("%x%x") do
+        local v = tonumber(h, 16)
+        if not v then return nil, "bad hex" end
+        bytes[#bytes + 1] = string.char(v)
+    end
+    if #bytes == 0 then return nil, "empty hex" end
+    local r, err = raw_tx(table.concat(bytes), timeout_ms)
+    if not r then return nil, err end
+    r.tx_hex = hex        -- 原样回显前端发的串, 免得 format 后再解析对不上
+    return r
 end
 
 function M.reload_cfg()

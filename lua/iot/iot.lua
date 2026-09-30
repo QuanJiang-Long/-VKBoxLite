@@ -156,7 +156,6 @@ local function publish(force)
     log.warn("iot", "publish fail:", tostring(err))
     return false
 end
-M.publish = publish
 
 -- conack 时的下行订阅清单（文档"订阅关系"）。
 -- 平台下发恒用 gw 前缀，且每条末段都是目标裸 SN。
@@ -208,8 +207,10 @@ local function on_mqtt(cli, event, data, payload)
         local subs = build_subs()
         S.subs = subs
         S.subscribed = false
+        -- qos 只取一次: mqttcfg.load 要读 fskv 解 JSON, 挂在循环里等于每个 topic 解一遍
+        local qos = mqttcfg.load().qos
         for _, t in ipairs(subs) do
-            local sok, serr = pcall(function() cli:subscribe(t, mqttcfg.load().qos) end)
+            local sok, serr = pcall(function() cli:subscribe(t, qos) end)
             -- 订阅成功才算已订阅, 否则 status 失真
             if not sok then log.warn("iot", "subscribe fail:", t, tostring(serr)) end
             S.subscribed = S.subscribed or sok
@@ -336,6 +337,8 @@ local function downlink_write(items)
     if not ok or not poll then return 0, 0 end
     local okc, c = pcall(cfgstore.load_poll)
     local regs = okc and c and c.regs or {}
+    -- 默认从机地址只读一次: 挂在循环里等于每条缺 slave 的下行都重读一次 fskv+JSON
+    local dslave = (okc and c and c.slave) or cfg.SLAVE_ADDR
     local function resolve_addr(k)
         if not k then return nil end
         if type(k) ~= "string" then
@@ -364,10 +367,7 @@ local function downlink_write(items)
         local addr = dnum(it.addr or it.address or it.reg or it.register or it.offset)
         if not addr then addr = resolve_addr(dkey) end
         local slave = dnum(it.slave or it.dev or it.device or it.slaveId or it.slave_id)
-        if not slave then
-            local okp, pc = pcall(cfgstore.load_poll)
-            slave = okp and pc and pc.slave or cfg.SLAVE_ADDR
-        end
+        if not slave then slave = dslave end
         if it.values and type(it.values) == "table" and addr then
             local vals = {}
             for _, v in ipairs(it.values) do
@@ -471,11 +471,40 @@ local function auto_apply(r)
     return true
 end
 
+-- U6 应用回执。必须声明在 recv_push / auto_apply / pull_step 之前：
+-- pcall(reply_config) 传的是【已声明的函数对象】，声明在后等于捕获 nil，
+-- 回执静默不发——平台会一直重推，而且没有任何报错。
+-- 只回一次（p.replied 去重）；msgId 与 D1 下发包里的一致，平台据此核销。
+-- 现在拉取成功即自动保存生效，所以回执也跟着自动发，不需要用户点保存。
+local function reply_config()
+    local p = S.pull
+    if p.replied then return true end
+    if not p.msg_id or p.msg_id == "" then return true end
+    if not S.connected or not S.client then return false, "MQTT 未连接" end
+    local did = device_id()
+    if not did or did == "" then return false, "无 SN" end
+    local topic = string.format(cfg.PLATFORM_REPLY_TOPIC, did)
+    local body = string.format(
+        '{"msgId":%s,"code":200,"message":"config applied","status":"ok","appliedTs":%d}',
+        jstr(p.msg_id), os.time())
+    log.info("iot", "config/reply " .. topic .. " " .. body)
+    local ok, err = pcall(function() S.client:publish(topic, body, 1) end)
+    if not ok then return false, tostring(err) end
+    p.replied = true
+    S.replied = S.replied + 1
+    return true
+end
+M.reply_config = reply_config
+
+-- 平台主动重新下发配置（前端没点拉取，设备也没在等）。
+-- 判据就是 payload 里有 configSnapshot：这是 D1 快照的独有字段，
 -- REPORT/WRITE/裸值都不带它，不可能误判。
--- 收到后不落盘：落盘会把正在跑的 485 配置换掉，属于改设备行为，
--- 必须有现场确认（与"点保存才回执"同一条原则）。
+-- 解析成功即自动落盘并生效，与前端拉取完全同一套语义。
+-- 放在设备侧而不是前端侧，是为了让前端不在线时也生效——平台主动重推
+-- 走的是同一条路径，靠前端的话没开串口就永远不落地。
 -- 做法是把它塞进拉取结果槽位、以 done 态呈现，前端复用同一套回填渲染
 local function recv_push(t)
+    local r, err = pullcfg.parse_snap(t, t.configSnapshot)
     if not r then
         S.push_err = tostring(err)
         log.warn("iot", "push parse fail: " .. tostring(err))
@@ -506,7 +535,8 @@ local function recv_push(t)
     return aok
 end
 
-function M.handle_downlink(topic, payload)
+-- 只被本文件的 task_main 调用(收到 MQTT 下行时转进来)，不外泄
+local function handle_downlink(topic, payload)
     if not claim_ok(topic) then
         log.info("iot", "downlink dropped, not ours: " .. tostring(topic))
         return
@@ -682,30 +712,6 @@ local function pull_step()
     end
 end
 
--- U6 应用回执。由自动落盘成功或 W:CFG（前端「保存配置」）调用：
--- 现在拉取成功即自动保存生效，所以回执也跟着自动发。
--- 只回一次（p.replied 去重）；msgId 与 D1 下发包里的一致，平台据此核销。
--- 不发就说明这套配置没落地，平台会继续重推。
-local function reply_config()
-    local p = S.pull
-    if p.replied then return true end
-    if not p.msg_id or p.msg_id == "" then return true end
-    if not S.connected or not S.client then return false, "MQTT 未连接" end
-    local did = device_id()
-    if not did or did == "" then return false, "无 SN" end
-    local topic = string.format(cfg.PLATFORM_REPLY_TOPIC, did)
-    local body = string.format(
-        '{"msgId":%s,"code":200,"message":"config applied","status":"ok","appliedTs":%d}',
-        jstr(p.msg_id), os.time())
-    log.info("iot", "config/reply " .. topic .. " " .. body)
-    local ok, err = pcall(function() S.client:publish(topic, body, 1) end)
-    if not ok then return false, tostring(err) end
-    p.replied = true
-    S.replied = S.replied + 1
-    return true
-end
-M.reply_config = reply_config
-
 local function task_main()
     S.want_run = true
     while S.want_run do
@@ -741,7 +747,7 @@ local function task_main()
             if S.recv_pending then
                 local rp = S.recv_pending
                 S.recv_pending = nil
-                pcall(M.handle_downlink, rp.topic, rp.payload)
+                pcall(handle_downlink, rp.topic, rp.payload)
             end
             local c = mqttcfg.load()
             local due = false
@@ -774,11 +780,6 @@ function M.start()
     if sys then sys.taskInit(task_main) end
     log.info("iot", "started")
     return true
-end
-
-function M.stop()
-    S.want_run = false
-    destroy_client()
 end
 
 function M.is_running() return S.want_run end
