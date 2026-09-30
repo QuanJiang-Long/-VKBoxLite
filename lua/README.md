@@ -74,8 +74,8 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:SNIFFCFG / W:SNIFFCFG={json} | 旁听配置读写，读返回 `{cfg, src}` |
 | R:REG / W:REG=[json] | 寄存器表读写 |
 | R:VAL | 实时值快照 |
-| R:STAT | 运行状态汇总（mode/data/guard/mqtt） |
-| W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt}`，`mqtt` 段含 `hello`/`pub`/`sub` 三个拼好的 topic；另有 `msg_id`/`replied` 反映回执）。前提只需配好 MQTT 服务器地址和端口，设备会自己连 |
+| R:STAT | 运行状态汇总（mode/data/guard/mqtt）；`mqtt` 段另带 `push_pending`/`push_n`/`push_seen`/`push_err`（平台主动重推横幅用） |
+| W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt,msg_id,replied,src,seen,push_pending,push_n,push_err}`，`mqtt` 段含 `hello`/`pub`/`sub` 三个拼好的 topic；`msg_id`/`replied` 反映回执；`src`=`pull`/`push`）。平台主动重推的配置也走这个返回（`src=push`）。前提只需配好 MQTT 服务器地址和端口，设备会自己连 |
 | W:WRITE=slave,addr,value / W:WRITEJ={json} | 写寄存器（idle 也可写，经写事务队列在安全点注入） |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配” |
 | R:MQTT / W:MQTT={json} | MQTT 配置读写，读返回 `{cfg,pub,sub,ready,err,stat}` |
@@ -255,6 +255,55 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 >
 > 前端按总时长轮询 55s，覆盖 20s 连接 + 15s 等下发 + 余量。
 
+### 平台主动重新下发（非前端拉取触发）
+
+平台侧有「重新下发配置」按钮：一点就主动往 `/sys/thing/gw/config/get/{SN}` 再推一份
+`configSnapshot`，**不等设备问**。这条路径原来会**静默丢弃**：
+`handle_downlink` 一看拉取状态机不在 `waiting` 就往下按普通指令解析，而
+`configSnapshot` 既没有 `cmd` 也没有 `items`/`value`/`values`/`val`/`data`，
+走完所有分支什么都不发生——平台以为发了，设备什么都没干，且无任何日志。
+
+现在按 `type(t.configSnapshot) == "table"` 认出它（这是 D1 快照的独有字段，
+REPORT/WRITE/裸值都不带，不可能误判）：
+
+```
+handle_downlink
+ ├─ pull 状态机 waiting ────────────▶ S.pull_payload = payload（原逻辑，供 pull_step 解析）
+ ├─ configSnapshot 且握手中 ────────▶ S.pull_payload = payload（寄存，走到 waiting 立刻消费）
+ ├─ configSnapshot 且未握手 ────────▶ recv_push(t)：解析 → 存进 S.pull 结果槽位
+ │                                     state=done / src=push / seen=os.time()
+ │                                     push_pending=true / push_n += 1
+ ├─ parse 失败 ─────────────────────▶ push_err=原因 + warn 日志，不静默
+ └─ 其余 ──────────────────────────▶ 按普通业务指令解析（REPORT/WRITE/写值，原逻辑）
+```
+
+**为什么不直接落盘、重启轮询**：落盘会把正在跑的 485 配置换掉，属于改设备行为，
+必须有现场确认——与「点保存配置才回执 U6」是同一条原则。做法是把这份塞进
+**拉取结果槽位**（`S.pull`）以 `done` 态呈现，前端 `R:PULLCFG` 直接用同一套
+回填渲染，不必再加一条渲染路径。
+
+**握手中到达的推送先寄存而不当 push 处理**：`recv_push` 会把 `S.pull.state`
+改成 `done`，把握手掐断——用户点了「拉取配置」却拿到一份可能是旧的推送。
+寄存后状态机走到 `waiting` 会立刻消费掉，反而省一次平台往返。
+
+**横幅数据为什么挂在 `R:STAT`**：`R:PULLCFG` 只在用户点「拉取配置」时才查，
+等不到横幅。`M.status()` 的 `mqtt` 段因此多带四个字段，前端 5s 轮询
+（`readHome`）就能发现：
+
+| 字段 | 含义 |
+|---|---|
+| `push_pending` | true = 有平台推送待确认。横幅显示的开关 |
+| `push_n` | 累计收到几份。新的一份覆盖旧的，前端据此解除「忽略」 |
+| `push_seen` | 收到的 OS 时间，横幅显示"已等待 N 秒/分钟" |
+| `push_err` | 解析失败原因，非空时横幅改成"解析失败" |
+
+**横幅撤掉的时机**：用户经 `R:PULLCFG` 看到这份（`pull_finish("done")`）/
+保存并回执成功（`reply_config`）/ 平台不再推。回执失败（未连接）时不撤。
+
+> 注意 `R:PULLCFG` 的返回也多了 `src`/`seen`/`push_pending`/`push_n`/`push_err`
+> 五个字段，`src=="push"` 时前端把状态行措辞从"已拉取"换成"平台重新下发"。
+> 字段增量都是附加，老前端忽略新键不会坏。
+
 ### topic
 
 | 用途 | topic | 说明 |
@@ -268,6 +317,10 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 
 > 业务订阅模板默认与「配置下发」topic 同形，所以 conack 时会去重（同一 topic 只订一次），
 > 且下行分流只在拉取状态机 `waiting` 时才把该 topic 的报文当配置包收，其余按普通指令解析。
+>
+> **例外：平台主动重推**。同一条 `config/get` topic 上，用户没点拉取时平台也能主动推
+> `configSnapshot`（「重新下发配置」按钮）。此时不按 `configSnapshot` 字段识别就会
+> 静默丢弃，所以分流条件不止看 `waiting`——见上方「平台主动重新下发」。
 
 #### conack 时的下行订阅清单（`iot.build_subs()`）
 
@@ -366,6 +419,17 @@ I/iot: config/reply /sys/thing/gw/config/reply/11802026092600016 {"msgId":"hello
 ```
 I/iot: downlink dropped, not ours: /sys/thing/gw/function/get/V239342435
 ```
+
+**平台主动重新下发**（没点「拉取配置」时平台自己推一份）的日志：
+
+```
+I/iot: push recv msgId=hello-3eff79ec regs=3 skipped=0      ← 认出并解析成功，等用户保存
+I/iot: push during handshake(helloing), parked len=850       ← 拉取握手中到达，先寄存
+W/iot: push parse fail: tsl.properties 为空                  ← 认出是配置包但读不懂
+```
+
+`push recv` 出现后设备不自动落盘、不发 `config/reply`；要等用户在 GUI 点「保存配置」。
+前端此时会弹黄色横幅提示。
 
 连不上 MQTT 时是 `pullcfg fail MQTT 连接失败: <原因>`（等 20s）。
 

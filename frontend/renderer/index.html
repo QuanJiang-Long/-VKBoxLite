@@ -117,6 +117,15 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .kv-grid .kv span.bad{color:#c0392b;}
 /* 下行订阅是多行 topic 清单，不换行会挤成一坨看不见 */
 #mqStSubs{white-space:pre-line;line-height:1.6;}
+/* 平台主动下发配置横幅。黄色底 = 有事情要做但还没做，
+   跟红色报错（#c0392b）区分开，别让用户以为设备坏了 */
+.push-banner{display:flex;align-items:center;gap:10px;margin-bottom:10px;
+    padding:8px 12px;background:#fdf6ec;border:1px solid #f0c36d;
+    border-radius:4px;font-size:13px;color:#8a6116;}
+.push-banner[hidden]{display:none;}
+.push-banner span{flex:1;}
+.push-banner .push-ignore{background:none;border:none;color:#a0855b;
+    text-decoration:underline;cursor:pointer;font-size:12px;padding:0;}
 /* 报文视图 */
 .frame-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;}
 .frame-toolbar select,.frame-toolbar input{padding:3px 6px;border:1px solid #ccc;font-size:13px;}
@@ -316,6 +325,15 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
                     <button id="btnPullCfg" title="从 MQTT 平台拉取 485 配置并回填表单，需检查后点保存配置才生效">拉取配置</button>
                     <div style="margin-left: auto;"></div>
                     <button id="btnSaveCfg" class="primary">保存配置</button>
+                </div>
+
+                <!-- 平台主动重新下发的配置横幅。默认 hidden，由 renderPushBanner 控制：
+                     设备 R:STAT 报 push_pending 时才显示。R:PULLCFG 只有用户点
+                     「拉取配置」才查，等不到这个横幅，所以横幅挂在 5s 轮询上 -->
+                <div id="pushBanner" class="push-banner" hidden>
+                    <span id="pushBannerText"></span>
+                    <button id="btnPushView" class="primary">查看并保存</button>
+                    <button id="btnPushIgnore" class="push-ignore">忽略</button>
                 </div>
 
                 <div class="form-row">

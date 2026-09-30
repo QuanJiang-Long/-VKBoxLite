@@ -29,8 +29,17 @@ local function reset_state()
         pull = {
             state = "idle", msg = "", result = nil, deadline = 0,
             msg_id = nil, replied = false,
+            -- src = "pull"/"push"：这份结果是谁给的。
+            -- "push" = 平台主动重新下发，前端没点过拉取。二者走同一套
+            -- done+回执链路，只是横幅提示语不同
+            src = nil,
+            seen = 0,              -- OS time，收到这份配置的时间
         },
         pull_payload = nil,
+        -- push_pending = 有平台主动下发的配置没人受理。
+        -- 前端靠 R:STAT 5s 轮询发现它（R:PULLCFG 只在用户点拉取时才查），
+        -- 所以必须单独挂在 status 段
+        push_pending = false, push_n = 0, push_err = nil,
     }
 end
 
@@ -381,6 +390,42 @@ local function claim_ok(topic)
     return last:sub(1, #did + 1) == (did .. "-")
 end
 
+-- 拉取握手是否正在进行（connecting/helloing/waiting）。
+-- 必须定义在 handle_downlink 之前：Lua 的 local 是词法作用域，
+-- 在函数体里引用后面才声明的 local 会变成全局查找，运行时拿到 nil 直接崩
+local function pulling()
+    local st = S.pull.state
+    return st == "connecting" or st == "helloing" or st == "waiting"
+end
+
+-- 平台主动重新下发配置（前端没点拉取，设备也没在等）。
+-- 判据就是 payload 里有 configSnapshot：这是 D1 快照的独有字段，
+-- REPORT/WRITE/裸值都不带它，不可能误判。
+-- 收到后不落盘：落盘会把正在跑的 485 配置换掉，属于改设备行为，
+-- 必须有现场确认（与"点保存才回执"同一条原则）。
+-- 做法是把它塞进拉取结果槽位、以 done 态呈现，前端复用同一套回填渲染
+local function recv_push(t)
+    local r, err = pullcfg.parse_snap(t)
+    if not r then
+        S.push_err = tostring(err)
+        log.warn("iot", "push parse fail: " .. tostring(err))
+        return false
+    end
+    S.push_err = nil
+    S.push_pending = true
+    S.push_n = S.push_n + 1
+    S.pull.state = "done"
+    S.pull.src = "push"
+    S.pull.seen = os.time()
+    S.pull.msg = "平台重新下发"
+    S.pull.result = r
+    S.pull.msg_id = r.msg_id
+    S.pull.replied = false
+    log.info("iot", string.format("push recv msgId=%s regs=%d skipped=%d",
+        r.msg_id, #(r.poll.regs or {}), #(r.skipped or {})))
+    return true
+end
+
 function M.handle_downlink(topic, payload)
     if not claim_ok(topic) then
         log.info("iot", "downlink dropped, not ours: " .. tostring(topic))
@@ -401,6 +446,23 @@ function M.handle_downlink(topic, payload)
     if not json then return end
     local ok, t = pcall(json.decode, payload)
     if not ok or type(t) ~= "table" then return end
+    -- 平台手动重新下发：前端没在等，但这包就是新的 configSnapshot。
+    -- 以前这里一路走到最后，既不是 REPORT/WRITE 也没有 items/value，
+    -- 于是【什么都不发生】——平台以为发了、设备什么都没干，且无任何日志
+    if type(t.configSnapshot) == "table" then
+        if pulling() then
+            -- 握手中（ connecting/helloing ）到达：这就是要找的响应，
+            -- 寄存下来，等状态机走到 waiting 立刻消费掉。
+            -- 直接当 push 处理会把 state 改成 done、把握手掐断，
+            -- 用户点了「拉取配置」却拿到一份可能是旧的推送
+            S.pull_payload = payload
+            log.info("iot", string.format("push during handshake(%s), parked len=%d",
+                S.pull.state, #tostring(payload)))
+            return
+        end
+        recv_push(t)
+        return
+    end
     local cmd = t.cmd and t.cmd:upper() or nil
     if cmd == "REPORT" or cmd == "READALL" then
         S.dirty = true
@@ -425,10 +487,7 @@ end
 
 -- 平台配置拉取状态机。
 -- W:PULLCFG 只置状态并立即应答; 握手跑在 task_main 协程里(那里才能 sys.wait)。
-local function pull_active()
-    local st = S.pull.state
-    return st == "connecting" or st == "helloing" or st == "waiting"
-end
+local function pull_active() return pulling() end
 
 -- 不要求 MQTT 已连上: 只要配好服务器地址/端口, 设备自己去连, 连上再握手。
 -- 这是新设备首次使用的正常顺序(先配 MQTT, 再拉配置)。
@@ -462,6 +521,13 @@ function M.pull_status()
     -- 回执状态单独给：前端要提示"未保存前不回执平台"
     r.msg_id = p.msg_id
     r.replied = p.replied
+    -- src/seen 只对平台主动下发有意义：前端据此把提示语从"已拉取"
+    -- 换成"平台重新下发"，并显示等了多久
+    r.src = p.src or "pull"
+    r.seen = p.seen
+    r.push_pending = S.push_pending
+    r.push_n = S.push_n
+    r.push_err = S.push_err
     return r
 end
 
@@ -469,6 +535,12 @@ local function pull_finish(state, msg, result)
     S.pull.state = state
     S.pull.msg = msg
     S.pull.result = result
+    -- 用户点了拉取并通过 R:PULLCFG 看到结果 = 这份配置已被受理，
+    -- 横幅该撤了（前端拉取失败则不撤，等用户再点）
+    if state == "done" then
+        S.push_pending = false
+        S.push_err = nil
+    end
     log.info("iot", "pullcfg", state, msg)
 end
 
@@ -510,6 +582,8 @@ local function pull_step()
             if not r then return pull_finish("fail", tostring(err)) end
             -- msgId 留着不发：按用户要求，要等前端提示用户确认（点保存配置）
             -- 才回执。用户不保存就说明这套配置没落地，不回执平台会继续重推
+            p.src = "pull"
+            p.seen = os.time()
             p.msg_id = r.msg_id
             p.replied = false
             return pull_finish("done", #r.skipped > 0 and ("已忽略 " .. #r.skipped .. " 条") or "", r)
@@ -537,6 +611,9 @@ local function reply_config()
     local ok, err = pcall(function() S.client:publish(topic, body, 1) end)
     if not ok then return false, tostring(err) end
     p.replied = true
+    -- 回执成功 = 平台已核销这条 msgId，横幅可以撤了。
+    -- 回执失败（未连接/无 SN）时不撤：前端还得提示用户"待确认"
+    S.push_pending = false
     S.replied = S.replied + 1
     return true
 end
@@ -660,6 +737,12 @@ function M.status()
         last_pub = S.last_pub,
         last_err = S.last_err,
         reject_reason = S.reject_reason,
+        -- 平台主动下发、还没人受理的配置。R:PULLCFG 只在用户点「拉取配置」
+        -- 时才查，等不到这里的横幅——所以必须挂在 5s 轮询的 R:STAT 上
+        push_pending = S.push_pending,
+        push_n = S.push_n,
+        push_seen = S.pull.seen,
+        push_err = S.push_err,
         sn = _G.get_device_sn and tostring(_G.get_device_sn()) or nil,
         heap = (function() local a, b = heap_info(); return { total = a, used = b } end)(),
     }

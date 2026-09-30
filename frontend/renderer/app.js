@@ -40,6 +40,9 @@ const S = {
   pullBusy: false,     // 拉取配置进行中（防连点）
   pulled: false,       // 刚拉过平台配置且尚未保存确认。
                        // true 时 saveCfg 要提示"已向平台回执"，见 saveCfg()
+  pushIgnored: false,  // 用户点过横幅「忽略」。只对当前这一份生效：
+                       // 平台再推一份（push_n 变）就重新弹，见 renderPushBanner()
+  pushSeenN: 0,        // 被忽略的那一份的 push_n，用于判断"是不是新的一份"
   mock: !window.serial // 浏览器预览模式
 };
 
@@ -556,8 +559,9 @@ async function readCfg(quiet) {
 }
 
 // 拉取配置：从平台拉 485 配置并回填表单（不自动保存，由用户点保存生效）
-//   ① W:PULLCFG 发起，设备回 started
-//   ② 轮询 R:PULLCFG 直到 done/fail（设备与平台握手，可能要几秒）
+//   ① 有平台主动下发的待确认配置时，直接读设备已解析好的那份，
+//      跳过 W:PULLCFG 握手（否则把已解析好的结果冲掉，白等 20s+15s）
+//   ② 否则 W:PULLCFG 发起，轮询 R:PULLCFG 直到 done/fail
 //   ③ done 后回填 串口参数 + 寄存器表 + MQTT 上报/下行 topic
 async function pullCfg() {
   if (S.pullBusy) return;
@@ -571,7 +575,11 @@ async function pullCfg() {
     if (btn) { btn.textContent = oldText; btn.disabled = !S.open; }
   };
   try {
-    await sendCmd(Protocol.Enc.pullCfg(), 'PULLCFG', 8000);
+    // 横幅/view 按钮入口：设备里已经有解析好的推送结果，别再向平台要一遍
+    const pending = (S.stat && S.stat.mqtt && S.stat.mqtt.push_pending) ? S.stat.mqtt : null;
+    if (!pending) {
+      await sendCmd(Protocol.Enc.pullCfg(), 'PULLCFG', 8000);
+    }
     // 设备端要先连 MQTT(PULL_CONNECT_MS=20s)再等平台下发(PULL_TIMEOUT_MS=15s),
     // 所以这里按总时长轮询, 不能用固定次数
     let r = null;
@@ -1070,6 +1078,38 @@ function renderHome() {
   fillMqHome(mq);
   el.stMqtt.textContent = mq.connected ? '已连接' : '未连接';
   el.stMqtt.style.color = mq.connected ? '#0a7d2c' : '#999';
+  renderPushBanner(mq);
+}
+
+// 平台主动重新下发配置的横幅。
+// 数据来自 R:STAT 的 mqtt 段（push_pending/push_n/push_seen/push_err），
+// 跟着 5s 轮询走 —— R:PULLCFG 只在用户点「拉取配置」时才查，等不到这里。
+// 提示语要区分"新收到"和"早就收到没人管"，后者加一句已等多久
+function renderPushBanner(mq) {
+  const box = el.pushBanner;
+  if (!box || !el.pushBannerText) return;
+  if (!mq.push_pending) {
+    box.hidden = true;
+    S.pushIgnored = false;      // 清了就重置忽略状态
+    return;
+  }
+  // 同一份（push_n 没变）且用户点过忽略，就别再刷屏
+  if (S.pushIgnored && S.pushSeenN === mq.push_n) { box.hidden = true; return; }
+  S.pushSeenN = mq.push_n;
+  box.hidden = false;
+
+  let txt;
+  if (mq.push_err) {
+    // 解析失败：设备认出了是配置包但读不懂。必须说出来，
+    // 否则表现为"平台点了重新下发但前端毫无反应"
+    txt = '平台推送了配置，但设备解析失败：' + mq.push_err + '（见设备日志）';
+  } else {
+    const secs = mq.push_seen ? Math.max(0, Math.floor(Date.now() / 1000) - mq.push_seen) : 0;
+    const age = secs >= 60 ? Math.floor(secs / 60) + ' 分钟' : secs + ' 秒';
+    const n = mq.push_n > 1 ? '（第 ' + mq.push_n + ' 份）' : '';
+    txt = '平台重新下发了配置' + n + '，已等待 ' + age + '。检查后点「保存配置」才会写入设备并向平台回执。';
+  }
+  el.pushBannerText.textContent = txt;
 }
 
 function fillMqHome(mq) {
@@ -1558,6 +1598,14 @@ el.btnAddReg.onclick = addParamRow;
 el.btnImport.onclick = importCfg;
 el.btnExport.onclick = exportCfg;
 el.comSel.onchange = () => { S.port = el.comSel.value; };
+
+// 平台推送横幅：查看 = 走 pullCfg 读设备已解析好的那份；
+// 忽略 = 本次不再提示（平台再推一份照旧弹，见 renderPushBanner）
+if (el.btnPushView) el.btnPushView.onclick = () => { S.pushIgnored = false; pullCfg(); };
+if (el.btnPushIgnore) el.btnPushIgnore.onclick = () => {
+  S.pushIgnored = true;
+  if (el.pushBanner) el.pushBanner.hidden = true;
+};
 
 // 485 页未保存检测：一条 input + 一条 change 的事件代理覆盖全部编辑入口
 // （波特率/从站/间隔/超时 4 个输入框 + 3 组 radio + 参数表每行 5 个可编辑单元格），

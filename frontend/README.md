@@ -86,6 +86,9 @@ mklink /J D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules D:\VKBox_Lite\VKBo
 | 拉取成功后「下行订阅」只有 1 条 | 没连上 broker。连上后固定 4 条（config/get + function/get + property/set + property/get） |
 | 拉取后有的点是中文乱码/别名栏莫名变成 id | 平台把中文 `name` 按 GBK（非 UTF-8）下发。设备判为非法 UTF-8 后退回 id 并提示"N 个平台别名不可用已退用 id"，同时日志有 `alias 非 UTF-8(平台编码问题), 退回 id: xxx`。MQTTX 独立订阅同样看到乱码 → 是平台的编码问题，不是设备；要平台侧改成 UTF-8 |
 | 拉取后某条寄存器少了，状态行说"忽略 1 条" | 该条平台配置不合法（如 `dataType` 用了 `-CDAB` 这类非大端字节序后缀、`address` 越界、`id` 含非字母数字），明细在"忽略"的 toast/日志。不会整包失败 |
+| 485 页顶部出现黄色横幅"平台重新下发了配置" | 平台侧点了「重新下发配置」按钮，设备已接住并解析好，暂存在内存里等确认。点横幅「查看并保存」或用「拉取配置」把表单填上，检查完点「保存配置」才真正写入设备并向平台回执。详见「平台主动重新下发配置」 |
+| 横幅说"解析失败"没别的反应 | 设备认出了这是配置包但读不懂（`configSnapshot` 里缺字段/`tsl.properties` 为空等），原因在横幅文案里，明细看设备日志 `push parse fail: xxx`。不会静默 |
+| 横幅点「忽略」后又想看看 | 忽略只对当前这一份生效。平台再点一次「重新下发」（`push_n` 会变）横幅会重新弹；或者直接点「拉取配置」也能看到已解析好的那份 |
 | 下拉框没有 COM32 | USB 未插好/未上电；或设备日志停在 `VUART task: 等待 USB 枚举...`，等 2~3 秒再刷新 |
 | 串口被占用 | Luatools / ssCOM 正开着同一 COM 口，先关掉 |
 | 打开白屏 | junction 断了，按上文重连或 `npm install` |
@@ -242,7 +245,7 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 | 读 sniff 配置 | `R:SNIFFCFG` | `RET:SNIFFCFG={json}` | 旁听模式的串口参数 |
 | 保存 sniff 配置 | `W:SNIFFCFG={json}` | `RET:SNIFFCFG=OK` | 旁听运行中会自动重启生效 |
 | 读实时值 | `R:VAL` | `RET:VAL=[json]` | `[{name,addr,value,hex,ts,dtype}]`，设备已解好值 |
-| 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,mqtt}` 全量状态 |
+| 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,mqtt}` 全量状态；`mqtt` 段另带 `push_pending/push_n/push_seen/push_err`（平台主动重推横幅用，见下） |
 | 恢复默认配置 | `W:RST` | `RET:RST=OK` | 清除设备保存的 485/MQTT 配置 |
 
 ### 平台配置拉取
@@ -250,7 +253,7 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 | 前端动作 | 指令 | 应答 | 说明 |
 |---|---|---|---|
 | 发起拉取 | `W:PULLCFG` | `RET:PULLCFG=started` | 设备向平台发 hello 并等配置下发；未连 MQTT 直接回 `RET:FAIL:PULLCFG:原因` |
-| 查拉取状态 | `R:PULLCFG` | `RET:PULLCFG={json}` | `{state,msg,poll,skipped,renamed,mqtt,msg_id,replied}`；`state` = `helloing`/`waiting`/`done`/`fail`；`renamed` = 平台别名不可用、已退回 id 的条目名单 |
+| 查拉取状态 | `R:PULLCFG` | `RET:PULLCFG={json}` | `{state,msg,poll,skipped,renamed,mqtt,msg_id,replied,src,seen,push_pending,push_n,push_err}`；`state` = `helloing`/`waiting`/`done`/`fail`；`renamed` = 平台别名不可用、已退回 id 的条目名单；`src` = `pull`/`push`，`push` = 这份是平台主动重新下发的 |
 
 拉取流程与字段映射详见 `../lua/README.md` 的「平台配置拉取」章节。要点：
 
@@ -271,6 +274,45 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
   独立订阅同样看到乱码，与设备无关），设备判为非法 UTF-8 会把 `alias` 退回 `id`，并把
   该 id 放进 `renamed`。状态行会多说一句"1 个平台别名不可用已退用 id（Ua，中文需平台
   改 UTF-8）"——别当成 bug。要平台侧改成 UTF-8 才能拿到真中文名
+
+### 平台主动重新下发配置
+
+平台侧有「重新下发配置」按钮：一点就主动往 `/sys/thing/gw/config/get/{SN}` 再推一份
+`configSnapshot`，**不等设备问**。设备必须接住——以前会静默丢掉（没有 `cmd`、
+没有 `items/value`，走完所有分支什么都不发生，平台以为发了、设备什么都没干）。
+
+横幅触发链（注意为什么必须挂在 `R:STAT` 上）：
+
+```
+平台重推 → handle_downlink 认出 configSnapshot → 解析成功 → push_pending=true
+        → R:STAT 的 mqtt 段带 push_pending/push_n/push_seen/push_err
+        → 前端 5s 轮询 readHome → renderPushBanner → 485 页顶部黄条
+```
+
+`R:PULLCFG` 只在用户点「拉取配置」时才查，等不到这个横幅，所以横幅的数据挂在
+5s 轮询的 `R:STAT`（`readHome` 每 5s 一次）上。
+
+| 横幅状态 | `R:STAT.mqtt` 字段 | 横幅表现 |
+|---|---|---|
+| 正常待确认 | `push_pending:true, push_n:1, push_seen:<秒>` | "平台重新下发了配置，已等待 N 秒/分钟。检查后点「保存配置」才会写入设备并向平台回执" |
+| 连推多份 | `push_n >= 2` | 文案加「（第 N 份）」，msgId 取最新一份 |
+| 解析失败 | `push_err:"原因"` | "平台推送了配置，但设备解析失败：原因（见设备日志）" |
+| 已保存回执 | `push_pending:false` | 横幅消失 |
+
+要点：
+
+- **pending 的推送不覆盖正在进行的拉取**。拉取握手途中（`connecting`/`helloing`）到达的
+  推送会先寄存，等状态机走到 `waiting` 立刻消费——直接当推送处理会把 `state` 改成
+  `done`、把握手掐断，用户点了「拉取配置」却拿到一份可能是旧的推送
+- **横幅「查看并保存」= 复用「拉取配置」按钮**：点它走同一个 `pullCfg()`，但会先看
+  `R:STAT` 的 `push_pending`，为 true 时**跳过 `W:PULLCFG` 握手**直接读 `R:PULLCFG`
+  ——否则会把设备已解析好的结果冲掉，白等 20s(连接)+15s(下发)
+- **「忽略」只对当前这一份生效**：`push_n` 不变就一直不弹；平台再推一份（`push_n`
+  变大）照旧弹
+- **横幅撤掉的三个时机**：用户在 `R:PULLCFG` 看到这份（拉取状态机 `done`）/ 保存并
+  回执成功 / 平台不再重推。回执失败（未连接）时不撤，还得提示用户
+- **横幅不自动写入设备**。解析成功后只暂存在设备内存里，用户点「保存配置」才会
+  落 fskv 并重启轮询——和前端拉取完全同一套语义
 
 ### MQTT topic 手动/自动切换
 

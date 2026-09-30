@@ -170,12 +170,21 @@ M.topics = topics
 
 -- 解析平台下发的整包 JSON。
 -- 只提取 commInterfaces 与 tsl.properties; 不写 fskv, 不重启轮询。
+-- 返回 {poll, skipped, renamed, msg_id}；失败返回 nil, 原因
 function M.parse(payload)
     if not json then return nil, "no json lib" end
     if type(payload) ~= "string" or payload == "" then return nil, "empty payload" end
     local ok, t = pcall(json.decode, payload)
     if not ok or type(t) ~= "table" then return nil, "json 解析失败" end
     local snap = t.configSnapshot
+    if type(snap) ~= "table" then return nil, "缺少 configSnapshot" end
+    return M.parse_snap(t, snap)
+end
+
+-- 与 parse() 同一套逻辑，只是吃已解好的表。
+-- 拆开是为了让 handle_downlink 复用同一次 json.decode 的结果：
+-- 堆只有 300KB，同一份 payload 解两遍纯属浪费
+function M.parse_snap(t, snap)
     if type(snap) ~= "table" then return nil, "缺少 configSnapshot" end
 
     local dev = (snap.devices or {})[1]
