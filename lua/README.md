@@ -176,13 +176,33 @@ I/user.iot connect: host=dz.voltkun.com port=1883 ssl=false clientId=11802026092
 3. **设备是否已注册**：平台可能只放行预先录入的设备，按 clientId 或 SN 白名单。
 4. **用户名密码**：确实有账号密码时才需要补。
 
+### 连不上服务器（根本没发出 CONNECT）
+
+日志出现 `dns_run ... no ipv6, no ipv4` + `W/user.iot error connect` 时，
+域名解析就没过，跟平台、账号都无关，`last_err` 里那句 `conack timeout` 只是
+`try_connect` 等满 15s 的兜底，别照着它去补账号密码。前端此时显示的是
+`连不上服务器(connect): 域名解析不到或端口不通, 核对 host 拼写`。
+
+**域名写错一个字母就是这个现象**，而两个字母写颠过去肉眼根本看不出来：
+
+| 写法 | 结果 |
+|---|---|
+| `dz.voltkun.com` | 正确 |
+| `dz.volktun.com` | 第 6/7 位 `t`/`k` 颠倒，长度一样，`no ipv6, no ipv4` |
+
+`W:MQTT` 只校验非空和长度 ≤128，这种"形如合法域名"的错字校验拦不住。
+判断方法：`R:MQTT` 看 `cfg.host` 是不是平台给的原样，尤其逐字符比对
+`voltkun` 这类品牌名；同网段用电脑 `nslookup dz.voltkun.com` 对一下，
+解析不出就是域名本身不对。
+
 ### 两个实现细节
 
 - **`auth()` 的空串必须传 `nil`**。LuatOS 只判指针非空就当"有用户名"，
   会把零长用户名字段塞进 CONNECT 包，部分平台据此判未授权回 0x05。
 - **`reject_reason` 独立于 `last_err`**。`try_connect` 等满 15s 后会把
   `last_err` 覆盖成 `conack timeout`，拒绝原因就丢了，所以单独记一个字段，
-  前端优先显示它。
+  前端优先显示它。error 事件里 `conack` 表示"连上了被平台拒"，
+  其余值（`connect` 等）表示"根本没连上"，两者文案不同，别混。
 
 ## 485 轮询日志（poll_reg）
 
