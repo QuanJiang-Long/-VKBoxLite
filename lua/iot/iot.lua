@@ -231,13 +231,20 @@ local function on_mqtt(cli, event, data, payload)
         -- 建连失败同样只给事件不给码值(实测 data = "connect")。
         -- 两者混成一句 "conack timeout" 的后果是现场把"域名写错"当成
         -- "平台拒了", 照着 README 去补账号密码, 排查方向整个反了。
-        -- conack 成功和 reset_state 都会把它清掉, 所以临时失败不会留残影。
+        --
+        -- conack 来了就不再被别的 error 覆盖: 一次被拒会连收两条
+        -- (先 error conack, 再 error other —— 线上实测如此), 后者是
+        -- 库在拆 socket 时补发的, 语义上更弱。若让它覆盖, 页面上
+        -- "平台拒绝"就变成了"连不上", 排查方向又反了。
+        -- conack 成功和 reset_state 都会清掉 reject_reason, 不留残影。
         if event == "error" then
             local d = tostring(data)
-            if d == "conack" then
-                S.reject_reason = "平台拒绝连接(CONACK 0x05 未授权), 检查地址/端口或补用户名密码"
-            else
-                S.reject_reason = "连不上服务器(" .. d .. "): 域名解析不到或端口不通, 核对 host 拼写"
+            if d == "conack" or not S.reject_reason then
+                if d == "conack" then
+                    S.reject_reason = "平台拒绝连接(CONACK 0x05 未授权), 检查地址/端口或补用户名密码"
+                else
+                    S.reject_reason = "连不上服务器(" .. d .. "): 域名解析不到或端口不通, 核对 host 拼写"
+                end
             end
         end
         log.warn("iot", event, tostring(data))
