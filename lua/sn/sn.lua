@@ -44,9 +44,22 @@ function M.save(sn)
     flush()
 end
 
-function M.erase()
+-- notify 必须定义在 clear/write 之前: 两者都要调它, local 是词法作用域,
+-- 声明在后会变成全局查找拿不到 changeCbs, 烧号后主程序补启 MQTT 就失效
+local function notify(sn, st)
+    for _, cb in ipairs(changeCbs) do pcall(cb, sn, st) end
+end
+
+-- erase 已内联: 清号就是删 fskv 里的 SN 键, 单次调用不值得单开一个导出函数
+function M.clear()
+    -- 已锁但当前是 INVALID(非法号)时允许清: 否则返工必须先 UNLOCK 再 C,
+    -- 产线多一步操作(与原工程一致)
+    if M.locked() and state ~= M.STATE.INVALID then return false, "locked" end
     pcall(fskv.del, K_SN)
     flush()
+    sn_cache, state = nil, M.STATE.EMPTY
+    notify(nil, state)
+    return true
 end
 
 function M.set_lock()
@@ -82,10 +95,6 @@ function M.validate(sn)
     if not sn:match("^%w+$") then return false, "bad char" end
     if sn:match("^%d+$") and not luhn_verify(sn) then return false, "luhn fail" end
     return true
-end
-
-local function notify(sn, st)
-    for _, cb in ipairs(changeCbs) do pcall(cb, sn, st) end
 end
 
 function M.on_change(cb) changeCbs[#changeCbs + 1] = cb end
@@ -125,16 +134,6 @@ function M.write(new_sn, opts)
     sn_cache, state = new_sn, M.STATE.READY
     log.info("sn", "burned, burn=" .. M.meta().burn)
     notify(new_sn, state)
-    return true
-end
-
-function M.clear()
-    -- 已锁但当前是 INVALID(非法号)时允许清: 否则返工必须先 UNLOCK 再 C,
-    -- 产线多一步操作(与原工程一致)
-    if M.locked() and state ~= M.STATE.INVALID then return false, "locked" end
-    M.erase()
-    sn_cache, state = nil, M.STATE.EMPTY
-    notify(nil, state)
     return true
 end
 

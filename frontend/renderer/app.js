@@ -512,7 +512,7 @@ async function readInfo() {
     el.stDev.textContent = (d.project || '--') + ' / ' + (d.version || d.fw || '--');
     status('设备信息已读取', true);
   } catch (e) {
-    // 老固件没有 R:INFO，退回 R:ID + R:SN
+    // 老固件没有 R:INFO，退回 R:ID（一行里带 imei/uid/sn/state/lock）
     try {
       const r2 = await sendCmd(Protocol.Enc.id(), 'ID');
       const d2 = r2.data || {};

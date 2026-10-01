@@ -77,11 +77,6 @@ end
 
 function M.on_update(cb) updateCbs[#updateCbs + 1] = cb end
 
-function M.clear()
-    dataCache, frames, ring, ringIdx = {}, {}, {}, 0
-    stat = { pushed = 0, frames = 0, raw = 0 }
-end
-
 function M.trim_cache()
     local n = #frames + #ring
     frames, ring, ringIdx = {}, {}, 0

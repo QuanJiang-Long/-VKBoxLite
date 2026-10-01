@@ -66,13 +66,7 @@ local function sn() return require "sn/sn" end
 
 local CMDS = {}
 
-CMDS["R:SN"] = function()
-    local st = sn().state()
-    if st == "ready" then reply("RET:SN=" .. tostring(_G.get_device_sn()))
-    elseif st == "invalid" then reply("RET:SN=INVALID")
-    else reply("RET:SN=EMPTY") end
-end
-
+-- R:SN 已删除：前端用 R:INFO 拿 SN，产线刷号掩位后 R:ID 同一份信息
 CMDS["R:ID"] = function()
     reply("RET:ID=" .. sn().info_line())
 end

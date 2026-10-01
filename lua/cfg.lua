@@ -177,13 +177,4 @@ function M.poll_src()
     return "fskv"
 end
 
-function M.reset()
-    for _, k in ipairs({ K_POLL, K_SNIFF, K_SYS }) do
-        if fskv then
-            pcall(fskv.del, k)
-            if fskv.save then pcall(fskv.save) end
-        end
-    end
-end
-
 return M

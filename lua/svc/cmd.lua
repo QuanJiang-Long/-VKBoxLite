@@ -128,21 +128,9 @@ local function reg_cmds()
         M.reply("RET:CFG=OK")
     end)
 
-    M.reg("R:SNIFFCFG", function()
-        M.reply("RET:SNIFFCFG=" .. jencode({ cfg = cfgstore.load_sniff(), src = "fskv" }))
-    end)
-
-    M.reg("W:SNIFFCFG", function(arg)
-        local t = jdecode(arg)
-        if not t then return M.reply("RET:FAIL:SNIFFCFG:bad json") end
-        local ok, err = cfgstore.save_sniff(t)
-        if not ok then return M.reply("RET:FAIL:SNIFFCFG:" .. tostring(err)) end
-        if mon.is_running() then
-            mon.stop()
-            mon.start()
-        end
-        M.reply("RET:SNIFFCFG=OK")
-    end)
+    -- R:SNIFFCFG / W:SNIFFCFG / W:WRITE / W:WRITEJ / R:IOTSTAT / R:POLL /
+    -- W:RST 已删除：前端零调用，且分别被 R:REG+W:REG / MQTT 下行写 /
+    -- R:STAT 的各段完全覆盖。写结果看 R:STAT 的 write 段，不另立指令
 
     M.reg("R:REG", function()
         M.reply("RET:REG=" .. jencode(poll.get_regs()))
@@ -197,36 +185,6 @@ local function reg_cmds()
         M.reply("RET:PULLCFG=" .. jencode(iot.pull_status()))
     end)
 
-    M.reg("W:WRITE", function(arg)
-        local slave, addr, value = arg:match("^%s*(%d+)%s*,%s*(%d+)%s*,%s*(%-?%d+)%s*$")
-        if not slave then return M.reply("RET:FAIL:WRITE:use <slave>,<addr>,<value>") end
-        local ok, err = poll.enqueue_write({
-            slave = tonumber(slave), addr = tonumber(addr), value = tonumber(value),
-        })
-        if ok then M.reply("RET:WRITE=OK") else M.reply("RET:FAIL:WRITE:" .. tostring(err)) end
-    end)
-
-    M.reg("W:WRITEJ", function(arg)
-        local t = jdecode(arg)
-        if not t or type(t) ~= "table" then return M.reply("RET:FAIL:WRITEJ:bad json") end
-        local items = t[1] and t or { t }
-        local nok, nfail = 0, 0
-        for _, it in ipairs(items) do
-            local addr = tonumber(it.addr or it.address or it.reg)
-            local slave = tonumber(it.slave) or (cfgstore.load_poll().slave or cfg.SLAVE_ADDR)
-            if it.values and type(it.values) == "table" then
-                local vals = {}
-                for _, v in ipairs(it.values) do vals[#vals + 1] = tonumber(v) end
-                if poll.enqueue_write({ slave = slave, addr = addr, values = vals }) then nok = nok + 1 else nfail = nfail + 1 end
-            elseif addr and (it.value or it.val) then
-                if poll.enqueue_write({ slave = slave, addr = addr, value = tonumber(it.value or it.val) }) then nok = nok + 1 else nfail = nfail + 1 end
-            else
-                nfail = nfail + 1
-            end
-        end
-        M.reply(string.format("RET:WRITEJ=OK:%d:%d", nok, nfail))
-    end)
-
     -- R:MQTT: 前端读 r.cfg(手动档表单) / r.auto_pass(首页凭证密码) /
     -- r.manual_on(当前档次) / r.pub / r.sub(实际生效成品) / r.ready / r.err / r.stat
     M.reg("R:MQTT", function()
@@ -263,21 +221,6 @@ local function reg_cmds()
         if not iot then return M.reply("RET:FAIL:REPORT:no iot") end
         iot.report_now()
         M.reply("RET:REPORT=OK")
-    end)
-
-    -- R:IOTSTAT: 前端 MQTT 页读 connected/published/failed/last_err
-    M.reg("R:IOTSTAT", function()
-        if not iot then return M.reply("RET:FAIL:IOTSTAT:no iot") end
-        local s = iot.status()
-        M.reply("RET:IOTSTAT=" .. jencode({
-            connected = s.connected,
-            published = s.published,
-            failed = s.failed,
-            last_err = s.last_err,
-            last_pub = s.last_pub,
-            subscribed = s.subscribed,
-            backoff = s.backoff,
-        }))
     end)
 
     -- R:NET / R:MEM: 网络与内存诊断(并入 R:STAT, 保留独立指令便于现场排查)
@@ -367,26 +310,11 @@ local function reg_cmds()
             r.rx_hex == "" and "(空)" or r.rx_hex))
     end)
 
-    M.reg("R:POLL", function()
-        M.reply("RET:POLL=" .. jencode(poll.status()))
-    end)
-
     M.reg("W:BOOTMODE", function(arg)
         local m = trim(arg)
         local ok, err = cfgstore.save_sys({ boot_mode = m })
         if not ok then return M.reply("RET:FAIL:BOOTMODE:" .. tostring(err)) end
         M.reply("RET:BOOTMODE=OK")
-    end)
-
-    M.reg("W:RST", function()
-        cfgstore.reset()
-        mqtt_cfg.reset()
-        collector.clear()
-        if poll.is_running() then
-            poll.stop()
-            poll.start()
-        end
-        M.reply("RET:RST=OK")
     end)
 end
 

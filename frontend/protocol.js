@@ -11,9 +11,7 @@
   const Enc = {
     // 读设备信息（SN/IMEI/ICCID/信号/版本/项目/服务器/波特率/从机/寄存器数）
     info: () => 'R:INFO',
-    // 读 SN（原有产线指令）
-    sn: () => 'R:SN',
-    // 读芯片身份（原有产线指令）
+    // 读芯片身份（产线指令，imei/uid/sn/state/lock 一行拿全）
     id: () => 'R:ID',
 
     // ---- 模式控制 ----
@@ -24,8 +22,6 @@
     // ---- 485 配置 ----
     cfg:        ()     => 'R:CFG',                      // 读 poll 配置
     writeCfg:   (obj)  => 'W:CFG=' + JSON.stringify(obj),
-    sniffCfg:   ()     => 'R:SNIFFCFG',                 // 读 sniff 配置
-    writeSniffCfg: (o) => 'W:SNIFFCFG=' + JSON.stringify(o),
 
     // ---- 寄存器表 ----
     reg:      ()   => 'R:REG',
@@ -39,17 +35,12 @@
     pullCfg:     ()  => 'W:PULLCFG',        // 发起拉取（立即应答 started）
     pullCfgStat: ()  => 'R:PULLCFG',        // 查拉取状态
 
-    // ---- 写寄存器（经设备写事务队列注入 poll 任务）----
-    write:   (slave, addr, value) => 'W:WRITE=' + slave + ',' + addr + ',' + value,
-    writeJ:  (o) => 'W:WRITEJ=' + JSON.stringify(o),
-
     // ---- MQTT ----
     mqtt:    ()   => 'R:MQTT',
     writeMqtt: (o) => 'W:MQTT=' + JSON.stringify(o),
     // 只重连、不动配置：设备侧等价于 iot.kick()（销毁 client 后按 backoff=1 立刻重连）
     mqttReconnect: () => 'W:MQTTRC',
     report:  ()   => 'R:REPORT',
-    iotStat: ()   => 'R:IOTSTAT',
 
     // ---- sniff 结果 ----
     frames:  (n)  => 'R:FRAMES' + (n ? '=' + n : ''),   // 最近解译帧
@@ -59,12 +50,6 @@
     // ---- 总线诊断 ----
     sniffBus: (ms) => 'R:SNIFF=' + (ms || 3000),         // 静默侦听总线
     txHex:    (hex) => 'W:TX=' + hex,                    // 手动发原始帧
-
-    // ---- 手动采集 ----
-    poll: () => 'R:POLL',
-
-    // ---- 恢复默认 ----
-    rst: () => 'W:RST'
   };
 
   // ---------- 解码：设备 -> 前端 ----------

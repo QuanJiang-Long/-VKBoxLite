@@ -242,11 +242,8 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 | 保存 poll 配置 | `W:CFG={json}` | `RET:CFG=OK` / `RET:FAIL:CFG:原因` | 串口参数变化自动重启轮询任务；间隔/寄存器表热更新 |
 | 读寄存器表 | `R:REG` | `RET:REG=[json]` | `[{addr,count,name,alias,dtype}]` |
 | 保存寄存器表 | `W:REG=[json]` | `RET:REG=OK` | 校验通过后热加载 |
-| 读 sniff 配置 | `R:SNIFFCFG` | `RET:SNIFFCFG={json}` | 旁听模式的串口参数 |
-| 保存 sniff 配置 | `W:SNIFFCFG={json}` | `RET:SNIFFCFG=OK` | 旁听运行中会自动重启生效 |
 | 读实时值 | `R:VAL` | `RET:VAL=[json]` | `[{name,addr,value,hex,ts,dtype}]`，设备已解好值 |
-| 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,mqtt}` 全量状态；`mqtt` 段另带 `push_n/push_seen/push_err/autosaved/autosave_at`（平台主动重推横幅用，见下） |
-| 恢复默认配置 | `W:RST` | `RET:RST=OK` | 清除设备保存的 485/MQTT 配置 |
+| 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,mqtt}` 全量状态；`mqtt` 段另带 `push_n/push_seen/push_err/autosaved/autosave_at`（平台主动重推横幅用，见下）；`write` 段是写队列的 queued/done/fail |
 
 ### 平台配置拉取
 
@@ -412,15 +409,19 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
 
 ### 写寄存器
 
-| 前端动作 | 指令 | 应答 | 说明 |
-|---|---|---|---|
-| 写单寄存器 | `W:WRITE=<slave>,<addr>,<value>` | `RET:WRITE=OK` | 功能码 06，入写事务队列 |
-| 写寄存器(JSON) | `W:WRITEJ={"slave":1,"addr":100,"value":2201}` | `RET:WRITEJ=OK` | 同上 |
+公开入口只有两个：前端「写寄存器」和平台 MQTT 下发的写指令，两者都走设备侧同一套写事务队列。
 
-> 写事务经**注入轮询任务**实现：总线唯一主人永远是 poll 任务，写请求不直接碰 UART，
-> 只是在两个寄存器事务之间的安全点优先排空队列。不需要 pause/resume 握手，
-> 也不存在接收回调被外部覆盖导致轮询永远超时的风险。
-> 写前需先 `W:MODE=poll`；队列上限 8 笔，满时返回 `RET:FAIL:WRITE:写队列已满(8), 稍后重试`。
+> 写事务经**注入**实现：总线唯一主人有时是 poll 任务、有时是独立 worker。
+> 轮询在跑时，写请求在两条寄存器事务之间的安全点优先排空；轮询没跑时
+> （idle/sniff 档）由 worker 兜着发，并由 `ensure_uart()` 补上串口初始化
+> —— 那条路上 `poll.start()` 从没跑过。
+> 不需要 pause/resume 握手，也不存在接收回调被外部覆盖导致轮询永远超时的风险。
+> **`enqueue_write` 返回 true 只代表"进队了"**，发送结果看 `R:STAT` 的 `write` 段
+> （queued/done/fail）；设备日志是 `downlink write: queued=N rejected=M`。
+> 队列上限 8 笔，满时回 `RET:FAIL:WRITE:写队列已满(8), 稍后重试`。
+>
+> `W:WRITE`/`W:WRITEJ` 两条指令已删除：字段名与 MQTT 下行解析完全一致，属重复实现，
+> 且前端从来只走 `W:CFG`/`W:REG` 与「写寄存器」按钮。
 
 ### MQTT
 
@@ -429,8 +430,7 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
 | 读 MQTT 配置+状态 | `R:MQTT` | `RET:MQTT={json}` | `{cfg,auto_pass,manual_on,pub,sub,ready,err,stat}`。`cfg`=手动档原值（表单回填），`auto_pass`=首页那份凭证密码，`manual_on`=当前档位，`pub`/`sub`=当前档次实际生效的成品 topic |
 | 保存 MQTT 配置 | `W:MQTT={json}` | `RET:MQTT=OK` | 含 `manual_on`；保存后自动断开重连。设备端先清后写，不做合并 |
 | 只重连不动配置 | `W:MQTTRC` | `RET:MQTTRC=OK` | 等价设备侧 `iot.kick()`，改完参数想立即生效又不想整份覆盖时用 |
-| 立即上报一次 | `R:REPORT` | `RET:REPORT=OK` | 调试用 |
-| 读上报状态 | `R:IOTSTAT` | `RET:IOTSTAT={json}` | 连接/序号/已上报/失败/错误 |
+| 立即上报一次 | `R:REPORT` | `RET:REPORT=OK` | 调试用。连接/序号/已上报/失败/错误都在 `R:STAT` 的 `mqtt` 段，不再单设指令 |
 
 > MQTT 配置页按钮顺序：**恢复默认** / **立即上报一次** ‖ **重连** / **保存**。
 > 「保存」**只在打开「手动配置」时才显示**（自动档下没有可保存的东西，连行一起藏掉）。
@@ -450,13 +450,11 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
 | 应用推断结果 | `W:APPLYINFER` | `RET:APPLYINFER=OK` | 把推断出的寄存器表写入 poll 配置 |
 | 静默侦听总线 | `R:SNIFF=ms` | `RET:SNIFF=帧数` | ms 500~15000，不切模式纯收听 |
 | 手动发帧 | `W:TX=<hex>` | `RET:TX=OK` | 验证发送链路（DE 自动切换） |
-| 手动采一轮 | `R:POLL` | `RET:POLL=OK` | 调试用 |
 
 ### 产线 SN 指令（原有，本工具不使用）
 
 | 指令 | 应答 | 说明 |
 |---|---|---|
-| `R:SN` | `RET:SN=xxx` | 读 SN |
 | `R:ID` | `RET:ID=imei:..;uid:..;sn:..;state:..;lock:..` | 读身份 |
 | `W:SN=xxx[,FORCE]` | `RET:OK` | **烧 SN，仅产线工具使用** |
 | `C:SN` / `LOCK:SN` / `UNLOCK:SN` | `RET:OK` | 清号 / 锁定 / 解锁 |
@@ -533,7 +531,7 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
 - **单从机模型**：寄存器表没有从机地址字段，poll 全部访问 `config.SLAVE_ADDR`（默认 1）；
   多从机需在寄存器表加 `slave` 字段并改 `mbus_poll.lua` 组帧处；
 - **sniff 暂不上报 MQTT**：本期只本地存储 + 前端查看，后续再考虑；
-- `R:INFO` 需要较新固件；老固件会自动回退 `R:ID`+`R:SN`（只填 SN/IMEI）；
+- `R:INFO` 需要较新固件；老固件会自动回退 `R:ID`（只填 SN/IMEI/uid）；
 - ICCID/CSQ/RSRP 依赖 `mobile` 库，未插卡或未注册网络时为空；
 - 写寄存器目前只支持功能码 06（单寄存器）；功能码 16（多寄存器）设备端
   `mbus_poll.enqueue_write_multi()` 已实现，前端指令后续补；

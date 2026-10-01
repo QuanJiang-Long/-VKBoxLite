@@ -153,14 +153,6 @@ function M.save(c)
     return true
 end
 
-function M.reset()
-    if fskv then
-        pcall(fskv.del, K_CFG)
-        kv_flush()
-    end
-    return M.normalize({})
-end
-
 -- {sn} 与 {id} 等价(都替换成设备 SN)。{sn} 是新默认模板用的写法,
 -- {id} 保留是为了兼容 fskv 里已存过的旧配置, 否则老配置会把字面 {id} 发出去
 local function has_sn_ph(s)
