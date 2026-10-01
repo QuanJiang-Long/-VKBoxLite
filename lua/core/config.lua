@@ -37,6 +37,16 @@ M.PLATFORM_GET_TOPIC = "/sys/thing/gw/config/get/%s"
 M.PLATFORM_POST_TOPIC = "/sys/thing/node/property/post/%s-1"
 -- U6 应用回执：msgId 必须与 D1 下发包里的一致，平台据此核销待下发登记
 M.PLATFORM_REPLY_TOPIC = "/sys/thing/gw/config/reply/%s"
+-- 另外 5 条固定 topic。原先存在 mqttcfg 里可配（前端 6 个 topic 输入框），
+-- 按"代码精简"要求删除配置项后改为写死常量：这 5 条改动概率极低，每配一条
+-- 就要在前端、mqttcfg.normalize、build_subs、effective 里各留一份逻辑。
+-- 发布/订阅仍可配（mqttcfg.pub_topic / sub_topic），那两条业务上真会改。
+-- hello 是拉配置时的自述通道；func/pset/pget 是平台三类下行的订阅通道，
+-- 少订一条平台那类下发就永远收不到且无报错。
+M.PLATFORM_HELLO_TOPIC = "/sys/thing/gw/config/hello/%s"
+M.PLATFORM_FUNC_TOPIC = "/sys/thing/gw/function/get/%s"
+M.PLATFORM_PSET_TOPIC = "/sys/thing/gw/property/set/%s"
+M.PLATFORM_PGET_TOPIC = "/sys/thing/gw/property/get/%s"
 M.PULL_TIMEOUT_MS = 15000
 -- 拉取前自动连 MQTT 的等待上限(设备可能刚上电, 网络还没就绪)
 M.PULL_CONNECT_MS = 20000

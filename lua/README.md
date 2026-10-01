@@ -58,11 +58,24 @@ Q2: W:MODE=poll → ctrl → poll(总线唯一主人) → parse_frame/parse_valu
 Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配对 → push_frame
 
 下行: 平台 WRITE → recv 挂起 → handle_downlink → resolve_addr → poll.enqueue_write
-      （idle 时一次性写任务排空，sniff 占线则中止）
+      （idle 时一次性 worker 排空，sniff 占线则中止）
 
 烧号: W:SN=xxx → prov → sn.write(锁检查/validate/Luhn) → fskv save + 回读
-      → on_change → MQTT 自动启动
+       → on_change → MQTT 自动启动
 ```
+
+> ⚠️ **写队列是异步的**：`poll.enqueue_write` 返回 true 只代表"进队了"，不代表"已发到总线"。
+> 发送由 `poll_task`（轮询在跑时）或 `worker`（轮询没跑时被拉起）完成，结果看
+> `poll.write_status()` 的 `done`/`wfail`（前端经 `ctrl.status().write` 取）。
+> 设备日志是 `downlink write: queued=N rejected=M`，**不是 `ok=N`**——后者会让现场
+> 以为写成功了，实际可能还压在队列里。
+>
+> `worker` 这道闸曾长期是错的：它跟着 `poll_task` 一起判 `running`，而 idle 档
+> `running` 恒为 false，于是 worker 一启动就 return，写请求静静躺在 `writeQ` 里，
+> 直到某次切到 poll 模式才被 `poll_task` 顺带发出去（陈旧指令延后生效，比不生效更危险）。
+> 现已改成 worker 用自己的 `gen` 守卫：`running` 只是 `poll_task` 的生命周期标志，
+> 管不到 worker。同理 `do_transaction` 在轮询没跑时会先 `ensure_uart()`——那条路上
+> `M.start()` 从没跑过，不补 setup 的话 `uart.write` 等于发到空气里。
 
 ## 前端指令（VUART_0，115200 8N1，RET: 前缀应答）
 
@@ -146,8 +159,11 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 **先看这一行**——每次建连前都会把 CONNECT 的关键参数打全：
 
 ```
-I/user.iot connect: host=dz.voltkun.com port=1883 ssl=false clientId=11802026092600016 user=(无) clean=true
+I/user.iot connect: host=dz.voltkun.com port=1883 ssl=false clientId=11802026092600016_ user=11802026092600016 clean=true
 ```
+
+B 模型下 `clientId` = **SN 加一个下划线**、`user` = **裸 SN**。
+若 `user=(无)` 说明代码没兜底，被拒时先看这一行确认到底发了什么。
 
 ### CONACK 返回码
 
@@ -164,17 +180,39 @@ I/user.iot connect: host=dz.voltkun.com port=1883 ssl=false clientId=11802026092
 
 ### 0x05 未授权的排查顺序
 
-`0x05` **不等于"必须补用户名密码"**。按以下顺序查：
+本平台（`dz.voltkun.com`）走 **B 模型鉴权：按 username 查凭证表 + 明文比对密码**。
 
-1. **clientId 格式**
-   平台要求带前缀后缀的格式，例如 `S&<SN>&12&1`，**不接受裸 SN**。
-   `client_id` 留空时本框架就按这个格式拼（`iot.lua` 的 `default_client_id`），
-   不需要每台手填；填了平台给的特殊格式才用手填值。
-   → 仍被拒再看 2/3/4。
-2. **地址/端口**：确认平台给的是 MQTT 端口（常见 1883 / 8883(TLS) / 自定义），
-   不是 Web 端口。
-3. **设备是否已注册**：平台可能只放行预先录入的设备，按 clientId 或 SN 白名单。
-4. **用户名密码**：确实有账号密码时才需要补。
+| 字段 | 取值 | 你这台设备 |
+|---|---|---|
+| `clientId` | 设备 SN + 下划线（留空时自动拼） | `11802026092600016_` |
+| `username` | 设备 SN（凭证页「MQTT用户名」填的就是裸 SN） | `11802026092600016` |
+| `password` | 平台签发的凭证密码，默认 `VKBOXGW2026KEY`（`mqttcfg.default.pass`） | 同左 |
+
+平台签发的凭证就是 `SN_` 这个形状 —— **下划线后面是空的，不带 ProductId**。
+`&12&1`、`_12` 之类的后缀都不要自己拼，产品不同那段就不同。
+
+设备侧两个值都不写死 SN：`client_id`/`user` 留空时由 `try_connect` 兜底
+（`default_client_id()` 拼 `SN_`，username 直接用 SN），换一台烧了别的 SN
+的设备自动跟着变。
+
+> **`S&<SN>&12&1` 那套已废弃。** 那是平台 4 段设备格式的 clientId，
+> 用户名得配 `gw_{sn}`，且 `&12&1` 不是固定值（平台侧按产品/用户动态签发）。
+> 拼死只会对不上，现已改为 B 模型。若要用回别的格式，
+> 去「MQTT配置」页把 **ClientID** 填成平台给的值即可（优先于兜底）。
+
+排查顺序：
+
+1. **password**：两档各一份。自动档改 `mqttcfg.default.auto.pass` 或在前端
+   首页「MQTT凭证密码」填；手动档在「MQTT配置」页「密码」填。
+   两份互不影响，改一个不会冲掉另一个。
+2. **设备是否已注册**：平台按 username（=SN）查凭证表，
+   凭证状态必须是「生效中」且未过期。新烧的 SN 若平台侧没录，一样 0x05。
+3. **clientId/username 是否被手填过**：若前端填过固定值，
+   换 SN 后不会自动跟着变，需要清空恢复兜底。
+
+> **证书模式已取消。** VKBox 早期文档描述过"出厂预置 TLS 证书、双向校验、
+> 8883 端口"，但本平台实际发放的是账号密码凭证（`dz.voltkun.com:8883`
+> 实测不对公网开放），故不做 `W:CERT=`，`ssl` 恒为 `false`。
 
 ### 连不上服务器（根本没发出 CONNECT）
 
@@ -248,9 +286,8 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 
 平台  ──publish────────────────▶  设备  /sys/thing/gw/config/get/{SN}  （连上即订阅）
 
-前端  回填 485 表单 + 寄存器表 + MQTT 6 个 topic 输入框，
-       并强制关掉「手动配置」——topic 换成平台给的那套成品
-设备  auto_apply 落盘生效 → iot.reply_config()（都不需要用户操作）
+前端  回填 485 表单 + 寄存器表 + MQTT 可编辑的发布/订阅 2 个 topic 输入框，
+       并强制关掉「手动配置」——topic 换成平台给的那套成品设备  auto_apply 落盘生效 → iot.reply_config()（都不需要用户操作）
 设备  ──publish────────────────▶  平台  /sys/thing/gw/config/reply/{SN}
        {"msgId":<下发原值>,"code":200,"status":"ok","appliedTs":<now>}
 （「重连」按钮单独发 W:MQTTRC，只重连不动配置）
@@ -344,20 +381,36 @@ handle_downlink
 |---|---|---|
 | 上报（发布） | `/sys/thing/node/property/post/{sn}` | 数据面。模板写死 `-1` 后缀（子设备站位），`{sn}` = 设备 SN。**前端可改**（`mqttcfg.pub_topic`） |
 | 订阅（下行） | `/sys/thing/gw/config/get/{sn}` | 主下行通道：平台配置下发 + 普通指令都走它。**前端可改**（`mqttcfg.sub_topic`） |
-| hello | `/sys/thing/gw/config/hello/{sn}` | 拉取握手，`{sn}` = 设备 SN。**前端可改**（`mqttcfg.hello_topic`，「MQTT配置」页的 **hello Topic** 输入框），留空回落此默认 |
-| 服务调用 | `/sys/thing/gw/function/get/{sn}` | **前端可改**（`mqttcfg.func_topic`），原先写死在 `iot.build_subs()` 里 |
-| 属性设置 | `/sys/thing/gw/property/set/{sn}` | **前端可改**（`mqttcfg.pset_topic`），同上 |
-| 属性查询 | `/sys/thing/gw/property/get/{sn}` | **前端可改**（`mqttcfg.pget_topic`），同上 |
+| hello | `/sys/thing/gw/config/hello/{sn}` | 拉取握手，`{sn}` = 设备 SN。**固定平台常量**（`cfg.PLATFORM_HELLO_TOPIC`），不可改 |
+| 服务调用 | `/sys/thing/gw/function/get/{sn}` | 平台三类下行之一，conack 时订阅。**固定平台常量**（`cfg.PLATFORM_FUNC_TOPIC`） |
+| 属性设置 | `/sys/thing/gw/property/set/{sn}` | 同上（`cfg.PLATFORM_PSET_TOPIC`） |
+| 属性查询 | `/sys/thing/gw/property/get/{sn}` | 同上（`cfg.PLATFORM_PGET_TOPIC`） |
 | 配置下发 | `/sys/thing/gw/config/get/{SN}` | conack 时与下行 topic 一起订阅 |
 | 上报（平台） | `/sys/thing/node/property/post/{SN}-1` | 拉取结果里回给前端展示，当前不订阅 |
 | 下行命令（平台） | `/sys/thing/gw/function/get/{SN}` | 拉取结果里回给前端展示，当前不订阅 |
 
-> 上表 6 条带 `{sn}` 的是**模板**，页面显示的是代入 SN 后的成品。前端「MQTT配置」页
-> 自动模式下只读显示成品，**手动配置** 开关打开后可改模板（改 hello/pub/sub 三项的
-> 同一套开关，不另做一套）。
-> 6 条模板都存在 `mqtt_cfg` 这一条 fskv 里，落盘上限已从 512 抬到 **2048**——原上限下
-> host(128)+clientId(128) 加上 6 条 topic 最长会到 673B，直接 `too large` 拒存。
-> 缺字段的键用设备默认值补，所以老固件/老配置只带 3 个键也能正常加载。
+> 上表只有 **发布 / 订阅 2 条**带 `{sn}` 的是模板、可从前端改；其余 4 条
+> （hello / 服务调用 / 属性设置 / 属性查询）已按"代码精简"从 `mqttcfg` 配置项
+> 里删除，改为 `core/config.lua` 的 `PLATFORM_*_TOPIC` 固定常量。这 4 条平台侧
+> 几乎不会变，每配一条就要在 normalize、`build_subs`、`effective`、前端表单里
+> 各留一份逻辑。**发布/订阅行为完全不变**，只是不能再从界面改。
+> 2 条模板都存在 `mqtt_cfg` 这一条 fskv 里，落盘上限已从 512 抬到 **2048**——
+> 原上限下 host(128)+clientId(128) 就会到 300B+，加上 2 条 topic 仍可能超。
+> 缺字段的键用设备默认值补，所以老固件/老配置（带 hello/func/pset/pget 键）
+> 也能正常加载，多出来的键被忽略。
+>
+> #### `mqtt_cfg` 的字段分档
+>
+> | 分组 | 字段 | 说明 |
+> |---|---|---|
+> | 共用 | `host` `port` `ssl` `client_id` `interval_s` `qos` `allow_no_sn` `keep_session` | 自动档和手动档建连都读这份 |
+> | 手动档 | `user` `pass` `pub_topic` `sub_topic` | 只有 `manual_on` 为真时才用。置假时 `normalize` 会把它们清空，回到默认模板 |
+> | 自动档 | `auto.pass` | 首页「MQTT凭证密码」。`profile()` 里用户名固定留空 → `try_connect` 兜底填 SN |
+> | 开关 | `manual_on` | 当前档位。`W:MQTT` 下发；`R:MQTT` 的 `manual_on` / `auto_pass` 给前端回显 |
+>
+> 前端两页分别写不同键：首页「MQTT 服务器」写 `auto_pass`（+ 共用的地址/端口/ClientID），
+> 「MQTT配置」页写 `user`/`pass`/`pub_topic`/`sub_topic` + `manual_on`。
+> **两个密码必须分成两个键**，否则前端无法表达"这次改的是哪一档"，改一个就会把另一个冲掉。
 
 > 业务订阅模板默认与「配置下发」topic 同形，所以 conack 时会去重（同一 topic 只订一次），
 > 且下行分流只在拉取状态机 `waiting` 时才把该 topic 的报文当配置包收，其余按普通指令解析。
@@ -374,11 +427,11 @@ handle_downlink
 |---|---|
 | `/sys/thing/gw/config/get/{SN}` | **无条件订阅**。业务 `sub_topic` 被用户改到别处时，这条仍要订，否则拉取链路断了 |
 | `{sub}` | 用户自配的业务订阅（改过 sub_topic 时才会与上一条不同） |
-| `{func}` | 服务调用（`mqttcfg.func_topic`） |
-| `{pset}` | 属性设置（`mqttcfg.pset_topic`） |
-| `{pget}` | 属性查询（`mqttcfg.pget_topic`） |
+| `/sys/thing/gw/function/get/{SN}` | 服务调用，固定平台常量（`cfg.PLATFORM_FUNC_TOPIC`） |
+| `/sys/thing/gw/property/set/{SN}` | 属性设置，固定平台常量（`cfg.PLATFORM_PSET_TOPIC`） |
+| `/sys/thing/gw/property/get/{SN}` | 属性查询，固定平台常量（`cfg.PLATFORM_PGET_TOPIC`） |
 
-后三条**读配置而不是写死**：用户改过这三条模板，`build_subs()` 就按改的拼，
+后三条**读固定常量而不是配置**：这三条模型侧也改不了，没必要给它留配置项。
 去重逻辑不变（与 `config/get` 同形时仍只订一次）。
 
 清单全量回在 `R:MQTT` 的 `stat.subs`（数组），前端「连接与上报状态」的 **下行订阅** 一栏显示。

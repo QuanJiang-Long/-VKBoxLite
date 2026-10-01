@@ -35,7 +35,7 @@ local function reset_state()
         client = nil, dirty = false, backoff = 1,
         published = 0, failed = 0, replied = 0, kick_flag = false,
         recv_pending = nil, pub = nil, sub = nil, subs = nil, device_id = nil,
-        last_pub = 0, last_err = nil, client_id = nil,
+        last_pub = 0, last_err = nil, client_id = nil, user = nil,
         reject_reason = nil,
         pull = {
             state = "idle", msg = "", result = nil, deadline = 0,
@@ -63,13 +63,13 @@ local function device_id()
     return nil
 end
 
--- clientId 留空时的默认拼法。平台不认裸 SN —— 实测发纯 SN 与发
--- S&<SN>&12&1 的差别就是 CONACK 0x00 与 0x05, 而格式不在任何一处
--- 校验能覆盖的范围内(它是"格式对但内容不被接受"), 只能在这里兜住。
--- 用户填了 client_id 就一律用填的, 这里只兜空值。
+-- clientId 留空时的默认值: 设备 SN 加一个下划线。
+-- 平台签发的凭证就是 "SN_" 这个形状(下划线后面是空的), 不带 ProductId ——
+-- 产品不同那段就不同, 写死必然对不上。username 则是裸 SN, 见 try_connect。
+-- 填了 client_id 就用手填值, 这里只兜空值。
 local function default_client_id(did)
     if not did or did == "" then return did end
-    return "S&" .. did .. "&12&1"
+    return did .. "_"
 end
 
 local function get_topic()
@@ -174,14 +174,8 @@ end
 --      否则 handle_downlink 永远等不到 configSnapshot。
 --   ② function/get + property/set + property/get 是平台侧另外三类下行，
 --      也走 gw 前缀，不订就收不到服务调用/属性设置/全量查询。
---      这三条的模板现在走 mqttcfg（前端可改），不再写死。
+--      这三条已按"代码精简"写死成 core/config.lua 的平台常量，不再可配。
 --   ③ 与 S.sub 同形的先去重再订，同一个 topic 订两遍纯属浪费。
-local function sub_sn(s, did)
-    if not s or s == "" then return nil end
-    if not did or did == "" then return s end
-    return (s:gsub("{sn}", did):gsub("{id}", did))
-end
-
 local function build_subs()
     local subs = {}
     local function add(t)
@@ -194,17 +188,13 @@ local function build_subs()
     local did = S.device_id
     if did and did ~= "" then
         add(string.format(cfg.PLATFORM_GET_TOPIC, did))
+        -- 另外 3 条 gw 下行订阅，固定平台常量。少订一条 = 平台那类
+        -- 下发永远收不到且无报错，所以这三行一条都不能删
+        add(string.format(cfg.PLATFORM_FUNC_TOPIC, did))
+        add(string.format(cfg.PLATFORM_PSET_TOPIC, did))
+        add(string.format(cfg.PLATFORM_PGET_TOPIC, did))
     end
     add(S.sub)
-    -- 另外 3 条 gw 下行订阅。原先写死在这里, 页面改不了; 现在由 mqttcfg
-    -- 的 func/pset/pget_topic 提供(前端「MQTT配置」页可改), 拼法与其他
-    -- topic 一致: 模板里的 {sn}/{id} 换成设备 SN
-    if did and did ~= "" then
-        local mc = mqttcfg.load()
-        add(sub_sn(mc.func_topic, did))
-        add(sub_sn(mc.pset_topic, did))
-        add(sub_sn(mc.pget_topic, did))
-    end
     return subs
 end
 
@@ -313,11 +303,18 @@ local function try_connect()
     S.device_id = did
     -- 无 SN 时把 "unknown" 视作无 id: topic 含 {id} 会被拒, 不会把字面
     -- unknown 拼进 topic(与原工程一致)
-    local pub, sub, terr = mqttcfg.resolve_topics(did == "unknown" and nil or did)
-    if not pub then return false, terr end
-    S.pub, S.sub = pub, sub
+    -- 凭证和 topic 按 manual_on 取: 手动档用前端填的, 自动档用 SN 用户名
+    -- + 首页那份 MQTT凭证密码 + 默认模板(见 mqttcfg.profile)
+    local prof, terr = mqttcfg.profile(did == "unknown" and nil or did)
+    if not prof then return false, terr end
+    S.pub, S.sub = prof.pub, prof.sub
+    -- B 模型: clientId = "SN_"(见 default_client_id), username = 裸 SN,
+    -- 密码是平台签发的凭证密码。
+    -- 填了 client_id/user 才用手填值, 否则一律按平台格式兜底
     local cid = c.client_id ~= "" and c.client_id or default_client_id(did)
     S.client_id = cid
+    local user = prof.user ~= "" and prof.user or did
+    S.user = user
     -- Air780EP Lua 堆约 300KB, mqtt.create 需要连续块; 建连前先 GC + 记录堆
     collectgarbage("collect")
     local h1, h2 = heap_info()
@@ -325,16 +322,17 @@ local function try_connect()
     -- 连之前把 CONNECT 关键参数打全。平台回 CONACK 0x05(未授权)时,
     -- 现场直接对照这行看 clientId/用户名发了什么, 不用猜
     log.info("iot", string.format("connect: host=%s port=%d ssl=%s clientId=%s user=%s clean=%s",
-        c.host, c.port, tostring(c.ssl), cid,
-        c.user ~= "" and c.user or "(无)", tostring(not c.keep_session)))
+        c.host, c.port, tostring(c.ssl), cid, user, tostring(not c.keep_session)))
     local okc, cli = pcall(mqtt.create, nil, c.host, c.port, c.ssl)
     if not okc or not cli then return false, "mqtt.create 失败: " .. tostring(cli) end
     S.client = cli
     -- 空串要传 nil: auth() 只判指针非空就认为"有用户名", 会把零长
     -- 用户名字段塞进 CONNECT 包, 部分平台(EMQX/NanoMQ)据此判未授权,
     -- 回 CONACK 0x05。绝大多数平台只认地址+端口, 不能白送一个空用户名。
-    pcall(function() cli:auth(cid, c.user ~= "" and c.user or nil,
-                              c.pass ~= "" and c.pass or nil, not c.keep_session) end)
+    -- 但本平台(B 模型)必须带 username = {sn}, 所以 user 在上面已经兜底成 SN,
+    -- 到这里必然非空, 不会触发上面那个坑
+    pcall(function() cli:auth(cid, user,
+                              prof.pass ~= "" and prof.pass or nil, not c.keep_session) end)
     pcall(function() cli:keepalive(60) end)
     pcall(function() cli:autoreconn(false) end)
     local okon, eon = pcall(cli.on, cli, on_mqtt)
@@ -377,7 +375,10 @@ end
 
 local function downlink_write(items)
     local ok, poll = pcall(require, "bus/poll")
-    if not ok or not poll then return 0, 0 end
+    if not ok or not poll then
+        log.error("iot", "downlink write: bus/poll 不可用")
+        return 0, 0
+    end
     local okc, c = pcall(cfgstore.load_poll)
     local regs = okc and c and c.regs or {}
     -- 默认从机地址只读一次: 挂在循环里等于每条缺 slave 的下行都重读一次 fskv+JSON
@@ -434,7 +435,11 @@ local function downlink_write(items)
             log.warn("iot", "write item unresolvable:", tostring(dkey))
         end
     end
-    log.info("iot", "downlink write: ok=" .. nok .. " fail=" .. nfail)
+    -- ok 只代表"入队成功"，不是"已发到总线"：enqueue_write 是异步的，
+    -- 真正发送由 poll_task / worker 完成，结果看 R:STAT 的 write.done/wfail。
+    -- 不能再写成 "downlink write: ok=N" —— 现场看到这句会以为写成功了，
+    -- 而实际可能还压在队列里
+    log.info("iot", string.format("downlink write: queued=%d rejected=%d", nok, nfail))
     return nok, nfail
 end
 
@@ -635,7 +640,11 @@ local function handle_downlink(topic, payload)
     end
     if t.value or t.values or t.val or t.data then
         downlink_write({ t })
+        return
     end
+    -- 走到这里说明报文形状一个都不认识。以前是静默 return，平台以为发了、
+    -- 设备什么都没干、日志一片空白 —— 现场只能靠猜。至少把收到的原文打出来
+    log.warn("iot", "downlink unrecognized, no action: " .. tostring(payload))
 end
 
 -- 平台配置拉取状态机。
@@ -667,11 +676,11 @@ function M.pull_status()
         r.poll = p.result.poll
         r.skipped = p.result.skipped
         r.renamed = p.result.renamed
-        -- 三个 topic 全带上, 前端自动模式要回显"设备拼好的"那三个
-        local t6 = pullcfg.topics(device_id())
+        -- 只带发布/订阅两个 topic 成品给前端回显（自动模式填输入框）。
+        -- hello/func/pset/pget 4 条已不可配，前端也没有对应输入框
+        local t2 = pullcfg.topics(device_id())
         r.mqtt = {
-            hello = t6 and t6.hello, pub = t6 and t6.pub, sub = t6 and t6.sub,
-            func = t6 and t6.func, pset = t6 and t6.pset, pget = t6 and t6.pget,
+            pub = t2 and t2.pub, sub = t2 and t2.sub,
         }
     end
     -- 回执状态单独给：前端据此提示"已回执"还是"平台还在重推"
@@ -713,10 +722,10 @@ local function pull_step()
         end
     elseif p.state == "helloing" then
         local did = device_id()
-        -- hello topic 走配置(mqttcfg.hello_topic, 前端可改);
-        -- 含 {sn} 却没 SN 时返回 nil, 这时候发出去会把字面 {sn} 当 SN 用
+        -- hello topic 走固定平台常量(不再可配); 无 SN 返回 nil,
+        -- 这时候发出去就是把不带 SN 的 topic 发给平台
         local topic = mqttcfg.resolve_hello(did)
-        if not topic then return pull_finish("fail", "hello topic 含 {sn} 但无 SN") end
+        if not topic then return pull_finish("fail", "hello topic 解析失败(无 SN)") end
         -- topicFormat/onboardingMode 是文档 U1 的"自述字段"，缺了平台可能
         -- 按旧版格式猜下行 topic 导致指令全丢且无报错。本链路就是找平台要
         -- 配置的那一路，固定报 v3/platform。
@@ -846,15 +855,20 @@ end
 
 function M.status()
     local c = mqttcfg.load()
+    -- 未建连时按当前档次兜底算一份, 与 try_connect 同源, 否则这两行在
+    -- 建连前是空的, 而 CONACK 0x05 时现场最需要看的正是这两个值
+    local prof = mqttcfg.profile(device_id())
     return {
         want_run = S.want_run,
         connected = S.connected,
         subscribed = S.subscribed,
         device_id = S.device_id,
-        client_id = S.client_id or c.client_id,
+        client_id = S.client_id or (c.client_id ~= "" and c.client_id or default_client_id(device_id())),
+        user = S.user or ((prof and prof.user ~= "" and prof.user) or device_id()),
         keep_session = c.keep_session,
-        pub = S.pub,
-        sub = S.sub,
+        manual_on = c.manual_on,
+        pub = S.pub or (prof and prof.pub),
+        sub = S.sub or (prof and prof.sub),
         host = c.host,
         port = c.port,
         interval_s = c.interval_s,

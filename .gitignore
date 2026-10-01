@@ -9,3 +9,9 @@ node_modules/
 # electron-builder 打包产物
 frontend/dist/
 dist/
+
+# DSH 工具自身的工作目录，与仓库无关
+.dsh-vision-toolkit/
+
+# 现场截图/沟通用的图片目录，不进仓库
+图/

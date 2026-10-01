@@ -227,18 +227,16 @@ local function reg_cmds()
         M.reply(string.format("RET:WRITEJ=OK:%d:%d", nok, nfail))
     end)
 
-    -- R:MQTT: 前端读 r.cfg / r.pub / r.sub / r.ready / r.err / r.stat
+    -- R:MQTT: 前端读 r.cfg(手动档表单) / r.auto_pass(首页凭证密码) /
+    -- r.manual_on(当前档次) / r.pub / r.sub(实际生效成品) / r.ready / r.err / r.stat
     M.reg("R:MQTT", function()
         local e = mqtt_cfg.effective(device_id_str())
         M.reply("RET:MQTT=" .. jencode({
             cfg = e.cfg,
+            auto_pass = e.cfg.auto and e.cfg.auto.pass or "",
+            manual_on = e.cfg.manual_on,
             pub = e.pub,
             sub = e.sub,
-            hello = e.hello,
-            -- 补齐的 3 条下行订阅成品(SN 已代入), 自动模式回显用
-            func = e.func,
-            pset = e.pset,
-            pget = e.pget,
             ready = e.ready,
             err = e.err,
             stat = iot and iot.status() or nil,
