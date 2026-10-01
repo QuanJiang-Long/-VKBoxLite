@@ -39,6 +39,21 @@ local function drain()
     end
 end
 
+-- 串口初始化。轮询没跑时 first transaction 会走到这里 —— MQTT 下行写和
+-- 前端 W:WRITE 都可能在 idle/sniff 档到来，而 setup 原先只在 M.start() 和
+-- raw_tx() 里做，那条路上 uart.write 等于发到空气里。
+-- 波特率没变时重复 setup 不打断在途事务，所以不必判 running
+local function ensure_uart()
+    if not lastCfg then M.reload_cfg() end
+    local ok, e = pcall(uart.setup, mbus.UART_ID, lastCfg and lastCfg.baud or cfg.BAUD,
+        lastCfg and lastCfg.databits or cfg.DATABITS,
+        lastCfg and lastCfg.stopbits or cfg.STOPBITS,
+        mbus.parity_to_uart(lastCfg and lastCfg.parity or cfg.PARITY))
+    if not ok then return false, "uart setup fail: " .. tostring(e) end
+    if gpio then pcall(gpio.setup, mbus.DE_PIN, 0) end
+    return true
+end
+
 local function on_receive(id, len)
     if id ~= mbus.UART_ID then return end
     if type(len) ~= "number" or len <= 0 then return end
@@ -79,6 +94,9 @@ local function do_transaction(frame, timeout_ms, exp_slave, exp_fc)
     -- timeout_ms 为 nil = 早返回模式: 用默认上限兜底, 收到响应立即返回
     -- (try_resp 命中就 return, 本来就不会等满)
     if timeout_ms == nil then timeout_ms = cfg.TIMEOUT_MS end
+    -- 写队列的 worker 可能在轮询没启动时被拉起(MQTT 下行 / W:WRITE),
+    -- 那条路上 M.start() 从没跑过, 串口还是裸的。轮询在跑时这里是空操作
+    if not running then pcall(ensure_uart) end
     drain()                                  -- 先清残留, 避免杂字节顶掉真响应
     respFlag, respData = true, nil
     reqSlave, reqFc = exp_slave, exp_fc
@@ -172,14 +190,26 @@ end
 -- stop 一定会 bumps gen，所以 gen 变化即代表"本次任务已作废"。
 -- sniff_yield = true 时旁听一旦接管总线就停手，不再发写帧
 -- (两种模式共用同一条物理串口, 抢着发会让旁听帧里混进写请求)
+--
+-- ⚠️ 故意不判 running：这是 poll_task 专用的排空函数，worker 那道闸门
+-- 千万别加在这里。详见 worker()
 local function drain_write_queue(mygen, sniff_yield)
     while #writeQ > 0 do
-        if gen ~= mygen or not running then return end
+        if gen ~= mygen then return end
         if sniff_yield and mon_running() then return end
         do_write(table.remove(writeQ, 1))
     end
 end
 
+-- 写队列的独立执行体，与 poll_task 分开。
+-- MQTT 下行来的写请求可能落在轮询没跑的时候(idle/sniff 档)，这时
+-- enqueue_write 会拉起本任务。
+-- 以前这里也判 running，而 idle 档 running 恒为 false，于是本任务刚启动
+-- 就 return，写请求静静躺在队列里：enqueue_write 返回 true、iot.lua 记
+-- "downlink write: ok=1"，总线上却一个字节都没发，直到某次切到 poll 模式
+-- 才被 poll_task 顺带发出去(陈旧的写指令延后生效，比不生效更危险)。
+-- running 只是 poll_task 的生命周期标志，管不到本任务，所以本任务用
+-- 自己的 gen 守卫；sniff 接管总线时同样避让
 local function worker()
     writeTaskRun = true
     drain_write_queue(gen, true)
@@ -245,12 +275,8 @@ end
 -- 返回 {tx_ok, tx_err, tx_hex, rx_len, rx_hex, parsed, ...}；失败返回 nil, 原因
 local function raw_tx(frame, timeout_ms, extra)
     if not running then
-        local ok, e = pcall(uart.setup, mbus.UART_ID, lastCfg and lastCfg.baud or cfg.BAUD,
-            lastCfg and lastCfg.databits or cfg.DATABITS,
-            lastCfg and lastCfg.stopbits or cfg.STOPBITS,
-            mbus.parity_to_uart(lastCfg and lastCfg.parity or cfg.PARITY))
-        if not ok then return nil, "uart setup fail: " .. tostring(e) end
-        if gpio then pcall(gpio.setup, mbus.DE_PIN, 0) end
+        local ok, err = ensure_uart()
+        if not ok then return nil, err end
     end
     drain()
     rawCap = ""
@@ -342,6 +368,10 @@ function M.needs_restart(c)
         or (c.slave or cfg.SLAVE_ADDR) ~= (lastCfg.slave or cfg.SLAVE_ADDR)
 end
 
+-- 入队即返回 true，执行是异步的：轮询在跑就由 poll_task 在两条寄存器事务
+-- 之间优先排空，没在跑就由 worker 兜着发(所以 idle 档也能写，不必先切
+-- poll)。调用方只能知道"进队了"，不能知道"发出去了"—— 写结果看
+-- write_status() 的 done/wfail
 function M.enqueue_write(w)
     if #writeQ >= cfg.WRITEQ_MAX then return false, "queue full" end
     wstat.queued = wstat.queued + 1
