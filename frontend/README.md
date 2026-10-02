@@ -346,12 +346,14 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 
 | 模式 | 按钮样子 | 用户名/密码/ClientID/发布Topic/订阅Topic | 「保存」按钮 |
 |---|---|---|---|
-| 自动 | 灰色「手动配置」 | **隐藏** | **隐藏** |
+| 自动 | 灰色「手动配置」 | **隐藏** | **显示** |
 | 手动 | 蓝色「关闭手动配置」 | 显示、可编辑 | 显示 |
 
 理由：自动档下这 5 个值全部归设备管（用户名固定 SN、密码取首页那份、Topic 用默认模板自动拼），摆在页面上只会让人以为"改了能生效"，而实际上保存也会把它们清掉。所以整行藏掉更诚实。
 
-实现靠 HTML 上的 `.manual-only` 类（5 个 `form-row` + 保存按钮），由 `body.mq-manual` 一个 class 统一控制显隐：
+**「保存」按钮两个档位都在**：自动档仍有共用项可改（地址/端口/TLS/上报间隔/会话管理/允许无 SN），没有保存入口这些改动就无处落地。`saveMqtt()` 本来就把 `pub_topic`/`sub_topic` 两个键在自动档下省掉不发（设备端 `normalize` 自动恢复默认模板），所以自动档点保存不会把手动档的 topic 写进去。
+
+实现靠 HTML 上的 `.manual-only` 类（5 个 `form-row`），由 `body.mq-manual` 一个 class 统一控制显隐：
 
 ```css
 body:not(.mq-manual) .manual-only{display:none !important;}
@@ -388,7 +390,7 @@ body.mq-manual .auto-only{display:none !important;}
 > 用户没有任何保存入口，所以关档这个动作本身就必须把指令发下去
 > （`writeManualMode(false)`）。否则设备永远停在手动档，刷新一下又变回手动档。
 
-> ⚠️ **副作用**：自动档下「上报周期 / 会话管理 / no_SN 建连」虽然仍可见，但 MQTT 页已无保存按钮。改这三个值后要从**首页的「保存并重连」**保存（`saveHomeMqtt` 会把这三个共用字段一起带走），或者打开手动配置再保存。
+> **自动档下「上报周期 / 会话管理 / no_SN 建连」改完直接点 MQTT 页的「保存」**即可（`saveMqtt()` 在自动档下会把 `pub_topic`/`sub_topic` 两个键省掉不发，设备端 `normalize` 自动恢复默认模板），也可以从首页的「保存并重连」保存（`saveHomeMqtt` 会把这三个共用字段一起带走）。
 
 #### 保存时的设备行为
 
