@@ -166,9 +166,9 @@ local function publish(force)
     return false
 end
 
--- conack 时的下行订阅清单（文档"订阅关系"）。
--- 平台下发恒用 gw 前缀，且每条末段都是目标裸 SN。
--- 三条要点：
+-- conack 时的订阅清单（文档"订阅关系"），按 manual_on 分两套：
+--
+-- 自动档：订 4 条 gw 平台前缀 + S.sub。三条要点：
 --   ① D1(/gw/config/get/{sn}) 必须无条件订上：它是"拉取配置"链路唯一的
 --      入口。业务 sub_topic 虽默认同形，但用户改到别处时不能跟着丢，
 --      否则 handle_downlink 永远等不到 configSnapshot。
@@ -176,6 +176,14 @@ end
 --      也走 gw 前缀，不订就收不到服务调用/属性设置/全量查询。
 --      这三条已按"代码精简"写死成 core/config.lua 的平台常量，不再可配。
 --   ③ 与 S.sub 同形的先去重再订，同一个 topic 订两遍纯属浪费。
+--
+-- 手动档：只订 S.sub 一条，上面 4 条一条都不订。
+--   手动档接的是用户自己的 broker 和自己的 topic 命名，平台那套
+--   /sys/thing/gw/{sn} 拼出来也没人往那儿发，订着纯属噪音 —— 界面
+--   上"订阅Topic"列一堆自己没配过的东西，用户会以为手动配置没生效。
+--   ⚠️ 代价：拉取配置在手动档必然超时，它的应答走 config/get，
+--     而手动档不订这条。前端已在手动档把「拉取配置」按钮置灰。
+--     曾只按"少订会静默失效"把 4 条无条件全订，结果就是上面那个误会
 local function build_subs()
     local subs = {}
     local function add(t)
@@ -186,7 +194,7 @@ local function build_subs()
         subs[#subs + 1] = t
     end
     local did = S.device_id
-    if did and did ~= "" then
+    if did and did ~= "" and not S.manual_on then
         add(string.format(cfg.PLATFORM_GET_TOPIC, did))
         -- 另外 3 条 gw 下行订阅，固定平台常量。少订一条 = 平台那类
         -- 下发永远收不到且无报错，所以这三行一条都不能删
@@ -308,6 +316,10 @@ local function try_connect()
     local prof, terr = mqttcfg.profile(did == "unknown" and nil or did)
     if not prof then return false, terr end
     S.pub, S.sub = prof.pub, prof.sub
+    -- build_subs() 挂在 conack 回调里，拿不到这里的局部变量 c，而
+    -- mqttcfg.load() 要读 fskv 解 JSON，不能在每个 topic 上重跑一遍。
+    -- 所以档位顺手存进 S，和 pub/sub 同一处赋值
+    S.manual_on = not not c.manual_on
     -- B 模型: clientId = "SN_"(见 default_client_id), username = 裸 SN,
     -- 密码是平台签发的凭证密码。
     -- 填了 client_id/user 才用手填值, 否则一律按平台格式兜底

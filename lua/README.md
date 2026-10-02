@@ -420,13 +420,20 @@ handle_downlink
 > `configSnapshot`（「重新下发配置」按钮）。此时不按 `configSnapshot` 字段识别就会
 > 静默丢弃，所以分流条件不止看 `waiting`——见上方「平台主动重新下发」。
 
-#### conack 时的下行订阅清单（`iot.build_subs()`）
+#### conack 时的订阅清单（`iot.build_subs()`）
+
+**按 `manual_on` 分两套，订阅条数直接反映档位**：
+
+| 档位 | 订几条 | 清单 |
+|---|---|---|
+| 自动档 | 4 条 | 4 条 gw 平台前缀（`sub_topic` 默认模板与 `config/get` 同形，去重后不额外占位） |
+| 手动档 | **1 条** | 只有用户填的 `sub_topic`，4 条 gw 平台前缀**一条都不订** |
 
 平台下发恒用 **gw 前缀**（`node` 前缀是子设备上行专用，不能混），末段是目标裸 SN：
 
 | topic | 用途 |
 |---|---|
-| `/sys/thing/gw/config/get/{SN}` | **无条件订阅**。业务 `sub_topic` 被用户改到别处时，这条仍要订，否则拉取链路断了 |
+| `/sys/thing/gw/config/get/{SN}` | **无条件订阅**（仅自动档）。业务 `sub_topic` 被用户改到别处时，这条仍要订，否则拉取链路断了 |
 | `{sub}` | 用户自配的业务订阅（改过 sub_topic 时才会与上一条不同） |
 | `/sys/thing/gw/function/get/{SN}` | 服务调用，固定平台常量（`cfg.PLATFORM_FUNC_TOPIC`） |
 | `/sys/thing/gw/property/set/{SN}` | 属性设置，固定平台常量（`cfg.PLATFORM_PSET_TOPIC`） |
@@ -434,6 +441,14 @@ handle_downlink
 
 后三条**读固定常量而不是配置**：这三条模型侧也改不了，没必要给它留配置项。
 去重逻辑不变（与 `config/get` 同形时仍只订一次）。
+
+**手动档为什么一条 gw 都不订**：手动档接的是用户自己的 broker 和自己的 topic
+命名，`/sys/thing/gw/{SN}` 那套拼出来也没人往那儿发，订着纯属噪音——界面上
+「订阅Topic」列一堆自己没配过的东西，用户会以为手动配置没生效。
+
+> ⚠️ **代价：拉取配置在手动档必然超时**。它的应答走 `config/get`，而手动档
+> 不订这条。前端已在手动档把「拉取配置」按钮置灰并提示"请先关闭手动配置"。
+> 想拉配置就先关手动配置。
 
 清单全量回在 `R:MQTT` 的 `stat.subs`（数组），前端「连接与上报状态」的 **订阅Topic** 一栏显示（**仅自动档**；手动档下这一栏整行隐藏，改看「生效发布」「生效订阅」）。
 

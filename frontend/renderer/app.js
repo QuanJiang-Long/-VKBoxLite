@@ -329,6 +329,7 @@ function setManualMode(on, opts) {
   el.btnManualCfg.title = S.mqManual
       ? '关闭后设备改用 SN + 首页凭证密码 + 默认模板'
       : '手动配置：用本页填的用户名/密码/Topic 建连';
+  syncPullCfgBtn();
   mqTopicHints();
   // 两种模式下输入框里放的东西不一样：自动=成品(SN 已拼)，手动=模板(带 {sn})。
   // 切过去就得顺手把内容也换掉，否则用户会拿成品去存，把 {sn} 模板存死成固定值
@@ -433,6 +434,18 @@ async function togglePort() {
   startAutoRefresh();
 }
 
+// 拉取配置按钮的可用性 = 串口开着 且 不在手动档。
+// 手动档下设备只订用户填的那条 topic，不订 /sys/thing/gw/config/get/{sn}，
+// 而平台应答只走那条。硬点只会白等 20s 建连 + 15s 超时，所以直接置灰
+function syncPullCfgBtn() {
+  const b = el.btnPullCfg;
+  if (!b) return;
+  b.disabled = !S.open || !!S.mqManual;
+  b.title = S.mqManual
+      ? '拉取配置需要平台 Topic：请先关闭「手动配置」'
+      : '从 MQTT 平台拉取 485 配置并回填表单，需检查后点保存配置才生效';
+}
+
 function setPortState(open, path) {
   S.open = open;
   el.btnOpen.textContent = open ? '关闭串口' : '打开串口';
@@ -440,6 +453,7 @@ function setPortState(open, path) {
   el.stPort.style.color = open ? '#0a7d2c' : '#666';
   [el.btnReadInfo, el.btnReadCfg, el.btnPullCfg, el.btnSaveCfg, el.btnReadVal,
    el.btnHomeMqttSave].forEach(b => b.disabled = !open);
+  syncPullCfgBtn();
 }
 
 //---------------------------------------------------------------------
@@ -585,6 +599,14 @@ async function readCfg(quiet) {
 //   ③ done 后回填 串口参数 + 寄存器表 + MQTT 上报/下行 topic
 async function pullCfg() {
   if (S.pullBusy) return;
+  // 手动档下设备只订用户填的那一条 topic，不订 config/get，平台应答
+  // 进不来。这里先拦住说清原因，别让用户白等 20s 建连 + 15s 超时
+  if (S.mqManual) {
+    const msg = '拉取配置需要平台 Topic，请先关闭「手动配置」';
+    status(msg, false);
+    toast(msg);
+    return;
+  }
   if (!await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
   S.pullBusy = true;
   const btn = el.btnPullCfg;
@@ -592,7 +614,8 @@ async function pullCfg() {
   if (btn) { btn.textContent = '拉取中…'; btn.disabled = true; }
   const restore = () => {
     S.pullBusy = false;
-    if (btn) { btn.textContent = oldText; btn.disabled = !S.open; }
+    if (btn) { btn.textContent = oldText; }
+    syncPullCfgBtn();
   };
   try {
     await sendCmd(Protocol.Enc.pullCfg(), 'PULLCFG', 8000);
