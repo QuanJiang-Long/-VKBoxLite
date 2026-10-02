@@ -39,7 +39,6 @@ const S = {
   autoClientId: '',    // 首页 ClientID 框里当前显示的"设备自动拼的那个值"。
                        // 保存时拿它判断用户到底改没改过，没改就发空串，
                        // 见 saveHomeMqtt()（R1）
-  sniffCfg: null,      // R:SNIFFCFG 返回的配置
   frames: [],          // 最近解译帧
   infer: null,         // R:INFER 返回的推断结果
   pullBusy: false,     // 拉取配置进行中（防连点）
@@ -1019,6 +1018,30 @@ function renderMode() {
   setKv('mReqRsp', (m.reqs != null ? m.reqs : 0) + ' / ' + (m.rsps != null ? m.rsps : 0));
   setKv('mUptime', g && g.uptime != null ? g.uptime + ' s' : '');
   setKv('mWdt', g.wdt_to ? (wdtStalled(g, !!p.running).stalled ? '停滞!' : '正常') : '未启用');
+  syncTabs();
+}
+
+//=====================================================================
+// 栏目随运行模式显隐
+//   idle  → 只有 首页 / 运行模式
+//   poll  → 首页 / 运行模式 / poll模式
+//   sniff → 首页 / 运行模式 / sniff模式
+// poll 与 sniff 是两种互斥的总线用法，设备同一时刻只跑一种，另一个页面留在
+// 栏目上只会让人以为它也在工作。设备没接总线时尤其容易误点进去看一片空。
+// 用 display 藏掉而不删 DOM：配置项和表单状态都还在，切回模式即原样恢复
+//=====================================================================
+function syncTabs() {
+  const mode = S.mode || 'idle';
+  const show = { tab0: true, tabMode: true, tabPoll: mode === 'poll', tabSniff: mode === 'sniff' };
+  Object.keys(show).forEach(id => {
+    const t = document.querySelector('.tab-header .tab-item[data-tab="' + id + '"]');
+    if (t) t.style.display = show[id] ? '' : 'none';
+  });
+  // 当前停留的栏目被藏掉时，落到首页 —— 否则界面会变成一片空白，
+  // 用户以为程序卡死了（实际只是没有 active 的 tab-pane）
+  const active = document.querySelector('.tab-header .tab-item.active');
+  const activeId = active && active.getAttribute('data-tab');
+  if (!show[activeId]) activateTab('tab0');
 }
 
 async function readMode() {
@@ -1754,7 +1777,7 @@ async function writeManualMode(on) {
   const r = await sendCmd(Protocol.Enc.mqtt(), 'MQTT', 4000);
   const c = (r.data && r.data.cfg) || {};
   if (r.data) S.mqtt = r.data;
-  await sendCmd(Protocol.Enc.writeMqtt(Object.assign({}, c, {
+  const patch = {
     // 共用字段从表单带一份: 自动档下「保存」按钮是藏掉的, 用户在 MQTT 页
     // 改的这几个值只能靠这次写入带走, 否则会被 c(设备现值)覆盖等于白改
     ssl: el.mqSsl.checked,
@@ -1762,7 +1785,17 @@ async function writeManualMode(on) {
     allow_no_sn: el.mqAllowNoSn.checked,
     keep_session: el.mqKeepSession.value === '1',
     manual_on: on,
-  })), 'MQTT', 5000);
+  };
+  if (!on) {
+    // R1: ClientID 在界面上归手动档那一组(关闭时跟用户名/密码/Topic 一起
+    // 藏掉)，所以关档必须把它一起清掉，否则设备 fskv 里留着手填的那份，
+    // 首页接着显示它，永远回不到 B 模型的 SN_。
+    // 这里显式发空串而不是依赖设备端 normalize —— client_id 是共用字段，
+    // 首页在自动档下也能自定义它，设备端分不清"手动档残留"和"首页自己设的"。
+    // 关档是一次明确的用户动作，由前端表态最稳
+    patch.client_id = '';
+  }
+  await sendCmd(Protocol.Enc.writeMqtt(Object.assign({}, c, patch)), 'MQTT', 5000);
 }
 
 // 「手动配置」切的是建连档位：
@@ -1858,17 +1891,22 @@ el.btnApplyInfer.onclick = applyInfer;
 el.btnBusSniff.onclick = busSniff;
 el.btnTx.onclick = txHex;
 
-// 主标签页切换
+// 主标签页切换。抽成 activateTab 是给 syncTabs 复用：栏目被模式藏掉时
+// 也要走同一条路切回去，两处各写一份必然走偏
+function activateTab(tabId) {
+  const items = document.querySelectorAll('.tab-header .tab-item');
+  items.forEach(t => t.classList.toggle('active', t.getAttribute('data-tab') === tabId));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  const pane = $(tabId);
+  if (pane) pane.classList.add('active');
+  // 切到报文页时立即拉一次
+  if (tabId === 'tabSniff' && S.open && S.mode === 'sniff') readFrames();
+}
+
 const tabItems = document.querySelectorAll('.tab-header .tab-item');
 tabItems.forEach(item => {
   item.onclick = function () {
-    tabItems.forEach(t => t.classList.remove('active'));
-    this.classList.add('active');
-    const tabId = this.getAttribute('data-tab');
-    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-    $(tabId).classList.add('active');
-    // 切到报文页时立即拉一次
-    if (tabId === 'tabSniff' && S.open && S.mode === 'sniff') readFrames();
+    activateTab(this.getAttribute('data-tab'));
   };
 });
 
@@ -2001,10 +2039,7 @@ function mockReply(line) {
       });
     }
   }
-  else if (line === 'R:MODE') resp = 'RET:MODE=' + JSON.stringify(mockModeStat());  else if (line === 'R:SNIFFCFG') resp = 'RET:SNIFFCFG=' + JSON.stringify({
-    cfg: { baud: MOCK.cfg.baud, databits: MOCK.cfg.databits,
-           parity: MOCK.cfg.parity, stopbits: MOCK.cfg.stopbits }, src: 'fskv'
-  });
+  else if (line === 'R:MODE') resp = 'RET:MODE=' + JSON.stringify(mockModeStat());
   else if (line === 'R:MQTT') resp = 'RET:MQTT=' + JSON.stringify({
     cfg: MOCK.mqtt,
     auto_pass: MOCK.mqtt.auto.pass,
@@ -2018,9 +2053,6 @@ function mockReply(line) {
             manual_on: MOCK.mqtt.manual_on,
             failed: 0, last_pub: 0, last_err: '', backoff: 1, dirty: false,
             sn: 'VK20260925001' }
-  });
-  else if (line === 'R:IOTSTAT') resp = 'RET:IOTSTAT=' + JSON.stringify({
-    connected: true, published: MOCK.published, failed: 0, last_err: ''
   });
   else if (line === 'R:STAT') resp = 'RET:STAT=' + JSON.stringify({
     mode: mockModeStat(),
@@ -2063,8 +2095,6 @@ function mockReply(line) {
       else resp = 'RET:FAIL:REG:not array';
     } catch (e) { resp = 'RET:FAIL:REG:bad json'; }
   }
-  else if (line.indexOf('W:WRITE=') === 0) resp = 'RET:WRITE=OK';
-  else if (line.indexOf('W:WRITEJ=') === 0) resp = 'RET:WRITEJ=OK';
   else if (line.indexOf('W:MQTT=') === 0) {
     try {
       const o = JSON.parse(line.slice(7));
@@ -2080,10 +2110,6 @@ function mockReply(line) {
     ].map(r => ({ addr: r.addr, count: r.count, name: 's' + r.slave + '_r' + r.addr,
                   dtype: 'uint16' }));
     resp = 'RET:APPLYINFER=OK';
-  }
-  else if (line === 'W:RST') {
-    MOCK.mode = 'idle';
-    resp = 'RET:RST=OK';
   }
   if (window.__mockOnLine) window.__mockOnLine(resp);
 }
