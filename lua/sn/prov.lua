@@ -66,7 +66,18 @@ local function sn() return require "sn/sn" end
 
 local CMDS = {}
 
--- R:SN 已删除：前端用 R:INFO 拿 SN，产线刷号掩位后 R:ID 同一份信息
+-- R:SN: 产线烧写软件(pc_tool/device.py read_sn)的回读校验通道。
+-- burner.py 写入 W:SN 后必须用 R:SN 回读比对，比对不过就不上锁、直接判失败。
+-- 曾按"前端零调用"删过它，结果产线卡在校验步：设备只打一行 debug 日志不回应答，
+-- PC 端等超时报"设备无响应"，SN 实际已写入但锁没上。
+-- ⚠️ 这条指令的调用方不在本仓库，删前必须确认产线工具还在不在用
+CMDS["R:SN"] = function()
+    local st = sn().state()
+    if st == "ready" then reply("RET:SN=" .. tostring(_G.get_device_sn()))
+    elseif st == "invalid" then reply("RET:SN=INVALID")
+    else reply("RET:SN=EMPTY") end
+end
+
 CMDS["R:ID"] = function()
     reply("RET:ID=" .. sn().info_line())
 end

@@ -471,9 +471,15 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
 
 | 指令 | 应答 | 说明 |
 |---|---|---|
+| `R:SN` | `RET:SN=xxx` / `EMPTY` / `INVALID` | 读 SN。**前端不用，但产线烧写软件的回读校验通道，删了会卡住上锁** |
 | `R:ID` | `RET:ID=imei:..;uid:..;sn:..;state:..;lock:..` | 读身份 |
 | `W:SN=xxx[,FORCE]` | `RET:OK` | **烧 SN，仅产线工具使用** |
 | `C:SN` / `LOCK:SN` / `UNLOCK:SN` | `RET:OK` | 清号 / 锁定 / 解锁 |
+
+> 这一组走 `lua/sn/prov.lua` 的 VUART_0 通道，与前端主指令（`lua/svc/cmd.lua`）分开注册。
+> **`R:SN` 曾被误判为死代码删掉**，产线烧写软件（`pc_tool/burner.py`）在 `W:SN` 之后用它回读比对，
+> 比对不过就不上锁、直接判失败。现场表现为「设备无响应（发送了 R:SN）」而 SN 实际已写入。
+> 前端 `Enc.sn()` 保留它只为维持与设备端指令集一一对应。
 
 设备端由 `lua/svc/vcom.lua` 的 `reg_cmds()` 注册上述前端指令，
 通过 `lua/sn/sn_prov_uart.lua` 的 `dispatch()` 未知指令分支转发（SN 指令逻辑零改动）。

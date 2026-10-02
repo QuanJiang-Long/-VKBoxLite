@@ -100,13 +100,15 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:SNIFF=ms | 静默侦听总线 ms 毫秒（100~30000），返回帧数 |
 | W:TX=hex | 裸发一串字节（总线诊断），回显 rx_len/parsed/rx |
 | W:BOOTMODE=idle\|poll\|sniff | 开机默认模式（大小写不敏感） |
-| R:ID / W:SN=xxx[,FORCE] / C:SN / LOCK:SN / UNLOCK:SN / R:SNEN / W:SNEN=n,0\|1[,P] | SN 产线指令（VUART_0 通道） |
+| R:SN / R:ID / W:SN=xxx[,FORCE] / C:SN / LOCK:SN / UNLOCK:SN / R:SNEN / W:SNEN=n,0\|1[,P] | SN 产线指令（VUART_0 通道） |
 
 > 指令集与 `frontend/protocol.js` 的 `Enc` 一一对应。`W:RAWTEST`/`R:NET`/`R:MEM`/`W:GC` 是前端不调用的现场诊断入口。
 >
+> **`R:SN` 不是死代码**：前端确实不用它，但产线烧写软件（`pc_tool/device.py` 的 `read_sn()`）拿它做 `W:SN` 之后的回读校验，`burner.py` 比对不过就判失败、不上锁。曾按"前端零调用"删过一次，现场表现为「设备无响应（发送了 R:SN）」+ SN 写进去了但锁没上。**删任何指令前，先确认仓库外没有别的调用方。**
+>
 > **写寄存器的入口**：MQTT 下行 `{"cmd":"WRITE","items":[...]}`（设备自动排进写队列）与前端「写寄存器」。原先的 `W:WRITE`/`W:WRITEJ` 已删除——字段名与 MQTT 下行解析完全一致，属重复实现。写结果看 `R:STAT` 的 `write` 段，**不是 `enqueue_write` 的返回值**（那只代表入队）。
 >
-> **已删除的前端零调用指令**：`R:SN`（前端用 `R:INFO` 拿 SN）、`R:SNIFFCFG`/`W:SNIFFCFG`（前端无入口）、`R:IOTSTAT` 与 `R:POLL`（被 `R:STAT` 的 iot/mqtt 段和 data 段覆盖）、`W:RST`（前端各自有「恢复默认」按钮）。连带删掉只服务它们的 `cfg.reset()`、`mqttcfg.reset()`、`collector.clear()`。
+> **已删除的前端零调用指令**：`R:SNIFFCFG`/`W:SNIFFCFG`（前端无入口）、`R:IOTSTAT` 与 `R:POLL`（被 `R:STAT` 的 iot/mqtt 段和 data 段覆盖）、`W:RST`（前端各自有「恢复默认」按钮）。连带删掉只服务它们的 `cfg.reset()`、`mqttcfg.reset()`、`collector.clear()`。
 
 ## 固件适配要点（对照官方文档）
 
