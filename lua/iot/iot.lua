@@ -13,6 +13,7 @@ local mqttcfg = require "iot/mqttcfg"
 local collector = require "data/collector"
 local cfgstore = require "cfg"
 local pullcfg = require "iot/pullcfg"
+local mon = require "bus/mon"
 -- 轮询引擎：拉取成功后自动落盘要能就地重启/热更轮询任务。
 -- 惰性 require（用时才取）而不是顶层，避免 main.lua 的初始化顺序
 -- 把 uart 还没 setup 的 poll 提前拖起来
@@ -792,8 +793,12 @@ local function task_main()
                         local is_oom = type(err) == "string" and err:lower():find("memory") ~= nil
                         local wait_s = is_oom and 30 or S.backoff
                         if is_oom then
-                            -- 堆不足: 清帧缓存 + 强制 GC, 固定等 30s 再试
+                            -- 堆不足: 清帧缓存 + 强制 GC, 固定等 30s 再试。
+                            -- mon.trim_reqs() 不能省: lastReqs 是 mon 的局部表,
+                            -- collector.trim_cache() 碰不到它, 少了这句清了
+                            -- 缓存照样 OOM, 只是白等 30s
                             collector.trim_cache()
+                            mon.trim_reqs()
                             collectgarbage("collect")
                             local h1, h2 = heap_info()
                             log.warn("iot", "oom, trim+gc done, heap total=" .. tostring(h1) .. " used=" .. tostring(h2))

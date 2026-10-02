@@ -135,6 +135,36 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 - Value ≥256B：每个占一个 4K block，最多 **14** 个
 - 当前键用量：`ds_poll`/`ds_sniff`/`ds_sys`/`mqtt_cfg`/`ds_enable`/`ds_boots`/`dev_sn*` 共 4 个 ≈ 10 个，余量充足
 
+## 内存缓冲上限（Air780EP，Lua 堆 ~300KB）
+
+所有常驻缓冲都必须有硬上限——堆只有 300KB，`R:STAT` 实测已用 ~110KB，余量 ~90KB。
+下表是全部常驻缓冲，**新增缓冲前先在这里补一行**：
+
+| 缓冲 | 位置 | 上限 | 超限行为 |
+|---|---|---|---|
+| `dataCache` 采集值 | `data/collector.lua` | 无显式上限，键来自 regs ≤ `MAX_REGS`(128) | 按 alias 覆盖，不增长 |
+| `frames` 帧缓存 | `data/collector.lua` | `FRAME_CACHE`(10) | 删最早 |
+| `ring` 事件日志 | `data/collector.lua` | `RING_SIZE`(24) | 环形覆盖 |
+| `writeQ` 下行写队列 | `bus/poll.lua` | `WRITEQ_MAX`(8) | 拒收入队 |
+| `rxbuf` 串口收缓冲 | `bus/mon.lua` | 512B | 截到尾 256B |
+| `rx_buf` 指令行缓冲 | `sn/prov.lua` | `MAX_BUF`(16384) | 整缓冲清空 |
+| `pendingReqs` 待配对请求 | `bus/mon.lua` | 每 fc ≤ `MAX_PENDING_PER_FC`(4) | 删最早 |
+| `lastReqs` 最近请求索引 | `bus/mon.lua` | `MAX_LAST_REQ`(64) | **整表作废** |
+
+两个容易漏的点：
+
+- **`lastReqs` 曾是缺口**：键是 `"slave:qty"`，键空间上千万且只增不减。sniff 挂在
+  异常总线上会单调增长，两千条左右就吃掉大半堆。现在 `push_req` 里封顶，超限整表
+  作废——不逐条 FIFO 是因为 `guess_last_req` 本来只认 10 秒内的条目，丢掉的都是
+  更旧的，配对结果不变，还省一份顺序数组。
+- **`pendingReqs` 的有界是间接的**：能进 `push_req` 的 fc 只有 3/5/15（`parse_frame`
+  是白名单 + 强制 CRC），所以实际 ≤ 12 条。改 `decode_frame` 的 kind 判断时必须复核。
+
+**OOM 兜底**（`iot.lua` 建连失败且报 memory 时）：`collector.trim_cache()` +
+`mon.trim_reqs()` + 强制 GC + 固定等 30s。`mon.trim_reqs()` 不能省——`lastReqs` 是
+`mon` 的局部表，`collector.trim_cache()` 碰不到它，少了这句清了缓存照样 OOM。
+
+
 ## 485 无响应排查（现场顺序）
 
 日志出现 `round N 无有效响应 timeout=X` 时，按序执行：

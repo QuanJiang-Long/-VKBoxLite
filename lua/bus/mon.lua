@@ -16,7 +16,15 @@ local running, gen = false, 0
 local rxbuf = ""
 local pendingReqs, lastReqs = {}, {}
 local lastRx, lastBaud = 0, nil
+-- 每 fc 最多留 4 条待配对请求。能进 push_req 的 fc 只有 3/5/15 三个
+-- (parse_frame 是白名单 + 强制 CRC, 其余 fc 到不了这里), 所以
+-- pendingReqs 总共 ≤ 12 条 —— 改 decode_frame 的 kind 判断时记得复核这条
 local MAX_PENDING_PER_FC = 4
+-- lastReqs 的键是 "slave:qty", 键空间上千万且只增不减。sniff 挂在异常总线上
+-- 会单调增长, 两千条左右就吃掉大半 Lua 堆, 而 iot 的 OOM 兜底 trim_cache()
+-- 根本清不到它 —— 所以这里自己封顶。超了整表作废重来, 不逐条 FIFO:
+-- guess_last_req 本来只认 10 秒内的条目, 丢掉的都是更旧的, 配对结果不变
+local MAX_LAST_REQ = 64
 local PAIR_TIMEOUT_MS = 250
 local stat = { frames = 0, reqs = 0, rsps = 0, errs = 0, paired = 0, orphans = 0 }
 
@@ -28,6 +36,11 @@ local function push_req(f)
     q[#q + 1] = { fc = f.fc, slave = f.slave, addr = f.addr, qty = f.qty, ts = os.clock() }
     while #q > MAX_PENDING_PER_FC do table.remove(q, 1) end
     lastReqs[key(f.slave, f.qty)] = { fc = f.fc, slave = f.slave, addr = f.addr, qty = f.qty, ts = os.clock() }
+    -- 封顶, 理由见 MAX_LAST_REQ。走一遍 pairs 数键数而不再养一个计数器:
+    -- 表最多 65 项, 每帧多走几十次迭代, 换来少一个要和 stop() 同步的状态
+    local n = 0
+    for _ in pairs(lastReqs) do n = n + 1 end
+    if n > MAX_LAST_REQ then lastReqs = {} end
 end
 
 local function guess_last_req(fc, slave, qty)
@@ -240,6 +253,9 @@ function M.start(c)
     log.info("mon", "sniff started")
     return true
 end
+
+-- iot 的 OOM 兜底调它: collector.trim_cache() 清不到 mon 的局部表
+function M.trim_reqs() lastReqs = {} end
 
 function M.stop()
     if not running then return true end
