@@ -283,10 +283,19 @@ local function reg_cmds()
         M.reply("RET:INFER=" .. jencode(mon.infer()))
     end)
 
-    -- W:APPLYINFER: 把推断结果写入 poll 配置
-    M.reg("W:APPLYINFER", function()
-        local ok, err = mon.apply_infer()
-        if ok then M.reply("RET:APPLYINFER=OK") else M.reply("RET:FAIL:APPLYINFER:" .. tostring(err)) end
+    -- R:AUTODETECT: 识别 sniff 的通讯参数(baud/parity)。
+    -- 最坏 21s(21 候选 × 1s), 所以前端超时要给够; 8N1 常见情况 1~7s 就回。
+    -- 结果只用于本次 sniff 会话，不写 fskv(poll/sniff 配置隔离)
+    M.reg("R:AUTODETECT", function()
+        local c, err = mon.auto_detect()
+        if not c then
+            M.reply("RET:FAIL:AUTODETECT:" .. tostring(err))
+            return
+        end
+        M.reply("RET:AUTODETECT=" .. jencode({
+            baud = c.baud, databits = c.databits,
+            stopbits = c.stopbits, parity = c.parity,
+        }))
     end)
 
     -- R:SNIFF=ms: 静默侦听总线 ms 毫秒, 返回帧数

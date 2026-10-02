@@ -556,7 +556,7 @@ body.mq-manual .auto-only{display:none !important;}
                         <span style="font-size:12px;color:#666;">自动刷新(2s)</span>
                         <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
                             <button class="sm" id="btnInfer">推断轮询表</button>
-                            <button class="sm primary" id="btnApplyInfer">应用到轮询配置</button>
+                            <button class="sm" id="btnAutoDetect">识别通讯参数</button>
                         </div>
                     </div>
                     <div class="frame-log" id="frameLog">
@@ -567,6 +567,7 @@ body.mq-manual .auto-only{display:none !important;}
                     <div class="panel-title">推断结果（从监听到的请求帧反推）
                         <div class="spacer"></div>
                         <span class="hint" id="inferHint"></span>
+                        <span class="hint" id="detectHint"></span>
                     </div>
                     <table class="param-table">
                         <thead>

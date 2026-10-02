@@ -95,8 +95,8 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:NET / R:MEM | 网络/内存诊断 |
 | W:GC | 强制 GC + 重连 |
 | R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20） |
-| R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits}], slaves, stat}` |
-| W:APPLYINFER | 把推断结果写入轮询配置 |
+| R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits}], slaves, stat}`（**只读参考**，不写任何配置） |
+| R:AUTODETECT | 识别 sniff 通讯参数 `{baud,databits,stopbits,parity}`（**只用于本次会话**，不写 fskv） |
 | R:SNIFF=ms | 静默侦听总线 ms 毫秒（100~30000），返回帧数 |
 | W:TX=hex | 裸发一串字节（总线诊断），回显 rx_len/parsed/rx |
 | W:BOOTMODE=idle\|poll\|sniff | 开机默认模式（大小写不敏感） |
@@ -134,6 +134,77 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 - Value ≤255B：最多 **812** 个键值对（本框架全部配置均在此区间，JSON 限 512B 内）
 - Value ≥256B：每个占一个 4K block，最多 **14** 个
 - 当前键用量：`ds_poll`/`ds_sniff`/`ds_sys`/`mqtt_cfg`/`ds_enable`/`ds_boots`/`dev_sn*` 共 4 个 ≈ 10 个，余量充足
+
+## poll / sniff 配置隔离
+
+两套配置**存储层本就分开**，各自的 fskv 键、归一化函数、默认值完全独立：
+
+| 配置 | 键 | 字段 | 谁写它 |
+|---|---|---|---|
+| `poll` | `ds_poll` | 串口参数 + slave + interval + timeout + **regs 寄存器表** | `W:CFG`、前端「保存配置」 |
+| `sniff` | `ds_sniff` | **只有串口参数** | 无（始终用默认值，见下） |
+| `sys` | `ds_sys` | boot_mode | `W:BOOTMODE` |
+
+设计约束（改动前先读这里）：
+
+- **sniff 不持有寄存器表**。旁听是纯被动接收，解出的帧不代表"要采哪些点"，所以
+  `normalize_sniff` 只有 4 个串口参数。给 sniff 加 regs 是错的——那会让"旁听到什么"
+  和"采集什么"耦合，改一侧污染另一侧。
+- **`R:INFER` 只读，禁止回写 poll**。曾有过 `W:APPLYINFER` 把推断结果盖掉 poll 的
+  regs，两个问题：① dtype 猜不准（旁听拿不到类型信息，全写 uint16，电压类 float 会被
+  解成整数）；② 用户手配的寄存器表被一整份覆盖。现已删除该指令，推断结果仅作参考，
+  由人工核对后自行配置。
+- **两套串口参数独立**。poll 改了波特率不影响 sniff，反之亦然。代价是同一台设备两种
+  模式可能要各配一次——但总线波特率本来就是物理属性，通常两边填一样的值。
+
+> ⚠️ sniff 配置目前**前端没有编辑入口**（无 `W:SNIFFCFG` 指令），始终用 `cfg.BAUD`
+> 等默认值。如果现场总线不是默认波特率，旁听会看到乱码——这是已知缺口，不是本次要
+> 解决的问题。
+
+## sniff 通讯参数自动识别（`R:AUTODETECT`）
+
+上面的缺口靠识别来补：sniff 侧不可配，那就现场试出来。
+
+**21 个候选 = 7 baud × 3 parity**，`parity` 放外层循环：
+
+```
+for parity in {N, E, O}:        # 8N1 占现场绝大多数，先整个扫完
+    for baud in {9600,19200,4800,2400,38400,115200,1200}:
+        试 1 秒，解出 ≥2 个 CRC 合法帧 → 命中，立即停
+```
+
+| 情况 | 耗时 |
+|---|---|
+| 总线是 8N1（绝大多数） | **1~7s**（9600 排第一，常见 1s 就中） |
+| 总线是 8E1 / 8O1 | 7s + 1~7s |
+| 总线上没数据 / AB 线错 | 走满 21s 后报 `no hit` |
+
+**databits/stopbits 固定 8/1**，不参与扫描——ModbusRTU 的事实标准，7 位数据 /
+2 停止位极少见，为它们把候选翻 3 倍不划算。
+
+**判定不新写校验**，借 `task()` 现有的 CRC 试探切帧，只数 `stat.frames` 增量。
+参数错 → 字节乱 → CRC 不过 → 一帧都解不出，这就是信号。CRC 是 16 位校验，
+单帧误判率 ~1/65536，所以要 `DETECT_HITS=2` 帧才算命中。
+
+### 三个实现要点（改之前必读）
+
+1. **每个候选前必须 `rxbuf = ""`**。上一个候选解出来的乱码若留着，会在下一个
+   候选的 1 秒窗口里被误当成新参数的帧，造成假命中。
+2. **`uart.setup` 后必须重新 `uart.on(receive, on_receive)`**。LuatOS 的
+   `uart.setup` 会重置 receive callback，少了这行从这个候选起一个字节都收不到，
+   全部候选假阴性。原工程 `VKBox_Lite(1)/485_monitor.lua` 的 Q-Fix 8 就是这个坑。
+3. **结果只存本次会话**。识别出的参数不写 `ds_sniff`、更不碰 `ds_poll`——
+   见上文「poll / sniff 配置隔离」。给一个「填入 poll 配置」的按钮会让用户
+   一键覆盖手配的寄存器表，已确认不做。
+
+### 已知调优点
+
+`DETECT_WIN_MS`（`core/config.lua`）现为 **1000ms**，按 9600 排第一定的：8 字节
+帧约 8ms，轮询周期内轻松攒够 2 帧。⚠️ **慢总线（1200/2400）+ 稀疏从机时，1 秒
+可能只收到 0~1 帧而漏检**。真机测试若发现慢 baud 识别不出，优先把它调到 **2000**
+（代价：最坏耗时 21s → 42s）。常见 8N1 场景不受影响，因为 9600 第一个就中。
+
+`DETECT_HITS` 同理：若现场噪声大、偶发单帧误命中，可提到 3。
 
 ## 内存缓冲上限（Air780EP，Lua 堆 ~300KB）
 

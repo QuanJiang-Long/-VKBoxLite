@@ -193,27 +193,6 @@ function M.infer()
     }
 end
 
--- 把推断结果写成轮询配置(前端 W:APPLYINFER)
-function M.apply_infer()
-    local inf = M.infer()
-    if #inf.regs == 0 then return false, "no req frames" end
-    local regs = {}
-    for _, a in ipairs(inf.regs) do
-        regs[#regs + 1] = {
-            name = "s" .. a.slave .. "_r" .. a.addr,
-            alias = "s" .. a.slave .. "_r" .. a.addr,
-            addr = a.addr, count = a.count, dtype = "uint16",
-        }
-    end
-    local c = cfgstore.load_poll()
-    c.regs = regs
-    local n, err = cfgstore.normalize_poll(c)
-    if not n then return false, err end
-    local ok, serr = cfgstore.save_poll(c)
-    if not ok then return false, serr end
-    return true, #regs
-end
-
 function M.sniff_count(ms)
     ms = ms or 3000
     if ms < 100 then ms = 100 end
@@ -256,6 +235,47 @@ end
 
 -- iot 的 OOM 兜底调它: collector.trim_cache() 清不到 mon 的局部表
 function M.trim_reqs() lastReqs = {} end
+
+-- sniff 通讯参数自动识别(前端 R:AUTODETECT)。
+-- 21 个候选 = 7 baud × 3 parity，parity 放外层：8N1 占现场绝大多数，先把
+-- 8N1 整个扫完再碰 E/O，常见情况 1~7s 命中，全落空才走满 21s。
+-- databits/stopbits 固定 8/1 —— ModbusRTU 事实标准，7 位/2 停止位极少见，
+-- 为它们再加 3 倍候选不划算。
+--
+-- 判定不新写校验，直接借 task() 现有的 CRC 试探切帧，只数 stat.frames 增量：
+-- 参数错 → 字节乱 → CRC 不过 → 一帧都解不出。CRC 是 16 位校验，单帧误判
+-- 率 ~1/65536，所以要 DETECT_HITS(2) 帧才算命中。
+--
+-- ⚠️ 结果只存本次会话，不写 fskv。poll/sniff 两套配置必须隔离，识别出的
+-- 参数不该悄悄改掉任何一侧(见 lua/README.md「poll / sniff 配置隔离」)
+function M.auto_detect()
+    if not sys then return nil, "no sys" end
+    if not running and not M.start() then return nil, "start fail" end
+    for _, p in ipairs({ 0, 1, 2 }) do
+        for _, b in ipairs(cfg.DETECT_BAUDS) do
+            -- 上一个候选的残留字节必须作废: 那是错参数解出来的乱码，
+            -- 不清就会在下一个候选的窗口里被误当成新参数的帧
+            rxbuf = ""
+            local ok = pcall(uart.setup, mbus.UART_ID, b, 8, 1,
+                mbus.parity_to_uart(p))
+            if ok then
+                -- ⚠️ uart.setup 会重置 receive callback，必须重新绑。
+                -- 少了这行，从这个候选开始一个字节都收不到，全部候选都会
+                -- 假阴性(原工程 VKBox_Lite(1) 的 Q-Fix 8 踩过这个坑)
+                pcall(uart.on, mbus.UART_ID, "receive", on_receive)
+                local before = stat.frames
+                sys.wait(cfg.DETECT_WIN_MS)
+                if stat.frames - before >= cfg.DETECT_HITS then
+                    lastBaud = b
+                    log.info("mon", "detect ok: baud=" .. b .. " parity=" .. p)
+                    return { baud = b, databits = 8, stopbits = 1, parity = p }
+                end
+            end
+        end
+    end
+    log.warn("mon", "detect fail: 21 candidates no hit")
+    return nil, "no hit"
+end
 
 function M.stop()
     if not running then return true end

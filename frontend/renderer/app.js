@@ -41,6 +41,7 @@ const S = {
                        // 见 saveHomeMqtt()（R1）
   frames: [],          // 最近解译帧
   infer: null,         // R:INFER 返回的推断结果
+  detected: null,      // R:AUTODETECT 识别出的通讯参数（仅本次会话，未写配置）
   pullBusy: false,     // 拉取配置进行中（防连点）
   pulled: false,       // 刚拉过平台配置且尚未保存确认。
                        // true 时 saveCfg 要提示"已向平台回执"，见 saveCfg()
@@ -117,8 +118,9 @@ const el = new Proxy({
   // 报文页
   btnFrameRefresh: $('btnFrameRefresh'), btnFrameClear: $('btnFrameClear'),
   frameFilter: $('frameFilter'), frameAuto: $('frameAuto'), frameLog: $('frameLog'),
-  btnInfer: $('btnInfer'), btnApplyInfer: $('btnApplyInfer'), inferTbody: $('inferTbody'),
+  btnInfer: $('btnInfer'), inferTbody: $('inferTbody'),
   inferHint: $('inferHint'),
+  btnAutoDetect: $('btnAutoDetect'), detectHint: $('detectHint'),
   btnBusSniff: $('btnBusSniff'), busSniffMs: $('busSniffMs'),
   txHex: $('txHex'), btnTx: $('btnTx')
 }, {
@@ -1571,22 +1573,36 @@ function renderInfer() {
   ).join('');
 }
 
-async function applyInfer() {
-  if (!await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
-  try {
-    await sendCmd(Protocol.Enc.applyInfer(), 'APPLYINFER', 5000);
-    status('推断结果已写入轮询配置', true);
-    toast('已应用到轮询配置');
-    await readCfg(true);               // 上面已经确认过，别再弹一次
-  } catch (e) {
-    status('应用失败：' + e.message, false);
-    toast('应用失败：' + e.message);
-  }
-}
-
 //---------------------------------------------------------------------
 // 总线诊断
 //---------------------------------------------------------------------
+const PARITY_NAME = { 0: '无(N)', 1: '偶(E)', 2: '奇(O)' };
+
+// 识别 sniff 的通讯参数。设备侧最坏 21s(21 候选×1s)，8N1 常见 1~7s，
+// 所以超时按最坏给，别让用户看到假的超时失败
+async function autoDetect() {
+  try {
+    status('正在识别通讯参数（最坏 21 秒，通常几秒）…', true);
+    const r = await sendCmd(Protocol.Enc.autoDetect(), 'AUTODETECT', 26000);
+    const d = r.data || {};
+    S.detected = { baud: d.baud, parity: d.parity };
+    const p = PARITY_NAME[d.parity] || (' parity=' + d.parity);
+    status('识别成功：' + d.baud + ' / ' + d.databits + p + d.stopbits, true);
+    toast('已识别 ' + d.baud + '/' + d.databits + p + d.stopbits + '（仅本次会话，未改配置）');
+    renderDetected();
+  } catch (e) {
+    status('识别失败：' + e.message, false);
+    toast('识别失败：21 组候选都没解出合法帧，查 AB 线/从机是否在报');
+  }
+}
+
+function renderDetected() {
+  const d = S.detected;
+  el.detectHint.textContent = d && d.baud
+    ? '已识别：' + d.baud + ' / ' + (PARITY_NAME[d.parity] || d.parity)
+    : '';
+}
+
 async function busSniff() {
   const ms = parseInt(el.busSniffMs.value, 10) || 3000;
   try {
@@ -1913,7 +1929,7 @@ el.btnFrameRefresh.onclick = readFrames;
 el.btnFrameClear.onclick = () => { S.frames = []; renderFrames(); };
 el.frameFilter.onchange = renderFrames;
 el.btnInfer.onclick = doInfer;
-el.btnApplyInfer.onclick = applyInfer;
+el.btnAutoDetect.onclick = autoDetect;
 el.btnBusSniff.onclick = busSniff;
 el.btnTx.onclick = txHex;
 
@@ -2100,6 +2116,8 @@ function mockReply(line) {
     slaves: [1, 2],
     stat: { frames: 24, reqs: 12, rsps: 11, errs: 0, paired: 10, orphans: 1 }
   });
+  else if (line === 'R:AUTODETECT') resp = 'RET:AUTODETECT=' + JSON.stringify(
+    { baud: 9600, databits: 8, stopbits: 1, parity: 0 });
   else if (line.indexOf('R:SNIFF=') === 0) resp = 'RET:SNIFF=3';
   else if (line.indexOf('W:TX=') === 0) resp = 'RET:TX=OK';
   else if (line.indexOf('W:MODE=') === 0) {
@@ -2129,14 +2147,6 @@ function mockReply(line) {
     } catch (e) { resp = 'RET:FAIL:MQTT:bad json'; }
   }
   else if (line === 'R:REPORT') { MOCK.published++; resp = 'RET:REPORT=OK'; }
-  else if (line === 'W:APPLYINFER') {
-    MOCK.cfg.regs = [
-      { slave: 1, addr: 100, count: 2, fc: 3, hits: 12 },
-      { slave: 2, addr: 0, count: 10, fc: 3, hits: 5 }
-    ].map(r => ({ addr: r.addr, count: r.count, name: 's' + r.slave + '_r' + r.addr,
-                  dtype: 'uint16' }));
-    resp = 'RET:APPLYINFER=OK';
-  }
   if (window.__mockOnLine) window.__mockOnLine(resp);
 }
 
