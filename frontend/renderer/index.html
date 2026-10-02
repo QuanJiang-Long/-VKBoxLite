@@ -48,6 +48,10 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
    摆在页面上只会让人以为改了能生效，而保存按钮在自动档也没有保存对象。
    JS 只切这个 class，不写 style.display，避免和 .form-row 的 flex 打架 */
 body:not(.mq-manual) .manual-only{display:none !important;}
+/* 反方向：只属于「自动档（拉取配置）」的状态行。手动档下设备仍然会订平台那
+   4 条通道（拉取配置/下行写靠它们），但那是设备内部行为，摆在状态面板里
+   只会让用户以为"我配的 topic 没生效"。手动档只看生效发布/生效订阅两条 */
+body.mq-manual .auto-only{display:none !important;}
 /* ⚠️ 排除 .switch：开关本身也是 <label>，会被这条规则撑到 150px 宽，
    视觉上滑块右侧拖一条大空白，整行显得被拉长。开关只该有它自己的 42px。 */
 .form-row label:not(.switch){width:150px;text-align:right;flex-shrink:0;}
@@ -120,7 +124,7 @@ body:not(.mq-manual) .manual-only{display:none !important;}
 .kv-grid .kv b{color:#555;font-weight:normal;min-width:96px;}
 .kv-grid .kv span{color:#0a7d2c;font-weight:bold;word-break:break-all;}
 .kv-grid .kv span.bad{color:#c0392b;}
-/* 下行订阅是多行 topic 清单，不换行会挤成一坨看不见 */
+/* 订阅Topic 是多行 topic 清单，不换行会挤成一坨看不见 */
 #mqStSubs{white-space:pre-line;line-height:1.6;}
 /* 平台主动下发配置横幅。黄底 = 通知（设备已自动保存生效）；
    红底 = 需要用户介入（解析或保存失败）。两者都要跟纯报错区分层次 */
@@ -511,10 +515,10 @@ body:not(.mq-manual) .manual-only{display:none !important;}
                         <div class="kv"><b>用户名</b><span id="mqStUser">--</span></div>
                         <div class="kv"><b>设备编号</b><span id="mqStDevId">--</span></div>
                         <div class="kv"><b>当前档次</b><span id="mqStMode">--</span></div>
-                        <div class="kv"><b>生效发布</b><span id="mqStPub">--</span></div>
-                        <div class="kv"><b>生效订阅</b><span id="mqStSub">--</span></div>
+                        <div class="kv manual-only"><b>生效发布</b><span id="mqStPub">--</span></div>
+                        <div class="kv manual-only"><b>生效订阅</b><span id="mqStSub">--</span></div>
                         <div class="kv"><b>已订阅</b><span id="mqStSubed">--</span></div>
-                        <div class="kv"><b>下行订阅</b><span id="mqStSubs">--</span></div>
+                        <div class="kv auto-only"><b>订阅Topic</b><span id="mqStSubs">--</span></div>
                         <div class="kv"><b>配置回执</b><span id="mqStReplied">--</span></div>
                         <div class="kv"><b>已上报条数</b><span id="mqStPubed">--</span></div>
                         <div class="kv"><b>失败次数</b><span id="mqStFailed">--</span></div>

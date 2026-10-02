@@ -1309,8 +1309,10 @@ function renderMqtt() {
   setKv('mqStPub', r.pub || '');
   setKv('mqStSub', r.sub || '');
   setKv('mqStSubed', s.subscribed ? '是' : '否', !s.subscribed);
-  // 下行订阅全量：设备 conack 时订的 4 条 gw 前缀通道。只列 topic 不列数，
-  // 现场直接照着对 broker 上有没有这条订阅
+  // 订阅Topic 全量：conack 时设备实际订到的每一条。只列 topic 不列数，
+  // 现场直接照着对 broker 上有没有这条订阅。
+  // 这一行只在自动档显示（.auto-only）：手动档下用户只该看到自己填的那两条，
+  // 平台那 4 条通道是设备内部订的，混在一起会让人以为手动配置没生效
   const subs = Array.isArray(s.subs) ? s.subs : [];
   setKv('mqStSubs', subs.length ? subs.join('\n') : '未连接', subs.length === 0);
   // 配置回执：拉取配置成功后要点保存才会 +1，为 0 说明平台还在等核销

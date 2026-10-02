@@ -83,7 +83,7 @@ mklink /J D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules D:\VKBox_Lite\VKBo
 | MQTT 显示"平台拒绝连接(CONACK 0x05 未授权)" | 本平台是 B 模型鉴权：`clientId`=`设备SN_`（SN 加下划线，尾部空）、`username`=设备SN、`password`=平台签发的凭证密码（默认 `VKBOXGW2026KEY`）。先看首页「用户名/ClientID」两行和「连接与上报状态」的 **ClientID/用户名** 两栏确认发出去的是什么，再确认该 SN 在平台侧凭证是「生效中」。详见 `../lua/README.md` 的「MQTT 连不上排查」 |
 | 点「拉取配置」提示"平台未下发配置(超时)" | 设备已连上 MQTT 并发过 hello，但平台 15s 内没回。检查平台是否在线、topic 是否匹配、SN 是否已烧 |
 | 拉取成功了但平台还在反复推配置 | 不正常。回执 U6 由设备在自动落盘成功后自动发；平台还在推说明回执没成功（MQTT 断开/无 SN/msgId 不匹配），或仍在重推上一份。「连接与上报状态」的 **配置回执** 显示次数，为 0 = 尚未回执 |
-| 拉取成功后「下行订阅」只有 1 条 | 没连上 broker。连上后固定 4 条（config/get + function/get + property/set + property/get；若 sub_topic 改得与 config/get 不同形则 5 条） |
+| 拉取成功后「订阅Topic」只有 1 条 | 没连上 broker。连上后固定 4 条（config/get + function/get + property/set + property/get；若 sub_topic 改得与 config/get 不同形则 5 条）。**注意这一栏只在自动档显示**，手动档看「生效发布」「生效订阅」两条 |
 | 拉取后有的点是中文乱码/别名栏莫名变成 id | 平台把中文 `name` 按 GBK（非 UTF-8）下发。设备判为非法 UTF-8 后退回 id 并提示"N 个平台别名不可用已退用 id"，同时日志有 `alias 非 UTF-8(平台编码问题), 退回 id: xxx`。MQTTX 独立订阅同样看到乱码 → 是平台的编码问题，不是设备；要平台侧改成 UTF-8 |
 | 拉取后某条寄存器少了，状态行说"忽略 1 条" | 该条平台配置不合法（如 `dataType` 用了 `-CDAB` 这类非大端字节序后缀、`address` 越界、`id` 含非字母数字），明细在"忽略"的 toast/日志。不会整包失败 |
 | 485 页顶部出现黄条"平台重新下发了配置" | 平台侧点了「重新下发配置」按钮，设备已接住并**自动落盘生效、自动回执平台**，横幅只是通知你设备被平台改过。点「查看详情」可把当前生效的那份读出来看。详见「平台主动重新下发配置」 |
@@ -269,7 +269,7 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 拉取流程与字段映射详见 `../lua/README.md` 的「平台配置拉取」章节。要点：
 
 - 设备 publish `hello` 到 `/sys/thing/gw/config/hello/{SN}`（固定平台常量，不可改），payload 带 `topicFormat:"v3"` 与 `onboardingMode:"platform"`
-- conack 时订 4 条 gw 前缀下行：`config/get` + `function/get` + `property/set` + `property/get`（全量见「连接与上报状态」的 **下行订阅** 一栏）。`config/get` **无条件订**：业务订阅 topic 被改到别处时，拉取链路仍要通
+- conack 时订 4 条 gw 前缀下行：`config/get` + `function/get` + `property/set` + `property/get`（自动档全量见「连接与上报状态」的 **订阅Topic** 一栏）。`config/get` **无条件订**：业务订阅 topic 被改到别处时，拉取链路仍要通
 - 非本机 SN（或 `{SN}-{n}`）的下行直接丢弃，不会拿去写寄存器
 - 只提取 `commInterfaces`（串口参数）与 `tsl.properties`（寄存器表），其余全部丢弃
 - 拉取结果里回的 topic 只有两个：上报 `/sys/thing/node/property/post/{SN}-1`，下行 `/sys/thing/gw/config/get/{SN}`（均 SN 已代入）。hello 与另外 3 条下行已是设备端固定常量，不回显
@@ -360,6 +360,25 @@ body:not(.mq-manual) .manual-only{display:none !important;}
 JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', S.mqManual)` 一行。不逐个写 `style.display`，避免把 `.form-row` 的 `display:flex` 盖掉。
 
 > **打开软件就先按自动档渲染**（底部 `setManualMode(S.mqManual)`），否则第一批 `R:MQTT` 应答回来前那半秒，这几行会先闪一下再消失。
+
+#### 「连接与上报状态」按档位分组显示
+
+同一个 `body.mq-manual` class 反向再用一次，把状态面板那三行也按档位拆开：
+
+| 一栏 | 手动档 | 自动档（拉取配置） | 类 |
+|---|---|---|---|
+| **生效发布** | 显示 | 隐藏 | `.manual-only` |
+| **生效订阅** | 显示 | 隐藏 | `.manual-only` |
+| **订阅Topic**（原"下行订阅"） | 隐藏 | 显示全部 | `.auto-only` |
+
+理由：手动档下用户只配了发布/订阅两条 topic，平台那 4 条通道（config/get + function/get + property/set + property/get）是设备**内部照订**的——拉取配置和 MQTT 下行写要靠它们，不能清。但把它们混在状态面板里，用户会以为"我填的 topic 没生效、被自动拼的覆盖了"。所以手动档只给用户看自己配的那两条，自动档反过来只看设备拼出来的全量清单。
+
+```css
+body:not(.mq-manual) .manual-only{display:none !important;}
+body.mq-manual .auto-only{display:none !important;}
+```
+
+**设备侧不做任何改动**：两个档位都照订 4 条平台通道 + 用户那条（手动档共 5 条，自动档因 `sub_topic` 默认模板与 `config/get` 同形而去重成 4 条）。这一节纯粹是显示分组，改完刷新页面即生效，不用重烧固件。
 
 > **档位是保存时才生效**（`W:MQTT` 带 `manual_on`）。
 > **例外：关闭手动配置是当场生效的** —— 因为「保存」按钮在自动档下也被藏掉了，
@@ -544,7 +563,7 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
    那套再按这套建连；关掉「手动配置」再保存，设备回到 SN + 首页凭证密码；
     发布/订阅 Topic、上报周期、会话管理、no_SN 建连已在「MQTT 连接」面板给输入框；hello/服务调用/属性设置/属性查询 4 条已删除，设备走固定平台常量；
 8. **拉配置**：点「拉取配置」→ 状态走完显示"设备已自动保存并生效、已回执平台"，
-   「下行订阅」应出 4 条（config/get + function/get + property/set + property/get），
+   「订阅Topic」应出 4 条（config/get + function/get + property/set + property/get），
    「配置回执」次数 +1；断电重启后 485 参数表应是平台给的那套；
 9. 「保存配置」后断电重启，验证手动改的配置是否保留。
 
