@@ -26,6 +26,15 @@ local function get_poll()
     return poll or nil
 end
 
+-- 当前轮询引擎用的是哪个配置槽("poll"=手动 / "pull"=拉取)。
+-- 平台推送落地时据此决定要不要立即生效: 跑手动档就只存 ds_pull 备着，
+-- 不许把手配的寄存器表顶掉。问 poll 而不是问 ctrl 是为了不引入
+-- ctrl -> mon/poll -> iot 这条环
+local function poll_slot()
+    local p = get_poll()
+    return (p and p.slot()) or "poll"
+end
+
 local M = {}
 
 local S = {}
@@ -496,29 +505,36 @@ local function auto_apply(r)
     if not r or not r.poll then return false, "无可应用的配置" end
     local n, nerr = cfgstore.normalize_poll(r.poll)
     if not n then return false, "配置不合法: " .. tostring(nerr) end
-    -- 平台不给轮询节奏：保留设备自己的 interval/timeout，只换串口参数和寄存器表
-    local base = cfgstore.load_poll()
+    -- 平台不给轮询节奏：保留设备自己的 interval/timeout。base 取 ds_pull
+    -- 而不是 ds_poll —— 平台配置落自己的槽，手动配的那份寄存器表不许被
+    -- 覆盖掉(两个模式各用各的，见 lua/README.md 配置来源隔离)
+    local base = cfgstore.load_pull()
     n.interval_ms = base.interval_ms
     n.timeout_ms = base.timeout_ms
 
     local before = { slave = base.slave, baud = base.baud, regs = #(base.regs or {}) }
-    local ok, serr = cfgstore.save_poll(n)
+    local ok, serr = cfgstore.save_pull(n)
     if not ok then return false, "落盘失败: " .. tostring(serr) end
 
     local pe = get_poll()
     if pe then
-        -- 串口参数变了才值得重启轮询任务；只换寄存器表时 apply_cfg 就够了，
-        -- 重启会硬断一次正在进行的 Modbus 事务
-        if pe.needs_restart(n) then
-            if pe.is_running() then
-                pe.stop()
-                pe.apply_cfg(n)
-                pe.start()
+        -- 只有拉取档才让平台配置立即生效。跑手动档时 ds_pull 只是存着备用，
+        -- 一旦这里 apply_cfg/start, 手配的那套就被顶掉, 而用户根本没切档
+        -- (两个模式各用各的槽, 见 lua/README.md 配置来源隔离)
+        if poll_slot() == "pull" then
+            -- 串口参数变了才值得重启轮询任务；只换寄存器表时 apply_cfg 就够了，
+            -- 重启会硬断一次正在进行的 Modbus 事务
+            if pe.needs_restart(n) then
+                if pe.is_running() then
+                    pe.stop()
+                    pe.apply_cfg(n)
+                    pe.start("pull")
+                else
+                    pe.apply_cfg(n)
+                end
             else
                 pe.apply_cfg(n)
             end
-        else
-            pe.apply_cfg(n)
         end
     end
 
@@ -666,6 +682,48 @@ local function pull_active() return pulling() end
 
 -- 不要求 MQTT 已连上: 只要配好服务器地址/端口, 设备自己去连, 连上再握手。
 -- 这是新设备首次使用的正常顺序(先配 MQTT, 再拉配置)。
+-- 切换 MQTT 手动/自动档。由 ctrl.switch_mode 在切 485 模式时调用:
+--   poll(手动配置)    -> true   只订用户自己填的 topic
+--   poll(拉取配置)    -> false  订平台 4 条, 否则 hello 发出去没人应答
+-- 手动/自动没有混搭场景(要么全手配, 要么全平台拉), 所以档位直接跟模式走。
+--
+-- 为什么要 destroy+kick: S.manual_on 是在 try_connect() 里读的, 订阅清单
+-- build_subs() 挂在 conack 上, 已连接的 client 不会自己重读一遍。不断开
+-- 重连的话, 从拉取档切回手动档后设备还订着平台 topic, 看起来像"手动配置
+-- 没生效"。断开重连只是丢一次心跳周期, collector 的数据和寄存器表不动
+function M.set_manual(on)
+    on = on and true or false
+    local c = mqttcfg.load()
+    -- 档位没变就不必断开重连: 白丢一次心跳, 还可能撞上正在进行的拉取握手
+    if not not c.manual_on == on then return false end
+    c.manual_on = on
+    if on then
+        -- 手动<-自动: 不用动 broker。host/port 是两档共用的(mqttcfg L12), 
+        -- 手动档用户会自己填地址, 动它反而打断"自动档配好的地址切手动档继续用"
+        local ok, err = mqttcfg.save(c)
+        if not ok then return false, err end
+    else
+        -- 自动<-手动: 平台地址必须归位。host/port 虽说是共用字段, 但手动档
+        -- 用户可能填了自建 broker; 带着那个地址发 hello, 没人应答, 只会白等
+        -- 满 35s 再报超时, 用户根本看不出是地址错了。
+        -- 只在这条切换路径上重置, 不动 normalize 的语义。
+        -- auto.pass 要带过去: 那是用户自己设的平台凭证密码, 丢了会静默退回
+        -- 内置默认密码, 表现为"我改过密码怎么不生效"
+        local d = mqttcfg.default
+        local ok, err = mqttcfg.save({
+            host = d.host, port = d.port, ssl = d.ssl,
+            manual_on = false,
+            auto = { pass = c.auto and c.auto.pass or "" },
+        })
+        if not ok then return false, err end
+    end
+    S.manual_on = on
+    destroy_client()
+    M.kick()
+    log.info("iot", "mqtt manual_on ->", tostring(on))
+    return true
+end
+
 function M.pull_start()
     if pull_active() then return false, "正在拉取中" end
     if not get_topic() then return false, "无 SN" end

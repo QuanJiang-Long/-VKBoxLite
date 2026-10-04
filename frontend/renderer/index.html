@@ -297,9 +297,14 @@ body.mq-manual .auto-only{display:none !important;}
                             <div class="m-state" id="msIdle"></div>
                         </div>
                         <div class="mode-card" id="mcPoll" data-mode="poll">
-                            <div class="m-title">轮询 poll</div>
-                            <div class="m-desc">本设备作 Modbus 主机<br>主动轮询从机寄存器</div>
+                            <div class="m-title">poll（手动配置）</div>
+                            <div class="m-desc">本设备作 Modbus 主机<br>用你手配的寄存器表和 MQTT</div>
                             <div class="m-state" id="msPoll"></div>
+                        </div>
+                        <div class="mode-card" id="mcPollpull" data-mode="pollpull">
+                            <div class="m-title">poll（拉取配置）</div>
+                            <div class="m-desc">进入即向平台要配置<br>寄存器表和 MQTT 全部由平台下发</div>
+                            <div class="m-state" id="msPollpull"></div>
                         </div>
                         <div class="mode-card" id="mcSniff" data-mode="sniff">
                             <div class="m-title">旁听 sniff</div>
@@ -307,12 +312,13 @@ body.mq-manual .auto-only{display:none !important;}
                             <div class="m-state" id="msSniff"></div>
                         </div>
                     </div>
-                    <p class="hint" style="margin-top:14px;line-height:1.7;">点卡片即选中并立即切换；切换时设备会先停掉旧模式再启动新模式（互斥）</p>
+                    <p class="hint" style="margin-top:14px;line-height:1.7;">点卡片即选中并立即切换；切换时设备会先停掉旧模式再启动新模式（互斥）。<b>手动配置</b>用你手配的寄存器表和 MQTT；<b>拉取配置</b>进入后自动向平台 hello 拉取，两套配置各自独立存放、互不覆盖</p>
                     <div class="form-row" style="margin-top:16px;">
                         <label>开机默认模式</label>
                         <select id="selBootMode">
                             <option value="idle">idle（不主动采，推荐）</option>
-                            <option value="poll">poll（开机即轮询）</option>
+                            <option value="poll">poll（手动配置，开机即轮询）</option>
+                            <option value="pollpull">poll（拉取配置，开机即拉取）</option>
                             <option value="sniff">sniff（开机即旁听）</option>
                         </select>
                         <button id="btnSaveBoot" class="primary">保存</button>
@@ -324,6 +330,7 @@ body.mq-manual .auto-only{display:none !important;}
                     <div class="panel-title">当前运行详情</div>
                     <div class="kv-grid">
                         <div class="kv"><b>当前模式</b><span id="mCurMode">--</span></div>
+                        <div class="kv"><b>配置来源</b><span id="mCfgSrc">--</span></div>
                         <div class="kv"><b>总线占用</b><span id="mBusy">--</span></div>
                         <div class="kv"><b>从机地址</b><span id="mSlave">--</span></div>
                         <div class="kv"><b>波特率</b><span id="mBaud">--</span></div>
@@ -353,7 +360,7 @@ body.mq-manual .auto-only{display:none !important;}
                 <div class="serial-pane active" id="sp-s1">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:4px 0;">
                     <button id="btnReadCfg">读取配置</button>
-                    <button id="btnPullCfg" title="从 MQTT 平台拉取 485 配置并回填表单，需检查后点保存配置才生效">拉取配置</button>
+                    <button id="btnPullCfg" title="从 MQTT 平台重新拉取 485 配置到「拉取配置」槽，仅在 poll（拉取配置）模式下生效">重新拉取</button>
                     <div style="margin-left: auto;"></div>
                     <button id="btnSaveCfg" class="primary">保存配置</button>
                 </div>
@@ -556,7 +563,7 @@ body.mq-manual .auto-only{display:none !important;}
                         <span style="font-size:12px;color:#666;">自动刷新(2s)</span>
                         <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
                             <button class="sm" id="btnInfer">推断轮询表</button>
-                            <button class="sm" id="btnAutoDetect">识别通讯参数</button>
+                            <button class="sm" id="btnAutoDetect">重新识别通讯参数</button>
                         </div>
                     </div>
                     <div class="frame-log" id="frameLog">

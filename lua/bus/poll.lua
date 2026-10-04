@@ -20,6 +20,9 @@ local writeTaskRun = false
 local respFlag, respData = false, nil
 local reqSlave, reqFc = nil, nil
 local lastCfg = nil
+-- 配置槽: "poll" = 手配(ds_poll), "pull" = 平台拉取(ds_pull)。
+-- 默认 poll 保证所有旧调用点(ensure_uart 等)行为不变
+local curSlot = "poll"
 local stat = { rounds = 0, ok = 0, timeout = 0, werr = 0, zero = 0 }
 local wstat = { queued = 0, done = 0, wfail = 0 }
 
@@ -341,8 +344,10 @@ function M.tx_raw(hex, timeout_ms)
     return r
 end
 
-function M.reload_cfg()
-    local c = cfgstore.load_poll()
+function M.reload_cfg(src)
+    -- src = "poll"(默认) 读手配的 ds_poll; "pull" 读平台的 ds_pull。
+    -- 两个槽同构, 只是来源不同, 所以这里只换一次 load 调用
+    local c = (src == "pull") and cfgstore.load_pull() or cfgstore.load_poll()
     if c then
         regs = c.regs or {}
         interval = c.interval_ms or cfg.POLL_INTERVAL_MS
@@ -350,6 +355,9 @@ function M.reload_cfg()
     end
     return lastCfg
 end
+
+-- 当前在跑哪个槽。iot 的平台推送据此判断要不要立即生效
+function M.slot() return curSlot end
 
 function M.apply_cfg(c)
     if not c then return false end
@@ -402,9 +410,10 @@ function M.status()
     return st
 end
 
-function M.start()
+function M.start(src)
     if running then return true end
-    M.reload_cfg()
+    curSlot = (src == "pull") and "pull" or "poll"
+    M.reload_cfg(curSlot)
     if gpio then
         pcall(gpio.setup, mbus.DE_PIN, 0)
         pcall(gpio.set, mbus.DE_PIN, 0)
@@ -421,8 +430,8 @@ function M.start()
     running = true
     gen = gen + 1
     if sys then sys.taskInit(poll_task) end
-    log.info("poll", string.format("started, regs=%d slave=%d baud=%d parity=%d timeout=%dms",
-        #regs, lastCfg and lastCfg.slave or cfg.SLAVE_ADDR,
+    log.info("poll", string.format("started(%s), regs=%d slave=%d baud=%d parity=%d timeout=%dms",
+        curSlot, #regs, lastCfg and lastCfg.slave or cfg.SLAVE_ADDR,
         lastCfg and lastCfg.baud or cfg.BAUD, lastCfg and lastCfg.parity or cfg.PARITY,
         lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS))
     return true

@@ -8,6 +8,11 @@ local json = corelib.try("json")
 local M = {}
 
 local K_POLL, K_SNIFF, K_SYS = "ds_poll", "ds_sniff", "ds_sys"
+-- ds_pull: 平台拉取配置的独立槽。和 ds_poll 同构(串口参数+slave+regs),
+-- 复用同一份 normalize_poll/default_poll, 不新增校验代码。
+-- 为什么必须分开: 手动配置和平台配置原本共用一个槽, 拉一次平台配置就把
+-- 手配的寄存器表覆盖掉了, 用户没法两个都要(见 lua/README.md 配置来源隔离)
+local K_PULL = "ds_pull"
 
 local function num(v, d)
     if v == nil then return d end
@@ -138,16 +143,21 @@ end
 function M.normalize_sys(c)
     c = c or {}
     local mode = str(c.boot_mode, "idle"):lower():gsub("^%s+", ""):gsub("%s+$", "")
-    if mode ~= "idle" and mode ~= "poll" and mode ~= "sniff" then return nil, "bad boot_mode" end
+    -- pollpull = 拉取配置档: 用 ds_pull 轮询, 且开机后自动 hello 拉一次平台配置。
+    -- 和 poll 共用同一套 normalize_poll, 只是配置来源不同
+    if mode ~= "idle" and mode ~= "poll" and mode ~= "pollpull" and mode ~= "sniff" then
+        return nil, "bad boot_mode"
+    end
     return { boot_mode = mode }
 end
 
--- 三套配置(poll/sniff/sys)的读写除了键、归一化函数、默认值以外完全同构，
+-- 四套配置(poll/pull/sniff/sys)的读写除了键、归一化函数、默认值以外完全同构，
 -- 各写一遍就是三处要同步改。这里合成一张表驱动，函数名是它们唯一的差别。
 -- 注意 load 失败时静默退回默认值(load 用在启动路径, 崩了整个设备起不来),
 -- 而 save 失败必须把原因带回去给 W:CFG 显示
 local SECTIONS = {
     poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll },
+    pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll },
     sniff = { key = K_SNIFF, norm = M.normalize_sniff, default = M.default_sniff },
     sys = { key = K_SYS, norm = M.normalize_sys, default = M.default_sys },
 }
@@ -173,6 +183,15 @@ end
 function M.poll_src()
     if not fskv then return "default" end
     local v = fskv.get(K_POLL)
+    if v == nil or v == "" then return "default" end
+    return "fskv"
+end
+
+-- ds_pull 是否拉过平台配置。前端据此判断"拉取配置"档能不能直接起轮询
+-- (没拉过就必须先走 hello 拉一次, 否则拿 default 去轮询等于凭空造一套寄存器表)
+function M.pull_src()
+    if not fskv then return "default" end
+    local v = fskv.get(K_PULL)
     if v == nil or v == "" then return "default" end
     return "fskv"
 end

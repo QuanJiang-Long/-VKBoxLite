@@ -370,6 +370,12 @@ function esc(s) {
     .replace(/"/g, '&quot;');
 }
 
+// 轮询等识别结果用的延时。setTimeout 版而不是忙等 —— 忙等会把 UI 线程占住,
+// 期间连"取消"按钮都点不动
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // Lua 空表经 json.encode 出来是 {} 而不是 [], JSON.parse 后是对象不是数组。
 // readCfg 那里已经踩过一次(regs 为空), 凡是设备侧可能为空的数组字段都要过
 // 这个: 直接当数组用, 空值时 .filter / .map 会 TypeError, 把一次成功的拉取
@@ -994,17 +1000,34 @@ function confirmAddReg() {
 //=====================================================================
 // 运行模式
 //=====================================================================
+// pollpull 档的拉取进度文案。设备侧 ctrl.status() 的 pull 段来自
+// iot.pull_status(): connecting(等 MQTT 建连) / helloing(发自述) /
+// waiting(等平台下发) / done / fail。返回 null = 没在拉, 由调用方显示"运行中"
+function pullStateText(pull, pollRunning) {
+  if (!pull || !pull.state) return pollRunning ? null : '待拉取';
+  if (pull.state === 'done' || pollRunning) return null;
+  if (pull.state === 'fail') return '拉取失败：' + (pull.msg || '');
+  if (pull.state === 'connecting') return '拉取中（连接 MQTT）…';
+  if (pull.state === 'helloing') return '拉取中（自述 hello）…';
+  if (pull.state === 'waiting') return '拉取中（等平台下发）…';
+  return '拉取中…';
+}
+
 function renderMode() {
   const st = S.modeStat || {};
   const devMode = st.mode || 'idle';        // 设备当前模式（权威）
   const shown = S.modePending || devMode;   // 有待应用选择时优先显示它
   S.mode = devMode;                         // S.mode 始终跟设备走，别处据此判断 sniff
   el.stMode.textContent = devMode;
+  // pollpull 档: 轮询起没起决定卡片状态显示"运行中"还是"拉取中"。
+  // 必须在下面 forEach 之前算 —— 回调是同步执行的, const 声明在后面就是
+  // 暂时性死区, 直接 ReferenceError 把整个 renderMode 打挂
+  const pollRunning = !!((st.poll || {}).running);
   // 卡片选中态：有待应用选择就高亮它，否则高亮设备当前模式
-  // 模式名直接从 k 推导（idle/poll/sniff），不读 data-mode 属性：
+  // 模式名直接从 k 推导（idle/poll/pollpull/sniff），不读 data-mode 属性：
   // 少一次 DOM 读取，也不依赖属性是否被正确设置。
-  ['Idle', 'Poll', 'Sniff'].forEach(k => {
-    const dm = k.toLowerCase();       // idle / poll / sniff，与卡片 data-mode 一致
+  ['Idle', 'Poll', 'Pollpull', 'Sniff'].forEach(k => {
+    const dm = k.toLowerCase();       // idle / poll / pollpull / sniff，与卡片 data-mode 一致
     const c = $('mc' + k);
     if (c) c.classList.toggle('active', dm === shown);
     // 卡片状态行：让用户看清"这是设备现状"还是"我选的还没应用"
@@ -1012,7 +1035,15 @@ function renderMode() {
     if (stEl) {
       const isPending = S.modePending && dm === S.modePending && dm !== devMode;
       if (isPending) stEl.textContent = S.modeSwitching ? '切换中…' : '待应用';
-      else if (dm === devMode) stEl.textContent = (devMode === 'idle' ? '当前' : '运行中');
+      else if (dm === devMode) {
+        // pollpull 的卡片状态要能看出"配置拉到没": 拉取是异步的(最坏 35s),
+        // 那期间模式已经是 pollpull 但轮询还没起, 只显示"运行中"会误导
+        if (dm === 'pollpull') {
+          stEl.textContent = pullStateText(st.pull, pollRunning) || '运行中';
+        } else {
+          stEl.textContent = (devMode === 'idle' ? '当前' : '运行中');
+        }
+      }
       else stEl.textContent = '';
       stEl.classList.toggle('pending', !!isPending);
     }
@@ -1028,6 +1059,10 @@ function renderMode() {
   // guard 段只在 R:STAT 顶层有，R:MODE 不返回 → 必须从 S.stat 取
   const g = (S.stat && S.stat.guard) || {};
   setKv('mCurMode', devMode);
+  // 配置来源: 让用户看清当前采的是手配那份还是平台那份。两套配置是独立的,
+  // 混在一起显示"poll"根本分不出, 所以才单列一个格子
+  setKv('mCfgSrc', devMode === 'poll' ? '手动配置（ds_poll）'
+    : devMode === 'pollpull' ? '平台拉取（ds_pull）' : '--');
   setKv('mBusy', st.busy ? '占用中' : '空闲');
   setKv('mSlave', p.slave);
   setKv('mBaud', p.baud);
@@ -1044,6 +1079,22 @@ function renderMode() {
   setKv('mReqRsp', (m.reqs != null ? m.reqs : 0) + ' / ' + (m.rsps != null ? m.rsps : 0));
   setKv('mUptime', g && g.uptime != null ? g.uptime + ' s' : '');
   setKv('mWdt', g.wdt_to ? (wdtStalled(g, !!p.running).stalled ? '停滞!' : '正常') : '未启用');
+
+  // sniff 页的「已识别/正在识别」提示也由这里驱动: R:MODE 的 mon 段带
+  // detecting/detect_round/detect_fail, 5s 轮询就能让用户看到识别进度,
+  // 不用他自己去点按钮问。两个渲染函数互斥, 见各自的注释
+  if (m.detecting) {
+    renderDetecting(m);
+  } else if (devMode === 'sniff') {
+    // 刷新页面后 S.detected 是空的, 但设备还记着上一轮的结果(mon.status 的
+    // detected 段) —— 拿它兜底, 否则用户会看到"已识别"凭空消失
+    if (!S.detected && m.detected && m.detected.baud != null) S.detected = m.detected;
+    if (S.detected) renderDetected();
+    else el.detectHint.textContent = '';
+  } else {
+    S.detected = null;      // 离开 sniff 就作废: 下次进去会重新识别
+    el.detectHint.textContent = '';
+  }
   syncTabs();
 }
 
@@ -1051,6 +1102,7 @@ function renderMode() {
 // 栏目随运行模式显隐
 //   idle  → 只有 首页 / 运行模式
 //   poll  → 首页 / 运行模式 / poll模式
+//   pollpull → 首页 / 运行模式 / poll模式（拉取档也要能看/改配置）
 //   sniff → 首页 / 运行模式 / sniff模式
 // poll 与 sniff 是两种互斥的总线用法，设备同一时刻只跑一种，另一个页面留在
 // 栏目上只会让人以为它也在工作。设备没接总线时尤其容易误点进去看一片空。
@@ -1058,7 +1110,11 @@ function renderMode() {
 //=====================================================================
 function syncTabs() {
   const mode = S.mode || 'idle';
-  const show = { tab0: true, tabMode: true, tabPoll: mode === 'poll', tabSniff: mode === 'sniff' };
+  // pollpull 归到 poll 页: 拉取档一样要看寄存器表和 MQTT 状态, 只是配置
+  // 来源不同(平台 vs 手配)。少开一个栏目, 用户也不用理解"为什么两个 poll 页"
+  const show = { tab0: true, tabMode: true,
+    tabPoll: mode === 'poll' || mode === 'pollpull',
+    tabSniff: mode === 'sniff' };
   Object.keys(show).forEach(id => {
     const t = document.querySelector('.tab-header .tab-item[data-tab="' + id + '"]');
     if (t) t.style.display = show[id] ? '' : 'none';
@@ -1068,6 +1124,38 @@ function syncTabs() {
   const active = document.querySelector('.tab-header .tab-item.active');
   const activeId = active && active.getAttribute('data-tab');
   if (!show[activeId]) activateTab('tab0');
+}
+
+// 等 pollpull 的平台配置拉取落地。设备侧 ctrl.status() 的 pull 段来自
+// iot.pull_status(): connecting -> helloing -> waiting -> done / fail。
+// R:MODE 一秒钟轮一次就够(建连 20s + 等下发 15s 是设备侧的粗粒度等待,
+// 前端问得太频只是占串口)
+async function waitPullDone() {
+  const t0 = Date.now();
+  while (Date.now() - t0 < 55000) {
+    await readMode();
+    const pull = (S.modeStat && S.modeStat.pull) || {};
+    const polling = !!((S.modeStat || {}).poll || {}).running;
+    if (polling) {
+      // 轮询起来了才是真的到位: 设备是在 save_pull 之后才 start("pull") 的
+      status('平台配置已拉取并生效，开始轮询', true);
+      toast('已切换到 poll（拉取配置）模式，开始轮询');
+      await readCfg();       // 表单回填成平台那份, 否则用户看到的还是手配的
+      // 进 pollpull 时设备已被 ctrl 强制切到 MQTT 自动档, 不重读的话
+      // MQTT 页那个手动档开关还停在旧状态, 和设备实际用的档位不一致
+      readMqtt(true);
+      return true;
+    }
+    if (pull.state === 'fail') {
+      status('平台配置拉取失败：' + (pull.msg || '未知原因'), false);
+      toast('拉取失败：' + (pull.msg || '未知原因') + '，模式已退回，可重试');
+      return false;
+    }
+    await sleep(1000);
+  }
+  status('拉取超时：平台未在 55 秒内下发配置', false);
+  toast('拉取超时，可点「重新拉取」再试');
+  return false;
 }
 
 async function readMode() {
@@ -1087,14 +1175,40 @@ async function applyMode(mode) {
   S.modePending = mode;          // 先记下用户所选，防止 5s 定时刷新把高亮打回旧模式
   renderMode();
   try {
-    status('正在切换模式到 ' + mode + ' …', true);
+    status('正在切换到 ' + (MODE_LABEL[mode] || mode) + ' …', true);
     await sendCmd(Protocol.Enc.setMode(mode), 'MODE', 8000);
     await readMode();            // 设备已确认，读回真实状态
     S.modePending = null;        // 确认成功，清除待应用标记
     renderMode();
     await readHome();
-    status('已切换到 ' + mode + ' 模式', true);
-    toast('模式已切换：' + mode);
+    // sniff 模式: W:MODE 只是"起了业务并开始后台识别", 不是识别完成。
+    // 真正的到位要等 pollDetect 拿到参数 —— 那之前总线上看到的还是
+    // 错参数的乱码, 所以这里必须说清"还在识别", 别让用户以为已经在听了
+    if (mode === 'sniff') {
+      status('已进入旁听，正在识别通讯参数（最坏 21 秒，完成后自动开始旁听）…', true);
+      const d = await pollDetect(25);
+      if (d) {
+        status('识别成功，开始旁听：' + serialDesc(d), true);
+        toast('已识别 ' + serialDesc(d) + '，开始旁听');
+      } else {
+        status('识别未完成，设备会在后台每 3 秒重试直到认出来', false);
+        toast('识别未完成，设备会自动重试；总线无流量时可检查 AB 线/从机');
+      }
+      readMode();
+      return;
+    }
+    // pollpull: W:MODE 只保证"起了拉取握手", 轮询要等平台配置落地后才开始
+    // (最坏 35s = MQTT 建连 20s + 等下发 15s)。期间模式已是 pollpull 但还
+    // 没在采, 只提示"已切换"会让用户以为已经在轮询了
+    if (mode === 'pollpull') {
+      await waitPullDone();
+      return;
+    }
+    // 切到 poll(手动配置)时 ctrl 会把设备 MQTT 档位强制切回手动档,
+    // 不重读的话 MQTT 页的手动档开关和实际档位不一致
+    if (mode === 'poll') readMqtt(true);
+    status('已切换到 ' + (MODE_LABEL[mode] || mode) + ' 模式', true);
+    toast('模式已切换：' + (MODE_LABEL[mode] || mode));
   } catch (e) {
     // 失败：放弃待应用选择，让界面回到设备真实模式
     S.modePending = null;
@@ -1111,8 +1225,10 @@ async function saveBootMode() {
   const v = el.selBootMode.value;
   try {
     await sendCmd(Protocol.Enc.bootMode(v), 'BOOTMODE');
-    status('开机默认模式已设为 ' + v + '（重启后生效）', true);
-    toast('开机默认模式：' + v);
+    // 别把 pollpull 这种内部模式名直接糊到用户脸上
+    const label = MODE_LABEL[v] || v;
+    status('开机默认模式已设为 ' + label + '（重启后生效）', true);
+    toast('开机默认模式：' + label);
   } catch (e) {
     status('保存失败：' + e.message, false);
     toast('保存失败：' + e.message);
@@ -1530,6 +1646,9 @@ async function readFrames() {
     const r = await sendCmd(Protocol.Enc.frames(30), 'FRAMES', 4000);
     S.frames = Array.isArray(r.data) ? r.data : [];
     renderFrames();
+    // 从站号是从报文里数出来的, 报文刷新了就得重算, 否则「已识别」提示里的
+    // 从站号会一直停在点识别那一刻的快照上
+    renderDetected();
   } catch (e) { /* 静默：可能未进 sniff 模式 */ }
 }
 
@@ -1540,7 +1659,9 @@ async function doInfer() {
     renderInfer();
     if (toArr(S.infer && S.infer.regs).length) {
       status('推断出 ' + toArr(S.infer.regs).length + ' 个轮询项', true);
-      toast('推断完成，可点「应用到轮询配置」');
+      // 不能提"应用到轮询配置": 那个按钮和 W:APPLYINFER 已经删了,
+      // 推断结果只作参考, 由人工核对后自行配置(见 lua/README.md 配置隔离)
+      toast('推断完成，结果仅供参考，请核对后自行配置');
     } else {
       status('未监听到请求帧，先在旁听模式下观察一段时间', false);
       toast('还没有监听到请求帧');
@@ -1578,29 +1699,101 @@ function renderInfer() {
 //---------------------------------------------------------------------
 const PARITY_NAME = { 0: '无(N)', 1: '偶(E)', 2: '奇(O)' };
 
-// 识别 sniff 的通讯参数。设备侧最坏 21s(21 候选×1s)，8N1 常见 1~7s，
-// 所以超时按最坏给，别让用户看到假的超时失败
+// 从已加载报文里统计出现最多的从站号。sniff 是被动旁听, 没法"识别"从站号,
+// 只能看总线上主机在访问谁 —— 所以这个值标注为"观测"而非"识别"。
+// 没有报文时返回 null, 由调用方决定怎么显示
+function observedSlave() {
+  const cnt = {};
+  let best = null, bestN = 0;
+  for (const f of S.frames) {
+    if (f.slave == null) continue;
+    cnt[f.slave] = (cnt[f.slave] || 0) + 1;
+    if (cnt[f.slave] > bestN) { bestN = cnt[f.slave]; best = f.slave; }
+  }
+  return best;
+}
+
+// 轮询等识别结果。设备侧 R:AUTODETECT 是非阻塞的: 立即回 BUSY 或上一次的结果,
+// 真正的扫描在后台跑(最坏 21s, 失败还会每 3s 重来一轮直到成功)。
+// 所以这里不能死等一条应答 —— 那会把命令分发循环占住, 前端别的指令全卡
+async function pollDetect(maxSec) {
+  for (let i = 0; i < maxSec; i++) {
+    await sleep(1000);
+    let r;
+    try { r = await sendCmd(Protocol.Enc.autoDetect(), 'AUTODETECT', 4000); }
+    catch (e) { continue; }               // 偶发超时: 下一轮再问, 不判失败
+    const raw = typeof r.raw === 'string' ? r.raw : '';
+    if (raw === 'BUSY') continue;         // 还在扫
+    if (raw.indexOf('RET:FAIL') === 0) return null;   // 没进 sniff 模式等
+    const d = r.data || {};
+    if (d.baud != null) {
+      // 4 个串口参数全存: 设备本来就返回 databits/stopbits。从站号不存 ——
+      // 它不是识别出来的, 是从报文里观测的
+      S.detected = { baud: d.baud, databits: d.databits, parity: d.parity, stopbits: d.stopbits };
+      renderDetected();
+      return d;
+    }
+  }
+  return null;
+}
+
+// 手动「重新识别」。设备侧 request_detect() 会作废当前轮并从第一个候选重新扫,
+// 所以识别中点它等于立刻重启一轮, 不用先停再进
 async function autoDetect() {
   try {
-    status('正在识别通讯参数（最坏 21 秒，通常几秒）…', true);
-    const r = await sendCmd(Protocol.Enc.autoDetect(), 'AUTODETECT', 26000);
-    const d = r.data || {};
-    S.detected = { baud: d.baud, parity: d.parity };
-    const p = PARITY_NAME[d.parity] || (' parity=' + d.parity);
-    status('识别成功：' + d.baud + ' / ' + d.databits + p + d.stopbits, true);
-    toast('已识别 ' + d.baud + '/' + d.databits + p + d.stopbits + '（仅本次会话，未改配置）');
-    renderDetected();
+    status('正在识别通讯参数…', true);
+    const r = await sendCmd(Protocol.Enc.autoDetect(), 'AUTODETECT', 4000);
+    const raw = typeof r.raw === 'string' ? r.raw : '';
+    if (raw.indexOf('RET:FAIL') === 0) {
+      status('识别失败：先进旁听模式（运行模式页选 sniff）', false);
+      toast('识别失败：当前不在旁听模式');
+      return;
+    }
+    // 头一次问就带回结果: 说明上一轮已经识别过了, 直接用
+    const d = (r.data && r.data.baud != null) ? r.data : await pollDetect(25);
+    if (!d) {
+      // 25s 还没出结果 ≠ 失败: 设备会一直重试, 这里只告知"还没认出来"
+      status('识别未完成，设备会在后台继续重试', false);
+      toast('识别未完成，设备会自动重试直到认出来');
+      return;
+    }
+    status('识别成功：' + serialDesc(d) + '（仅本次会话，未改配置）', true);
+    toast('已识别 ' + serialDesc(d) + '（仅本次会话，未改配置）');
   } catch (e) {
     status('识别失败：' + e.message, false);
     toast('识别失败：21 组候选都没解出合法帧，查 AB 线/从机是否在报');
   }
 }
 
+// 串口参数的完整描述: 波特率 / 数据位 / 校验 / 停止位。
+// 单独抽出来是因为 toast、status、detectHint 三处都要用同一份格式,
+// 之前三处各拼各的, toast 里还把校验名插在数据位和停止位之间成了 "8无(N)1"
+function serialDesc(d) {
+  return (d.baud != null ? d.baud : '?') + ' / ' +
+         (d.databits != null ? d.databits : '?') + ' 数据位 / ' +
+         (PARITY_NAME[d.parity] || ('校验' + d.parity)) + ' / ' +
+         (d.stopbits != null ? d.stopbits : '?') + ' 停止位';
+}
+
 function renderDetected() {
   const d = S.detected;
-  el.detectHint.textContent = d && d.baud
-    ? '已识别：' + d.baud + ' / ' + (PARITY_NAME[d.parity] || d.parity)
-    : '';
+  if (!d || d.baud == null) { el.detectHint.textContent = ''; return; }
+  // 从站号另起一段并标明"观测": 被动旁听拿不到从站号, 它是从报文里数出来的,
+  // 和上面 4 个"识别"出来的参数不是一个性质, 含混写成一个"已识别"会误导
+  const sl = observedSlave();
+  el.detectHint.textContent = '已识别：' + serialDesc(d) +
+    (sl != null ? ' · 观测到从站 ' + sl : ' · 从站未观测到（先听一会儿报文）');
+}
+
+// 识别进行中的提示。由 renderMode() 在读到 mon.detecting 时调用, 和
+// renderDetected() 共用同一个 span, 所以两者互斥 —— 识别中不显示"已识别",
+// 认出来了才显示
+function renderDetecting(st) {
+  const round = st.detect_round || 0;
+  const fail = st.detect_fail || 0;
+  el.detectHint.textContent = '正在识别通讯参数…（第 ' + round + ' 轮' +
+    (fail > 0 ? '，已失败 ' + fail + ' 次' : '') +
+    '，最坏 21 秒，完成后自动开始旁听）';
 }
 
 async function busSniff() {
@@ -1794,7 +1987,14 @@ el.btnSaveBoot.onclick = saveBootMode;
 // 之前只切高亮不发命令，5s 定时刷新一到就把高亮打回旧模式，
 // 表现为"选中后模式自动跳回原来模式"。
 // 卡片区域大、容易误点，切换又要停掉旧模式，所以必须弹窗确认。
-const MODE_LABEL = { idle: '空闲 idle', poll: '轮询 poll', sniff: '旁听 sniff' };
+// 设备侧模式名 -> 用户看得懂的中文。pollpull 是内部约定名(设备侧 ds_pull
+// 配置槽的标志), 直接显示会把用户搞糊涂, 所有 toast/status/保存回显都走它
+const MODE_LABEL = {
+  idle: '空闲 idle',
+  poll: 'poll（手动配置）',
+  pollpull: 'poll（拉取配置）',
+  sniff: '旁听 sniff'
+};
 document.querySelectorAll('.mode-card').forEach(c => {
   c.onclick = async () => {
     const m = c.getAttribute('data-mode');
@@ -1926,7 +2126,7 @@ el.btnMqttReset.onclick = async () => {
 
 // 报文页
 el.btnFrameRefresh.onclick = readFrames;
-el.btnFrameClear.onclick = () => { S.frames = []; renderFrames(); };
+el.btnFrameClear.onclick = () => { S.frames = []; renderFrames(); renderDetected(); };
 el.frameFilter.onchange = renderFrames;
 el.btnInfer.onclick = doInfer;
 el.btnAutoDetect.onclick = autoDetect;
@@ -2003,6 +2203,8 @@ if (window.serial) {
 // 状态永远是初始值，看不出交互效果
 const MOCK = {
   mode: 'idle',
+  detecting: false,   // 预览用: 下一次 R:AUTODETECT 先回一次 BUSY
+  pulling: false,     // 预览用: pollpull 的假拉取进行中(见 mockModeStat)
   cfg: {
     baud: 9600, databits: 8, parity: 0, stopbits: 1, slave: 1,
     interval_ms: 3000, timeout_ms: null,
@@ -2023,16 +2225,25 @@ const MOCK = {
 
 function mockModeStat() {
   const m = MOCK.mode;
+  // pollpull 也要算"在跑 poll": 它是拉取档, 轮询行为与 poll 相同, 只是配置
+  // 来源不同。少了这个分支, 浏览器预览时 pollpull 卡片永远显示"待拉取"
+  const isPoll = (m === 'poll' || m === 'pollpull');
   return {
     mode: m, busy: m !== 'stop' && m !== 'idle',
-    poll: { running: m === 'poll', gen: m === 'poll' ? 1 : 0, regs: MOCK.cfg.regs.length,
+    // poll_src/pull_ready 与设备 ctrl.status() 对齐, 前端据此显示"配置来源"
+    poll_src: isPoll ? (m === 'pollpull' ? 'pull' : 'poll') : null,
+    pull_ready: 'fskv',
+    pull: m === 'pollpull' ? { state: MOCK.pulling ? 'waiting' : 'done', msg: '' } : null,
+    poll: { running: isPoll, gen: isPoll ? 1 : 0, regs: MOCK.cfg.regs.length,
             slave: MOCK.cfg.slave, baud: MOCK.cfg.baud, interval: MOCK.cfg.interval_ms,
             resp_cap: MOCK.cfg.timeout_ms == null ? 500 : MOCK.cfg.timeout_ms,
             write: { queued: 0, done: 0, fail: 0, last_err: '', qmax: 8 } },
     mon: { running: m === 'sniff', gen: m === 'sniff' ? 1 : 0, baud: MOCK.cfg.baud,
            frames: m === 'sniff' ? 24 : 0, reqs: m === 'sniff' ? 12 : 0,
            rsps: m === 'sniff' ? 11 : 0, errs: 0, paired: m === 'sniff' ? 10 : 0,
-           orphans: m === 'sniff' ? 1 : 0, pending: 0, last_rx: 0, buf: 0 },
+           orphans: m === 'sniff' ? 1 : 0, pending: 0, last_rx: 0, buf: 0,
+           detecting: m === 'sniff' && MOCK.detecting,
+           detect_round: m === 'sniff' ? 1 : 0, detect_fail: 0 },
     // 与设备 485_ctrl.status() 对齐：写队列统计在顶层
     write: { queued: 0, done: 0, fail: 0, last_err: '', qmax: 8 }
   };
@@ -2114,14 +2325,28 @@ function mockReply(line) {
       { slave: 2, addr: 0, count: 10, fc: 3, hits: 5 }
     ],
     slaves: [1, 2],
-    stat: { frames: 24, reqs: 12, rsps: 11, errs: 0, paired: 10, orphans: 1 }
+    stat: { frames: 24, reqs: 12, rsps: 11, errs: 0, paired: 10, orphans: 1, detect_round: 0, detect_fail: 0 }
   });
+  // 浏览器预览: 模拟"进了 sniff 但还在识别"这一小段, 让「正在识别」提示
+  // 在没接真设备时也走得到(真设备由 mon.is_detecting() 给)
+  else if (line === 'R:AUTODETECT' && MOCK.detecting) {
+    MOCK.detecting = false;
+    resp = 'RET:AUTODETECT=BUSY';
+  }
   else if (line === 'R:AUTODETECT') resp = 'RET:AUTODETECT=' + JSON.stringify(
     { baud: 9600, databits: 8, stopbits: 1, parity: 0 });
   else if (line.indexOf('R:SNIFF=') === 0) resp = 'RET:SNIFF=3';
   else if (line.indexOf('W:TX=') === 0) resp = 'RET:TX=OK';
   else if (line.indexOf('W:MODE=') === 0) {
     MOCK.mode = line.slice(7);
+    // 真设备是"进 sniff 就异步开始识别", 预览也照样演一遍
+    MOCK.detecting = (MOCK.mode === 'sniff');
+    // pollpull: 真设备进模式即起 hello 拉取(异步)。预览用 1.2s 假等一会,
+    // 让"拉取中→已生效"的过渡在没接设备时也看得到
+    MOCK.pulling = (MOCK.mode === 'pollpull');
+    if (MOCK.pulling) {
+      setTimeout(() => { MOCK.pulling = false; }, 1200);
+    }
     resp = 'RET:MODE=OK';
   }
   else if (line.indexOf('W:BOOTMODE=') === 0) resp = 'RET:BOOTMODE=OK';

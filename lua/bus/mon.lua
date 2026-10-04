@@ -16,6 +16,15 @@ local running, gen = false, 0
 local rxbuf = ""
 local pendingReqs, lastReqs = {}, {}
 local lastRx, lastBaud = 0, nil
+-- 识别中标记: true = 正在扫 21 个候选, 业务(collector 推送/配对)视为未就绪。
+-- M.stop() 会清掉它, 所以外部靠 mon.is_detecting() 判断要不要屏蔽写操作
+local detecting, detectGen = false, 0
+-- 进 sniff 时用的那套配置参数(可能和现场不符)。识别失败时要把串口还原成它,
+-- 否则扫空一轮后串口停在最后一个候选(1200 8O1)上, 真流量全成乱码
+local bootCfg = nil
+-- 两轮识别之间的间隔。静默总线下没必要高频重扫(白耗电+刷日志),
+-- 3s 足够等到稀疏主机冒出流量
+local DETECT_RETRY_MS = 3000
 -- 每 fc 最多留 4 条待配对请求。能进 push_req 的 fc 只有 3/5/15 三个
 -- (parse_frame 是白名单 + 强制 CRC, 其余 fc 到不了这里), 所以
 -- pendingReqs 总共 ≤ 12 条 —— 改 decode_frame 的 kind 判断时记得复核这条
@@ -26,7 +35,8 @@ local MAX_PENDING_PER_FC = 4
 -- guess_last_req 本来只认 10 秒内的条目, 丢掉的都是更旧的, 配对结果不变
 local MAX_LAST_REQ = 64
 local PAIR_TIMEOUT_MS = 250
-local stat = { frames = 0, reqs = 0, rsps = 0, errs = 0, paired = 0, orphans = 0 }
+local stat = { frames = 0, reqs = 0, rsps = 0, errs = 0, paired = 0, orphans = 0,
+               detect_round = 0, detect_fail = 0 }
 
 local function key(slave, qty) return tostring(slave) .. ":" .. tostring(qty) end
 
@@ -253,6 +263,7 @@ function M.start(c)
         log.error("mon", "setup failed:", tostring(err))
         return false
     end
+    bootCfg = c
     lastBaud = c.baud or cfg.BAUD
     pcall(uart.on, mbus.UART_ID, "receive", on_receive)
     running = true
@@ -265,11 +276,21 @@ end
 -- iot 的 OOM 兜底调它: collector.trim_cache() 清不到 mon 的局部表
 function M.trim_reqs() lastReqs = {} end
 
--- sniff 通讯参数自动识别(前端 R:AUTODETECT)。
--- 21 个候选 = 7 baud × 3 parity，parity 放外层：8N1 占现场绝大多数，先把
--- 8N1 整个扫完再碰 E/O，常见情况 1~7s 命中，全落空才走满 21s。
--- databits/stopbits 固定 8/1 —— ModbusRTU 事实标准，7 位/2 停止位极少见，
--- 为它们再加 3 倍候选不划算。
+-- 扫空一轮后把串口还原成进 sniff 时那套参数。不还原的话, 失败后串口停在最后
+-- 一个候选(1200 8O1), 接下来 3s 等待期里到的真流量全成乱码, 而下一轮又要从
+-- 9600 重新开始 —— 中间那段窗口看着像"总线时好时坏", 查不出原因
+local function restore_params()
+    local c = bootCfg or cfgstore.load_sniff()
+    pcall(uart.setup, mbus.UART_ID, c.baud or cfg.BAUD,
+        c.databits or cfg.DATABITS, c.stopbits or cfg.STOPBITS,
+        mbus.parity_to_uart(c.parity or cfg.PARITY))
+    pcall(uart.on, mbus.UART_ID, "receive", on_receive)
+    lastBaud = c.baud or cfg.BAUD
+end
+
+-- sniff 通讯参数自动识别。21 个候选 = 7 baud × 3 parity，parity 放外层：8N1 占
+-- 现场绝大多数，先把 8N1 的 7 个 baud 扫完再碰 E/O，常见情况 1~7s 命中，全落空
+-- 才走满 21s。databits/stopbits 固定 8/1 —— ModbusRTU 事实标准。
 --
 -- 判定不新写校验，直接借 task() 现有的 CRC 试探切帧，只数 stat.frames 增量：
 -- 参数错 → 字节乱 → CRC 不过 → 一帧都解不出。CRC 是 16 位校验，单帧误判
@@ -300,14 +321,61 @@ function M.auto_detect()
                     return { baud = b, databits = 8, stopbits = 1, parity = p }
                 end
             end
+            if not running then return nil, "stopped" end
         end
     end
+    restore_params()
     log.warn("mon", "detect fail: 21 candidates no hit")
     return nil, "no hit"
 end
 
+-- 识别循环: 扫一轮, 不中就还原参数、等 3s、再扫一轮, 直到命中或 mon.stop()。
+-- 为什么不回 idle: 模式必须停在 sniff, 否则前端看到模式掉回 idle 会以为设备
+-- 重启了; 而静默总线/主机间歇轮询时, 一直重试总能等到它有流量的那一刻。
+-- 用户想放弃就 W:MODE=idle, 那会把 running 置假从而打断这个循环
+--
+-- mydgen 的作用和 task() 里的 mygen 一样: 「重新识别」会把 detectGen 加一,
+-- 旧循环下次检查就悄悄退出, 不碰 detecting 也不认自己的结果 —— 否则两个循环
+-- 会同时抢串口, 而先完成那个可能把后一个的结果覆盖掉
+local function detect_loop()
+    local mydgen = detectGen
+    while running and detectGen == mydgen do
+        detecting = true
+        stat.detect_round = stat.detect_round + 1
+        local r = M.auto_detect()
+        if detectGen ~= mydgen or not running then return end
+        if r then
+            detecting = false
+            _G.mon_detect_result = r
+            log.info("mon", "detect ok, sniff ready")
+            return
+        end
+        stat.detect_fail = stat.detect_fail + 1
+        log.warn("mon", "detect round " .. stat.detect_round .. " no hit, retry in "
+            .. DETECT_RETRY_MS .. "ms")
+        if sys then sys.wait(DETECT_RETRY_MS) end
+    end
+end
+
+-- 请求开始/重来一轮识别。已在识别中就把 detectGen 加一作废当前轮, 由新任务从
+-- 第一个候选重新扫 —— 这就是前端「重新识别」按钮的语义
+function M.request_detect()
+    if not running then return false, "not running" end
+    detectGen = detectGen + 1
+    _G.mon_detect_result = nil
+    if sys then sys.taskInit(detect_loop) end
+    return true
+end
+
+function M.is_detecting() return detecting end
+
+function M.detect_result() return _G.mon_detect_result end
+
 function M.stop()
     if not running then return true end
+    -- detecting 必须在这里清: W:MODE=idle 是用户在识别中途唯一的逃生口,
+    -- 少了这行 cmd 的 BUSY 闸门会一直把后续命令挡在外面, 设备像卡死
+    detecting = false
     running = false
     gen = gen + 1
     if gpio then pcall(gpio.set, mbus.DE_PIN, 0) end
@@ -326,6 +394,9 @@ function M.status()
     st.running = running
     st.gen = gen
     st.baud = lastBaud or cfg.BAUD
+    -- 前端要靠它显示"正在识别(第N轮/已失败M次)", 也要靠它判断能不能点重新识别
+    st.detecting = detecting
+    st.detected = _G.mon_detect_result
     st.pending = (function()
         local n = 0
         for _, q in pairs(pendingReqs) do n = n + #q end

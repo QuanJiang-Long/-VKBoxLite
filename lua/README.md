@@ -53,7 +53,9 @@ lua/
 ## 数据流
 
 ```
-Q2: W:MODE=poll → ctrl → poll(总线唯一主人) → parse_frame/parse_value → collector
+Q2: W:MODE=poll     → ctrl → poll(总线唯一主人, 用 ds_poll 手配) → collector
+    W:MODE=pollpull → ctrl → iot.hello 拉配置 → save ds_pull
+                                  → poll(用 ds_pull) → collector
 
 Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配对 → push_frame
 
@@ -82,7 +84,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | 指令 | 用途 |
 |---|---|
 | R:INFO | 设备信息（SN/IMEI/ICCID/CSQ/RSRP/版本/项目/服务器/波特率/从机/寄存器数/锁状态） |
-| R:MODE / W:MODE=idle\|poll\|sniff | 模式查询（返回 {mode,busy,poll,mon,write}）/ 切换 |
+| R:MODE / W:MODE=idle\|poll\|pollpull\|sniff | 模式查询（返回 `{mode,busy,poll_src,pull_ready,pull,poll,mon,write}`）/ 切换。`pollpull` = 拉取配置档，进模式自动 hello 拉取 |
 | R:CFG / W:CFG={json} | 轮询配置读写，读返回 `{cfg, src}`，src=default 表示 fskv 里没写过 |
 | R:REG / W:REG=[json] | 寄存器表读写 |
 | R:VAL | 实时值快照 |
@@ -96,10 +98,11 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | W:GC | 强制 GC + 重连 |
 | R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20） |
 | R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits}], slaves, stat}`（**只读参考**，不写任何配置） |
-| R:AUTODETECT | 识别 sniff 通讯参数 `{baud,databits,stopbits,parity}`（**只用于本次会话**，不写 fskv） |
+| R:AUTODETECT | 识别 sniff 通讯参数 `{baud,databits,stopbits,parity}`（**只用于本次会话**，不写 fskv）。**非阻塞**：回 `BUSY` / 参数 / `RET:FAIL:not in sniff mode`，由前端轮询 |
 | R:SNIFF=ms | 静默侦听总线 ms 毫秒（100~30000），返回帧数 |
-| W:TX=hex | 裸发一串字节（总线诊断），回显 rx_len/parsed/rx |
-| W:BOOTMODE=idle\|poll\|sniff | 开机默认模式（大小写不敏感） |
+| W:TX=hex | 裸发一串字节（总线诊断），回显 rx_len/parsed/rx（识别中回 BUSY） |
+| W:MODE=poll\|pollpull\|sniff\|idle | 切换 485 运行模式。`sniff` 会**自动起一轮识别**（非阻塞），立即回 OK；`pollpull` 会自动 hello 拉平台配置 |
+| W:BOOTMODE=idle\|poll\|pollpull\|sniff | 开机默认模式（大小写不敏感）。`sniff` 同样自动识别，但不堵开机流程 |
 | R:SN / R:ID / W:SN=xxx[,FORCE] / C:SN / LOCK:SN / UNLOCK:SN / R:SNEN / W:SNEN=n,0\|1[,P] | SN 产线指令（VUART_0 通道） |
 
 > 指令集与 `frontend/protocol.js` 的 `Enc` 一一对应。`W:RAWTEST`/`R:NET`/`R:MEM`/`W:GC` 是前端不调用的现场诊断入口。
@@ -133,7 +136,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 
 - Value ≤255B：最多 **812** 个键值对（本框架全部配置均在此区间，JSON 限 512B 内）
 - Value ≥256B：每个占一个 4K block，最多 **14** 个
-- 当前键用量：`ds_poll`/`ds_sniff`/`ds_sys`/`mqtt_cfg`/`ds_enable`/`ds_boots`/`dev_sn*` 共 4 个 ≈ 10 个，余量充足
+- 当前键用量：`ds_poll`/`ds_pull`/`ds_sniff`/`ds_sys`/`mqtt_cfg`/`ds_enable`/`ds_boots`/`dev_sn*` 共 5 个 ≈ 10 个，余量充足
 
 ## poll / sniff 配置隔离
 
@@ -142,6 +145,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | 配置 | 键 | 字段 | 谁写它 |
 |---|---|---|---|
 | `poll` | `ds_poll` | 串口参数 + slave + interval + timeout + **regs 寄存器表** | `W:CFG`、前端「保存配置」 |
+| `pull` | `ds_pull` | 同 `ds_poll`（复用同一份 normalize/default） | 平台配置落地 `iot.auto_apply` |
 | `sniff` | `ds_sniff` | **只有串口参数** | 无（始终用默认值，见下） |
 | `sys` | `ds_sys` | boot_mode | `W:BOOTMODE` |
 
@@ -156,6 +160,39 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
   由人工核对后自行配置。
 - **两套串口参数独立**。poll 改了波特率不影响 sniff，反之亦然。代价是同一台设备两种
   模式可能要各配一次——但总线波特率本来就是物理属性，通常两边填一样的值。
+
+## 手动配置 / 拉取配置隔离（`ds_poll` vs `ds_pull`）
+
+平台配置原本和手动配置**共用 `ds_poll` 一个槽**，`iot.auto_apply()` 一落盘就把用户
+手配的寄存器表整份覆盖掉——拉一次平台配置，手配的那套就没了，两个都要不了。
+
+现在拆成两个**同构**的槽（复用同一份 `normalize_poll`/`default_poll`，零新增校验代码），
+由运行模式决定用哪个：
+
+| 运行模式 | `W:MODE=` | MQTT 档位 | 配置槽 | 行为 |
+|---|---|---|---|---|
+| poll（手动配置） | `poll` | `manual_on=true` | `ds_poll` | 用手配的寄存器表和 MQTT |
+| poll（拉取配置） | `pollpull` | `manual_on=false` | `ds_pull` | 进入即自动 hello 拉平台配置 |
+| 旁听 sniff | `sniff` | 无所谓 | 不用 | 只收不发 |
+| 空闲 idle | `idle` | 不变 | 不用 | 不动总线 |
+
+**模式、档位、配置槽三者绑定，没有混搭场景**：要么全手配（寄存器表 + MQTT），
+要么全平台拉取。`ctrl.SLOT` 这张表就是这个映射，改任何一个都要三处同步。
+
+- **拉取档必须关掉手动档**。hello 的应答走 `config/get` 下行，而 `build_subs()` 在
+  手动档**不订这条**（手动档接的是用户自己的 broker，平台那套 topic 订着也是噪音），
+  所以 `ctrl` 进 `pollpull` 前先 `iot.set_manual(false)`。少了这步，hello 发出去
+  必然等满 15s 超时——`iot.lua` 的 build_subs 注释里记着这个坑。
+- **档位切换要断开重连**。`S.manual_on` 是在 `try_connect()` 里读的，订阅清单挂在
+  conack 上，已连接的 client 不会自己重读。`set_manual()` 因此 `destroy_client()`
+  + `kick()`，让 `task_main` 用新档位重连重建订阅。代价只是丢一次心跳周期，
+  `collector` 的数据和寄存器表都不动。
+- **平台推送只在拉取档生效**。`auto_apply()` 落 `ds_pull` 后，只有 `poll.slot()=="pull"`
+  才 `apply_cfg`/`start`。跑手动档时那份配置只是**存着备用**——否则用户没切档就被
+  平台改了寄存器表。
+- **进 pollpull 前会先检查 `ds_pull` 拉过没有**。没拉过就直接拿 default 起轮询，等于
+  凭空造一套寄存器表、从机地址多半还是错的，所以 `ctrl` 先 `iot.pull_start()`，成功才转正。
+- **`W:CFG` 只写 `ds_poll`**。拉取档下的表单是只读参考（平台那份的镜像），要改就回手动档。
 
 > ⚠️ sniff 配置目前**前端没有编辑入口**（无 `W:SNIFFCFG` 指令），始终用 `cfg.BAUD`
 > 等默认值。如果现场总线不是默认波特率，旁听会看到乱码——这是已知缺口，不是本次要
@@ -197,14 +234,68 @@ for parity in {N, E, O}:        # 8N1 占现场绝大多数，先整个扫完
    见上文「poll / sniff 配置隔离」。给一个「填入 poll 配置」的按钮会让用户
    一键覆盖手配的寄存器表，已确认不做。
 
+### 触发时机：进 sniff 自动识别 + 按钮重新识别
+
+**`W:MODE=sniff` / 开机 `boot_mode=sniff` 都会自动起一轮识别**，不需要用户先点
+按钮。`mon.request_detect()` 由 `ctrl.switch_mode()` 调用，和手动按钮同一条路径。
+
+**识别是非阻塞的**，这是关键设计：
+
+| | 做法 | 为什么 |
+|---|---|---|
+| 同步等 21s | ❌ 不可行 | 命令是串行分发的（`prov.lua` 单循环），`W:MODE` 堵 21s 会让前端**所有**指令一起卡；而开机路径上堵住会让 VUART/MQTT 晚 21s 才就绪 |
+| 同步且失败重试 | ❌ 更糟 | 静默总线上开机流程**永久卡死** |
+| **后台任务 + 轮询** | ✅ | `W:MODE` 立即回 `OK`，识别在 `detect_loop` 里跑，前端轮 `R:AUTODETECT` 问结果 |
+
+**失败不停、不退回 idle，每 3s 重来一轮**，直到命中或用户 `W:MODE=idle`：
+
+- 模式必须停在 `sniff`，否则前端看到模式掉回 idle 会以为设备重启了
+- 静默总线 / 主机间歇轮询时，一直重试总能等到它有流量的那一刻
+- `detect_fail` / `detect_round` 计数让前端能显示"第 N 轮，已失败 M 次"
+
+**识别期间屏蔽会动串口的命令**（`cmd.lua` 的 `blocked_while_detecting`）：
+
+| 命令 | 识别期间 |
+|---|---|
+| `W:CFG` / `W:TX` / `W:RAWTEST` | ❌ `RET:FAIL:<cmd>:BUSY:...` |
+| `W:MODE=poll` / `sniff` | ❌ BUSY（闸门在 `ctrl.switch_mode` 里） |
+| `W:MODE=idle` / `stop` | ✅ 放行——用户主动放弃的唯一逃生口 |
+| `R:` 全部只读命令 | ✅ 放行（进度就靠 `R:MODE` 的 `mon.detecting` 看） |
+
+> 识别正在 21 个候选间反复 `uart.setup`，此时写配置或裸发字节会跟它抢同一条
+> 串口，出来的结果不可信。**`M.stop()` 里必须 `detecting = false`**——少了这行，
+> 逃生口关了 BUSY 闸门还在，设备看着像卡死。
+
+**`R:AUTODETECT` 是非阻塞的**，返回三种东西：
+
+```
+RET:AUTODETECT=BUSY            正在扫，过会儿再问
+RET:AUTODETECT={...}           上一轮已识别出的参数（刷新页面后也拿得到）
+RET:FAIL:AUTODETECT:not in sniff mode
+```
+
+不在 sniff 模式时**不会**自动帮用户进 sniff——一条查询指令不该有切模式的副作用。
+
+### 已修：识别失败后串口停在最后一个候选
+
+`auto_detect()` 扫空一轮后调 `restore_params()` 把串口还原成进 sniff 时那套参数
+（`bootCfg`）。不还原的话，失败后串口停在最后一个候选 **1200 8O1** 上，接下来
+3s 等待期里到的真流量全成乱码，而下一轮又要从 9600 重新开始——中间那段窗口看着
+像"总线时好时坏"，查不出原因。
+
 ### 已知调优点
 
 `DETECT_WIN_MS`（`core/config.lua`）现为 **1000ms**，按 9600 排第一定的：8 字节
 帧约 8ms，轮询周期内轻松攒够 2 帧。⚠️ **慢总线（1200/2400）+ 稀疏从机时，1 秒
 可能只收到 0~1 帧而漏检**。真机测试若发现慢 baud 识别不出，优先把它调到 **2000**
 （代价：最坏耗时 21s → 42s）。常见 8N1 场景不受影响，因为 9600 第一个就中。
+⚠️ 但注意现在失败会重试，慢 baud 漏检的代价从"认不出"变成"多等几轮"，
+比改窗口更温和——调它之前先看重试轮次够不够。
 
 `DETECT_HITS` 同理：若现场噪声大、偶发单帧误命中，可提到 3。
+
+`DETECT_RETRY_MS`（`bus/mon.lua` 顶部）现为 **3000ms**，是两轮识别之间的间隔。
+静默总线下没必要高频重扫（白耗电 + 刷日志），3s 足够等到稀疏主机冒出流量。
 
 ## 内存缓冲上限（Air780EP，Lua 堆 ~300KB）
 

@@ -29,6 +29,18 @@ function M.reply(s)
     pcall(uart.write, UART_ID, s .. "\r\n")
 end
 
+-- 识别期间挡住会动串口的命令。识别正在 21 个候选间反复 uart.setup, 此时写配置
+-- 或裸发字节会跟它抢同一条串口, 出来的结果不可信。
+-- 返回 true 表示已挡掉(调用方直接 return), false 表示放行。
+-- 只读命令和 W:MODE 不走这里: W:MODE 的闸门在 ctrl.switch_mode 里, 且它必须
+-- 放行 idle 当逃生口
+local function blocked_while_detecting(cmd)
+    if not mon.is_detecting() then return false end
+    M.reply("RET:FAIL:" .. cmd .. ":BUSY: 正在识别通讯参数, 完成后自动开始旁"
+        .. "听(或先 W:MODE=idle 放弃)")
+    return true
+end
+
 local function device_id_str()
     local ok, snc = pcall(require, "sn/sn")
     if ok and snc and snc.state() == "ready" then
@@ -105,6 +117,7 @@ local function reg_cmds()
     end)
 
     M.reg("W:CFG", function(arg)
+        if blocked_while_detecting("CFG") then return end
         local t = jdecode(arg)
         if not t then return M.reply("RET:FAIL:CFG:bad json") end
         local n, err = cfgstore.normalize_poll(t)
@@ -248,6 +261,7 @@ local function reg_cmds()
     end)
 
     M.reg("W:RAWTEST", function(arg)
+        if blocked_while_detecting("RAWTEST") then return end
         local a, b, c = arg:match("^%s*(%d*)%s*,?%s*(%d*)%s*,?%s*(%d*)%s*$")
         local r, err = poll.probe_raw(
             a ~= "" and tonumber(a) or nil,
@@ -283,19 +297,29 @@ local function reg_cmds()
         M.reply("RET:INFER=" .. jencode(mon.infer()))
     end)
 
-    -- R:AUTODETECT: 识别 sniff 的通讯参数(baud/parity)。
-    -- 最坏 21s(21 候选 × 1s), 所以前端超时要给够; 8N1 常见情况 1~7s 就回。
-    -- 结果只用于本次 sniff 会话，不写 fskv(poll/sniff 配置隔离)
+    -- R:AUTODETECT: 非阻塞。识别最坏 21s 且失败会一直重试, 同步等会把命令
+    -- 分发循环堵死(前端所有指令一起卡), 所以这里只回当前状态, 由前端轮询。
+    --   BUSY              = 正在扫, 过会儿再问
+    --   RET:AUTODETECT=…  = 上一轮已识别出的参数(刷新页面后也拿得到)
+    --   RET:FAIL:…        = 没进 sniff 模式
+    -- 注意不自动帮用户进 sniff: 一条查询指令不该有切模式的副作用
     M.reg("R:AUTODETECT", function()
-        local c, err = mon.auto_detect()
-        if not c then
-            M.reply("RET:FAIL:AUTODETECT:" .. tostring(err))
-            return
+        if not mon.is_running() then
+            return M.reply("RET:FAIL:AUTODETECT:not in sniff mode")
         end
-        M.reply("RET:AUTODETECT=" .. jencode({
-            baud = c.baud, databits = c.databits,
-            stopbits = c.stopbits, parity = c.parity,
-        }))
+        if mon.is_detecting() then
+            return M.reply("RET:AUTODETECT=BUSY")
+        end
+        local last = mon.detect_result()
+        if last then
+            return M.reply("RET:AUTODETECT=" .. jencode({
+                baud = last.baud, databits = last.databits,
+                stopbits = last.stopbits, parity = last.parity,
+            }))
+        end
+        -- 没在扫也没有结果: 现在起一轮(前端「重新识别」按钮走这里)
+        mon.request_detect()
+        M.reply("RET:AUTODETECT=BUSY")
     end)
 
     -- R:SNIFF=ms: 静默侦听总线 ms 毫秒, 返回帧数
@@ -311,6 +335,7 @@ local function reg_cmds()
 
     -- W:TX=hex: 裸发一串字节(前端总线诊断)
     M.reg("W:TX", function(arg)
+        if blocked_while_detecting("TX") then return end
         if not arg or arg == "" then return M.reply("RET:FAIL:TX:empty hex") end
         local r, err = poll.tx_raw(arg)
         if not r then return M.reply("RET:FAIL:TX:" .. tostring(err)) end
