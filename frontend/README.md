@@ -254,8 +254,7 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 | 读设备信息 | `R:INFO` | `RET:INFO={json}` | SN/IMEI/ICCID/CSQ/RSRP/版本/项目/服务器/波特率/从机/寄存器数/锁状态 |
 | 读 poll 配置 | `R:CFG` | `RET:CFG={json}` | `{cfg:{baud,databits,parity,stopbits,slave,interval_ms,timeout_ms,regs},src}` |
 | 保存 poll 配置 | `W:CFG={json}` | `RET:CFG=OK` / `RET:FAIL:CFG:原因` | 串口参数变化自动重启轮询任务；间隔/寄存器表热更新 |
-| 读寄存器表 | `R:REG` | `RET:REG=[json]` | `[{addr,count,name,alias,dtype}]` |
-| 保存寄存器表 | `W:REG=[json]` | `RET:REG=OK` | 校验通过后热加载 |
+| 读寄存器表 | `R:REG` | `RET:REG=[json]` | `[{addr,count,name,alias,dtype}]`。**只有读**：写寄存器表走 `W:CFG`（`regs` 并进 cfg 一起发），`W:REG` 已删 |
 | 读实时值 | `R:VAL` | `RET:VAL=[json]` | `[{name,addr,value,hex,ts,dtype}]`，设备已解好值 |
 | 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,mqtt}` 全量状态；`mqtt` 段另带 `push_n/push_seen/push_err/autosaved/autosave_at`（平台主动重推横幅用，见下）；`write` 段是写队列的 queued/done/fail |
 
@@ -460,8 +459,9 @@ body.mq-manual .auto-only{display:none !important;}
 > （queued/done/fail）；设备日志是 `downlink write: queued=N rejected=M`。
 > 队列上限 8 笔，满时回 `RET:FAIL:WRITE:写队列已满(8), 稍后重试`。
 >
-> `W:WRITE`/`W:WRITEJ` 两条指令已删除：字段名与 MQTT 下行解析完全一致，属重复实现，
-> 且前端从来只走 `W:CFG`/`W:REG` 与「写寄存器」按钮。
+> `W:WRITE`/`W:WRITEJ`/`W:REG` 三条指令已删除：`W:WRITE*` 与 MQTT 下行解析字段
+> 完全一致属重复实现；`W:REG` 被 `W:CFG` 覆盖（前端「保存配置」把 regs 并进
+> cfg 一起发，单独写寄存器表的指令从来没被调过）。
 
 ### MQTT
 

@@ -27,8 +27,9 @@
     writeCfg:   (obj)  => 'W:CFG=' + JSON.stringify(obj),
 
     // ---- 寄存器表 ----
-    reg:      ()   => 'R:REG',
-    writeReg: (arr) => 'W:REG=' + JSON.stringify(arr),
+    // ⚠️ 只有 R:REG 没有 W:REG：前端「保存配置」把 regs 并进 W:CFG 一起发
+    // (app.js: cfg.regs = regs -> writeCfg)，单独写寄存器表的指令零调用已删
+    reg: () => 'R:REG',
 
     // ---- 数据 ----
     val:  () => 'R:VAL',                    // 实时值快照

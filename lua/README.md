@@ -85,8 +85,8 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 |---|---|
 | R:INFO | 设备信息（SN/IMEI/ICCID/CSQ/RSRP/版本/项目/服务器/波特率/从机/寄存器数/锁状态） |
 | R:MODE / W:MODE=idle\|poll\|pollpull\|sniff | 模式查询（返回 `{mode,busy,poll_src,pull_ready,pull,poll,mon,write}`）/ 切换。`pollpull` = 拉取配置档，进模式自动 hello 拉取 |
-| R:CFG / W:CFG={json} | 轮询配置读写，读返回 `{cfg, src}`，src=default 表示 fskv 里没写过 |
-| R:REG / W:REG=[json] | 寄存器表读写 |
+| R:CFG / W:CFG={json} | 轮询配置读写，读返回 `{cfg, src}`，src=default 表示 fskv 里没写过。`W:CFG` 是**唯一**写寄存器表的入口（regs 并进 cfg 一起发） |
+| R:REG | 读寄存器表（= `R:CFG` 的 `cfg.regs`，因前端单独读它才留） |
 | R:VAL | 实时值快照 |
 | R:STAT | 运行状态汇总（mode/data/guard/mqtt）；`mqtt` 段另带 `push_pending`/`push_n`/`push_seen`/`push_err`（平台主动重推横幅用） |
 | W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt,msg_id,replied,src,seen,autosaved,autosave_at,autosave_regs,push_n,push_err}`，`mqtt` 段含 `pub`/`sub` 两个拼好的 topic；`autosaved`=解析成功即已落盘生效并自动回执；`msg_id`/`replied` 反映回执；`src`=`pull`/`push`）。平台主动重推的配置也走这个返回（`src=push`）。前提只需配好 MQTT 服务器地址和端口，设备会自己连 |
@@ -111,7 +111,9 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 >
 > **写寄存器的入口**：MQTT 下行 `{"cmd":"WRITE","items":[...]}`（设备自动排进写队列）与前端「写寄存器」。原先的 `W:WRITE`/`W:WRITEJ` 已删除——字段名与 MQTT 下行解析完全一致，属重复实现。写结果看 `R:STAT` 的 `write` 段，**不是 `enqueue_write` 的返回值**（那只代表入队）。
 >
-> **已删除的前端零调用指令**：`R:SNIFFCFG`/`W:SNIFFCFG`（前端无入口）、`R:IOTSTAT` 与 `R:POLL`（被 `R:STAT` 的 iot/mqtt 段和 data 段覆盖）、`W:RST`（前端各自有「恢复默认」按钮）。连带删掉只服务它们的 `cfg.reset()`、`mqttcfg.reset()`、`collector.clear()`。
+> **已删除的前端零调用指令**：`R:SNIFFCFG`/`W:SNIFFCFG`（前端无入口）、`R:IOTSTAT` 与 `R:POLL`（被 `R:STAT` 的 iot/mqtt 段和 data 段覆盖）、`W:RST`（前端各自有「恢复默认」按钮）、`W:REG`（被 `W:CFG` 覆盖：前端「保存配置」把 regs 并进 cfg 一起发，单独写寄存器表的指令从来没被调过）。连带删掉只服务它们的 `cfg.reset()`、`mqttcfg.reset()`、`collector.clear()`。
+>
+> **删指令前必做的两步**：① 数前端 `Enc.xxx` 调用次数（`protocol.js` 里挂着但 app.js 零调用 = 候选）；② 查仓库外的 `pc_tool` 还在不在用。两步都过才能删。
 
 ## 固件适配要点（对照官方文档）
 

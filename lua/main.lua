@@ -95,7 +95,9 @@ end
 if ctrl then
     local sysc = cfgstore and cfgstore.load_sys()
     local boot = sysc and sysc.boot_mode or "idle"
-    if boot == "poll" or boot == "sniff" then
+    -- 三种主动模式都能开机自启。漏一个的症状很隐蔽: 开机模式选了它,
+    -- 日志打"485 idle"但设备其实没起来, 用户只会以为"开机启动坏了"
+    if boot == "poll" or boot == "pollpull" or boot == "sniff" then
         local ok, msg = ctrl.switch_mode(boot)
         log.info("main", "  boot_mode=" .. boot .. " -> " .. tostring(msg))
     else

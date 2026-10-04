@@ -696,7 +696,7 @@ async function pullCfg() {
   }
 }
 
-// 把平台拉回的配置填进表单。只填不存：W:CFG/W:REG/W:MQTT 全由用户点保存触发
+// 把平台拉回的配置填进表单。只填不存：W:CFG/W:MQTT 全由用户点保存触发
 function fillFormFromPlatform(d) {
   const p = d.poll || {};
   if (p.baud) el.selBaud.value = String(p.baud);
@@ -2380,13 +2380,6 @@ function mockReply(line) {
       Object.assign(MOCK.cfg, o);
       resp = 'RET:CFG=OK';
     } catch (e) { resp = 'RET:FAIL:CFG:bad json'; }
-  }
-  else if (line.indexOf('W:REG=') === 0) {
-    try {
-      const a = JSON.parse(line.slice(6));
-      if (Array.isArray(a)) { MOCK.cfg.regs = a; resp = 'RET:REG=OK'; }
-      else resp = 'RET:FAIL:REG:not array';
-    } catch (e) { resp = 'RET:FAIL:REG:bad json'; }
   }
   else if (line.indexOf('W:MQTT=') === 0) {
     try {

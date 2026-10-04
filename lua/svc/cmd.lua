@@ -147,24 +147,14 @@ local function reg_cmds()
     end)
 
     -- R:SNIFFCFG / W:SNIFFCFG / W:WRITE / W:WRITEJ / R:IOTSTAT / R:POLL /
-    -- W:RST 已删除：前端零调用，且分别被 R:REG+W:REG / MQTT 下行写 /
-    -- R:STAT 的各段完全覆盖。写结果看 R:STAT 的 write 段，不另立指令
+    -- W:RST / W:REG 已删除：前端零调用，且分别被 MQTT 下行写 /
+    -- R:STAT 的各段完全覆盖。写结果看 R:STAT 的 write 段，不另立指令。
+    -- ⚠️ W:REG 是被 W:CFG 覆盖的：前端「保存配置」把 regs 并进 cfg 一起发
+    -- (app.js 的 collectCfg + cfg.regs = regs)，所以单独一条写寄存器表的
+    -- 指令从来没人调
 
     M.reg("R:REG", function()
         M.reply("RET:REG=" .. jencode(poll.get_regs()))
-    end)
-
-    M.reg("W:REG", function(arg)
-        local t = jdecode(arg)
-        if not t or type(t) ~= "table" then return M.reply("RET:FAIL:REG:bad json") end
-        local c = cfgstore.load_poll()
-        c.regs = t
-        local n, err = cfgstore.normalize_poll(c)
-        if not n then return M.reply("RET:FAIL:REG:" .. tostring(err)) end
-        local ok, serr = cfgstore.save_poll(c)
-        if not ok then return M.reply("RET:FAIL:REG:" .. tostring(serr)) end
-        poll.apply_cfg(n)
-        M.reply("RET:REG=OK")
     end)
 
     M.reg("R:VAL", function()

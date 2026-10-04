@@ -34,7 +34,9 @@ M.MQTT_ALLOW_NO_SN = false
 M.PLATFORM_VENDOR = "VKBoxLite"
 M.PLATFORM_MODEL = "VKBox-Lite"
 M.PLATFORM_GET_TOPIC = "/sys/thing/gw/config/get/%s"
-M.PLATFORM_POST_TOPIC = "/sys/thing/node/property/post/%s-1"
+-- ⚠️ 没有 PLATFORM_POST_TOPIC：上报 topic 只有一个来源 —— mqttcfg.default
+-- .pub_topic。曾在这里重复定义过一份带 "-1" 后缀的，全仓库零引用，留错的那个
+-- 迟早有人照它改代码。发布 topic 要改就改 mqttcfg.default.pub_topic
 -- U6 应用回执：msgId 必须与 D1 下发包里的一致，平台据此核销待下发登记
 M.PLATFORM_REPLY_TOPIC = "/sys/thing/gw/config/reply/%s"
 -- 另外 5 条固定 topic。原先存在 mqttcfg 里可配（前端 6 个 topic 输入框），
