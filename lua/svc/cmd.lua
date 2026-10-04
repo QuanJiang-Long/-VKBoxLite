@@ -113,7 +113,12 @@ local function reg_cmds()
     end)
 
     M.reg("R:CFG", function()
-        M.reply("RET:CFG=" .. jencode({ cfg = cfgstore.load_poll(), src = cfgstore.poll_src() }))
+        -- 按当前运行模式取对应的配置槽: 手动配置看 ds_poll, 拉取配置看 ds_pull。
+        -- 不这么分的话, 拉取档下表单显示的仍是手配那份寄存器表, 用户改了半天
+        -- 存的还是手配槽, 和"正在采的那份"对不上(见 lua/README.md 配置来源隔离)
+        local slot = (ctrl.get_mode() == "pollpull") and "pull" or "poll"
+        local cfg = (slot == "pull") and cfgstore.load_pull() or cfgstore.load_poll()
+        M.reply("RET:CFG=" .. jencode({ cfg = cfg, slot = slot, src = cfgstore.poll_src() }))
     end)
 
     M.reg("W:CFG", function(arg)

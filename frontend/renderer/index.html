@@ -360,7 +360,10 @@ body.mq-manual .auto-only{display:none !important;}
                 <div class="serial-pane active" id="sp-s1">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:4px 0;">
                     <button id="btnReadCfg">读取配置</button>
-                    <button id="btnPullCfg" title="从 MQTT 平台重新拉取 485 配置到「拉取配置」槽，仅在 poll（拉取配置）模式下生效">重新拉取</button>
+                    <button id="btnPullCfg" title="从 MQTT 平台重新拉取 485 配置到「拉取配置」槽（ds_pull）">重新拉取</button>
+                    <!-- 配置来源提示。拉取档下表单显示的是平台那份（ds_pull），
+                         改动只写手配槽（ds_pull 不动），必须说出来否则用户改了没反应 -->
+                    <span class="hint" id="cfgSrcHint" hidden></span>
                     <div style="margin-left: auto;"></div>
                     <button id="btnSaveCfg" class="primary">保存配置</button>
                 </div>

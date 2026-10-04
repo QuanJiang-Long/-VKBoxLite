@@ -40,9 +40,13 @@ function M.switch_mode(mode)
         end
         if poll.is_running() then poll.stop() end
         -- 档位先切再起轮询: iot.set_manual 会断开重连换订阅清单, 必须在
-        -- 拉取握手之前就位, 否则 hello 发出去没人应答(pollpull 才需要)
+        -- 拉取握手之前就位, 否则 hello 发出去没人应答(pollpull 才需要)。
+        -- ⚠️ 别把这里写反: set_manual(true)=手动档(订用户 topic),
+        --    手动配置用 ds_poll 槽所以要 true, 拉取配置用 ds_pull 槽要 false。
+        --    写反的后果是手动档收不到自己的 topic、拉取档订不上平台 topic,
+        --    两个模式一起废
         local slot = SLOT[mode]
-        if iot then pcall(iot.set_manual, slot == "pull") end
+        if iot then pcall(iot.set_manual, slot == "poll") end
         if not poll.start(slot) then return false, "FAIL poll start" end
         if slot == "pull" then
             -- 平台配置还没拉过就直接拿 default 起轮询, 等于凭空造一套寄存器表,

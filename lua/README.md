@@ -179,10 +179,19 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 **模式、档位、配置槽三者绑定，没有混搭场景**：要么全手配（寄存器表 + MQTT），
 要么全平台拉取。`ctrl.SLOT` 这张表就是这个映射，改任何一个都要三处同步。
 
+⚠️ **`iot.set_manual(on)` 的 `on=true` 是手动档**。切换档位那一行写的是
+`iot.set_manual(slot == "poll")` —— 写反的后果是手动档收不到自己的 topic、
+拉取档订不上平台 topic，两个模式一起废，而且界面上看不出原因（MQTT 页只是
+手动配置行集体消失）。改这行前后各读一遍 `set_manual` 的注释。
+
 - **拉取档必须关掉手动档**。hello 的应答走 `config/get` 下行，而 `build_subs()` 在
   手动档**不订这条**（手动档接的是用户自己的 broker，平台那套 topic 订着也是噪音），
   所以 `ctrl` 进 `pollpull` 前先 `iot.set_manual(false)`。少了这步，hello 发出去
   必然等满 15s 超时——`iot.lua` 的 build_subs 注释里记着这个坑。
+- **拉取档连的是平台那头**。`mqttcfg.normalize` 只在手动档写入时清 user/pass/topic，
+  `host/port/ssl` 是两档共用字段。手动档用户可能填了自建 broker，带着那个地址发
+  hello 没人应答，只会白等 35s 再报超时，所以 `set_manual(false)` 顺带把
+  host/port/ssl 归位到默认值（`auto.pass` 会带过去，不让用户自己设的平台密码被重置）。
 - **档位切换要断开重连**。`S.manual_on` 是在 `try_connect()` 里读的，订阅清单挂在
   conack 上，已连接的 client 不会自己重读。`set_manual()` 因此 `destroy_client()`
   + `kick()`，让 `task_main` 用新档位重连重建订阅。代价只是丢一次心跳周期，
@@ -192,6 +201,9 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
   平台改了寄存器表。
 - **进 pollpull 前会先检查 `ds_pull` 拉过没有**。没拉过就直接拿 default 起轮询，等于
   凭空造一套寄存器表、从机地址多半还是错的，所以 `ctrl` 先 `iot.pull_start()`，成功才转正。
+- **`R:CFG` 按模式选槽**。`pollpull` 下返回 `ds_pull`（平台那份），`poll` 下返回 `ds_poll`。
+  不这么分的话拉取档表单显示的仍是手配寄存器表，用户改了存的还是手配槽，和"正在采的
+  那份"对不上。前端因此多一条「配置来源」提示，说明"保存写的是另一个槽"。
 - **`W:CFG` 只写 `ds_poll`**。拉取档下的表单是只读参考（平台那份的镜像），要改就回手动档。
 
 > ⚠️ sniff 配置目前**前端没有编辑入口**（无 `W:SNIFFCFG` 指令），始终用 `cfg.BAUD`

@@ -84,6 +84,7 @@ const el = new Proxy({
   fSn: $('fSn'), fImei: $('fImei'), fIccid: $('fIccid'), fCsq: $('fCsq'),
   fVer: $('fVer'), fProj: $('fProj'), fUrl: $('fUrl'),
   btnReadCfg: $('btnReadCfg'), btnSaveCfg: $('btnSaveCfg'), btnPullCfg: $('btnPullCfg'),
+  cfgSrcHint: $('cfgSrcHint'),
   selBaud: $('selBaud'), inpRound: $('inpRound'),
   inpSlave: $('inpSlave'), inpTimeout: $('inpTimeout'),
   btnReadVal: $('btnReadVal'), btnAddReg: $('btnAddReg'), paramTbody: $('paramTbody'),
@@ -443,16 +444,18 @@ async function togglePort() {
   startAutoRefresh();
 }
 
-// 拉取配置按钮的可用性 = 串口开着 且 不在手动档。
-// 手动档下设备只订用户填的那条 topic，不订 /sys/thing/gw/config/get/{sn}，
-// 而平台应答只走那条。硬点只会白等 20s 建连 + 15s 超时，所以直接置灰
+// 拉取配置按钮: 只在「poll（拉取配置）」模式出现。
+// 手动配置模式下整行藏掉而不是置灰 —— 手动档用自己手配的寄存器表, 页面上
+// 摆一个点不动的拉取按钮只会让人猜"是不是我哪里没配对"。
+// （设备侧手动档不订平台 config/get topic, 硬点只会白等 35s 超时）
 function syncPullCfgBtn() {
   const b = el.btnPullCfg;
   if (!b) return;
-  b.disabled = !S.open || !!S.mqManual;
-  b.title = S.mqManual
-      ? '拉取配置需要平台 Topic：请先关闭「手动配置」'
-      : '从 MQTT 平台拉取 485 配置并回填表单，需检查后点保存配置才生效';
+  // 串口没开也藏: 指令发不出去, 摆着也是干扰
+  const show = S.open && S.mode === 'pollpull';
+  b.style.display = show ? '' : 'none';
+  b.disabled = !show;
+  b.title = '从 MQTT 平台重新拉取 485 配置到「拉取配置」槽（ds_pull）';
 }
 
 function setPortState(open, path) {
@@ -556,12 +559,30 @@ async function readInfo() {
 // 485 poll 配置读 / 写
 //=====================================================================
 // quiet=true 跳过「有未保存更改」确认（调用方已经问过了，或刚连上串口没有基线）
+// 配置来源提示条。拉取档下 R:CFG 返回的是平台那份（ds_pull），而「保存配置」
+// 写的是手配槽（ds_poll）—— 不说明白的话用户改了表单以为生效了，实际设备
+// 还在采平台那份。手动档下这个提示不出现（表单和落盘是同一份）
+function renderCfgSrcHint(slot) {
+  if (!el.cfgSrcHint) return;
+  const h = el.cfgSrcHint;
+  if (slot === 'pull') {
+    h.hidden = false;
+    h.textContent = '当前显示的是平台拉取的配置（ds_pull）；「保存配置」写的是手动配置槽（ds_poll），本页改动不影响正在采集的那份';
+    h.style.color = '#b06a00';
+  } else {
+    h.hidden = true;
+    h.textContent = '';
+  }
+}
+
 async function readCfg(quiet) {
   if (!quiet && !await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
   try {
     const rc = await sendCmd(Protocol.Enc.cfg(), 'CFG');
     const payload = rc.data;
     const c = (payload && payload.cfg) ? payload.cfg : payload;
+    // 设备端按运行模式选槽: poll->ds_poll, pollpull->ds_pull
+    renderCfgSrcHint(payload && payload.slot);
     if (c && typeof c === 'object') {
       S.cfg = c;
       // 正在编辑的表单项不能抢：用户可能在从站地址/间隔/超时里打字，
@@ -608,10 +629,12 @@ async function readCfg(quiet) {
 //   ③ done 后回填 串口参数 + 寄存器表 + MQTT 上报/下行 topic
 async function pullCfg() {
   if (S.pullBusy) return;
-  // 手动档下设备只订用户填的那一条 topic，不订 config/get，平台应答
-  // 进不来。这里先拦住说清原因，别让用户白等 20s 建连 + 15s 超时
-  if (S.mqManual) {
-    const msg = '拉取配置需要平台 Topic，请先关闭「手动配置」';
+  // 拉取链路要求设备订着平台的 /sys/thing/gw/config/get/{sn}，只有
+  // poll（拉取配置）档才订这条（手动档只订用户填的那一条，见 build_subs）。
+  // 在手动档下发只会白等 20s 建连 + 15s 超时，所以按模式拦，不按 mqManual 拦
+  // —— mqManual 是 MQTT 页自己的档位开关，和 485 运行模式是两件事
+  if (S.mode !== 'pollpull') {
+    const msg = '拉取配置需要在「poll（拉取配置）」模式下进行，请先切换运行模式';
     status(msg, false);
     toast(msg);
     return;
@@ -645,9 +668,8 @@ async function pullCfg() {
       return;
     }
     fillFormFromPlatform(d);
-    // 拉取配置是"平台说了算"，抢过手动配置的话事权：强制关掉手动模式，
-    // topic 换成平台返回的那套（设备拼好、SN 已代入）
-    if (S.mqManual) setManualMode(false);
+    // 不用在这里切 MQTT 档位了: poll（拉取配置）模式下设备侧 ctrl 已经强制
+    // 自动档(manual_on=false)，MQTT 页读一次就是这个状态
     snapClean();                       // 拉回来的值成为新基线，不再是「未保存」
     snapMqClean();
     const skipped = toArr(d.skipped).length;
@@ -1096,6 +1118,8 @@ function renderMode() {
     el.detectHint.textContent = '';
   }
   syncTabs();
+  // 拉取配置按钮跟着模式显隐: 手动配置模式下不该出现这个入口
+  syncPullCfgBtn();
 }
 
 //=====================================================================
