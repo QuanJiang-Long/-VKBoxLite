@@ -196,4 +196,37 @@ function M.pull_src()
     return "fskv"
 end
 
+-- 切回 idle 时的 485 复位: 擦掉用户改过的痕迹, 回到"从没存过配置"的状态。
+-- 返回真正清掉的槽名(没写过的槽不出现), 由调用方拼进 W:MODE 应答给前端看。
+--
+-- 为什么用 fskv.set(k,"") 而不是 fskv.del: kv_get / poll_src / pull_src 都把
+-- "" 当"没写过", 语义完全够; 而 del 在某些 LuatOS 版本上不存在, 为一行复位
+-- 引入兼容性风险不划算。
+--
+-- ⚠️ ds_pull 必须一起清, 不清有功能危害: ctrl.switch_mode 的 pollpull 分支靠
+--    pull_src()=="default" 决定进模式时要不要先 hello 拉一次平台配置。留着旧的
+--    ds_pull 会让它跳过拉取、直接拿旧配置起轮询 —— 用户以为平台的新配置已经
+--    生效, 其实采的还是上一轮那份。
+--
+-- ⚠️ 刻意不碰 ds_sys: boot_mode 是"开机该进什么模式"的意愿, 不是配置内容。
+--    清了它下次开机又不 idle, 和设备已经 idle 的事实矛盾。
+local RESET_SLOTS = { { "poll", K_POLL }, { "pull", K_PULL }, { "sniff", K_SNIFF } }
+
+function M.reset_user()
+    local cleared = {}
+    if not fskv then return cleared end
+    for _, s in ipairs(RESET_SLOTS) do
+        local name, k = s[1], s[2]
+        -- 只清"写过"的槽: 没写过的槽也清一遍等于白写 fskv + 多一次 save,
+        -- 而 flash 擦写次数是有限的
+        local ok, v = pcall(fskv.get, k)
+        if ok and v ~= nil and v ~= "" then
+            fskv.set(k, "")
+            cleared[#cleared + 1] = name
+        end
+    end
+    if #cleared > 0 and fskv.save then pcall(fskv.save) end
+    return cleared
+end
+
 return M

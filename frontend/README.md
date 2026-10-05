@@ -175,8 +175,14 @@ npm run dist:portable   # 或输出绿色单文件 exe
 
 > **485 模式互斥**：UART1 是 485 总线唯一物理口，poll（主机，要发帧控 DE）和
 > sniff（旁听，只收不发）一次只能跑一个。开机默认 **idle**（不主动驱动总线），
-> 由 `W:MODE=idle\|poll\|sniff` 切换，设备端 `mbus_ctrl.lua` 负责先停旧的再启新的。
+> 由 `W:MODE=idle\|poll\|pollpull\|sniff` 切换，设备端 `ctrl.lua` 负责先停旧的再启新的。
 > `W:MODE=stop` 是 `idle` 的别名，兼容旧脚本。
+>
+> ⚠️ **切回 idle 会顺带复位用户配置**（不可恢复）：485 手配寄存器表、485 平台拉取
+> 配置、MQTT 手动档凭证与 topic 全部清空。首页填的 MQTT 服务器地址/端口/SSL/ClientID/
+> 上报周期和凭证密码**不动**——设备只清手动档那一半。所以切换弹窗里会逐条列明将丢失
+> 什么，并建议先「导出配置」备份。应答带回实际清单：
+> `RET:MODE=OK;cleared:pull+mqtt_manual`（什么都没清时就是普通的 `RET:MODE=OK`）。
 
 ### 485 页「未保存改动」提示
 
@@ -443,8 +449,8 @@ body.mq-manual .auto-only{display:none !important;}
 | 前端动作 | 指令 | 应答 | 说明 |
 |---|---|---|---|
 | 读模式+状态 | `R:MODE` | `RET:MODE={json}` | `{mode,busy,poll,mon,write}` |
-| 切模式 | `W:MODE=idle\|poll\|sniff` | `RET:MODE=OK` | 先停旧的再启新的，互斥；`stop` 为 `idle` 别名 |
-| 开机默认模式 | `W:BOOTMODE=idle\|poll\|sniff` | `RET:BOOTMODE=OK` | 掉电重启后生效 |
+| 切模式 | `W:MODE=idle\|poll\|pollpull\|sniff` | `RET:MODE=OK` 或 `RET:MODE=OK;cleared:pull+mqtt_manual` | 先停旧的再启新的，互斥；`stop` 为 `idle` 别名。切回 `idle` 额外复位用户配置，`cleared:` 是实际清掉的清单（见「切回 idle 的配置复位」） |
+| 开机默认模式 | `W:BOOTMODE=idle\|poll\|pollpull\|sniff` | `RET:BOOTMODE=OK` | 掉电重启后生效 |
 
 ### 写寄存器
 

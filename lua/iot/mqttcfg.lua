@@ -207,4 +207,37 @@ function M.effective(device_id)
     }
 end
 
+-- 切回 idle 时的 MQTT 复位: 只清手动档, 首页配好的平台连接原样留着。
+--
+-- 保留(首页「MQTT 服务器」面板能改的, 属"首页写入的内容"):
+--   host / port / ssl / client_id / interval_s / qos / allow_no_sn / keep_session
+--   以及 auto.pass(首页那份 MQTT凭证密码, 与手动档的 pass 是两份独立的值)
+--   ⚠️ ssl 尤其必须留: 同一个 host 的 1883 明文和 8883 TLS 是两条路, 只保
+--      host+port 不保 ssl 会把走 TLS 的用户打回明文, 表现是"切回来就连不上了"
+--
+-- 清掉: user / pass / pub_topic / sub_topic(手动档凭证与 topic), 回落默认模板。
+--      置空即可, normalize 缺字段回退默认, manual_on=false 时还会强制把两条
+--      topic 打回默认模板(见 normalize 末尾), 不用在这里拼默认值。
+--
+-- ⚠️ manual_on 必须和"清值"在同一个 save 里完成: normalize 在 manual_on=true 时
+--    【使用】user/pass/topic。只清值不换档的话, 设备会拿空凭证匿名连平台 ——
+--    表现是"切回 idle 后再没连上过 MQTT", 且前端 MQTT 页显示成手动档。
+--    拆成两步(先存空值再换档)中间任何一次失败都会留在那个失联状态
+-- 返回 ok, err, wrote: wrote=false 表示本来就是干净态, 没动 fskv。
+-- 调用方要拿 wrote 决定"清过了"要不要报给用户 —— 从来没配过手动档的设备
+-- 每切一次空闲都回一句"已清空 MQTT 手动档"是谎报
+function M.clear_manual()
+    local c = M.load()
+    -- 已经是干净态就别写: 每次切空闲都白写一次 fskv + save, 而 flash
+    -- 擦写次数是有限的。判据只看 manual_on —— normalize 在它为 false 时
+    -- 已强制把 user/pass 清空、两条 topic 打回默认模板(见 normalize 末尾),
+    -- 所以这四项不可能"单独脏"
+    if not c.manual_on then return true, nil, false end
+    c.manual_on = false
+    c.user, c.pass = "", ""
+    c.pub_topic, c.sub_topic = ""
+    local ok, err = M.save(c)
+    return ok, err, ok
+end
+
 return M

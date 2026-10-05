@@ -108,8 +108,16 @@ local function reg_cmds()
     M.reg("W:MODE", function(arg)
         local v = trim(arg):gsub("^%s+", ""):gsub("%s+$", ""):lower()
         if v == "stop" then v = "idle" end
-        local ok, msg = ctrl.switch_mode(v)
-        if ok then M.reply("RET:MODE=OK") else M.reply("RET:FAIL:MODE:" .. tostring(msg)) end
+        local ok, msg, cleared = ctrl.switch_mode(v)
+        if not ok then return M.reply("RET:FAIL:MODE:" .. tostring(msg)) end
+        -- 切回 idle 会顺带复位配置。用 k:v 而不是 k=v: protocol.js 的 kv 解析
+        -- (decode 末尾那段)要求整段里同时有 ';' 和 ':' 才拆键值对,
+        -- 写成 cleared=... 前端只会拿到一整条字符串, 取不出清了什么
+        if cleared and #cleared > 0 then
+            M.reply("RET:MODE=OK;cleared:" .. table.concat(cleared, "+"))
+        else
+            M.reply("RET:MODE=OK")
+        end
     end)
 
     M.reg("R:CFG", function()

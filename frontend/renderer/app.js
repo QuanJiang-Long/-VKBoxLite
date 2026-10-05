@@ -1200,7 +1200,7 @@ async function applyMode(mode) {
   renderMode();
   try {
     status('正在切换到 ' + (MODE_LABEL[mode] || mode) + ' …', true);
-    await sendCmd(Protocol.Enc.setMode(mode), 'MODE', 8000);
+    const r = await sendCmd(Protocol.Enc.setMode(mode), 'MODE', 8000);
     await readMode();            // 设备已确认，读回真实状态
     S.modePending = null;        // 确认成功，清除待应用标记
     renderMode();
@@ -1231,6 +1231,20 @@ async function applyMode(mode) {
     // 切到 poll(手动配置)时 ctrl 会把设备 MQTT 档位强制切回手动档,
     // 不重读的话 MQTT 页的手动档开关和实际档位不一致
     if (mode === 'poll') readMqtt(true);
+    // 切回空闲时设备复位了配置, 表单还显示着旧值(手配寄存器表/手动档凭证),
+    // 不清掉就算"已经删了"也和界面上看到的不一致。cleared 是设备回的实际
+    // 清单, 一条都没清时不播报, 免得每次切空闲都弹一遍没信息量的 toast
+    if (mode === 'idle') {
+      // quiet=true: 用户刚在模式切换弹窗里明确批准了这次动作, 不该再被
+      // 「有未保存更改」二次询问拦住(那次是防止误丢编辑, 这里是已知后果)
+      try { await readCfg(true); await readMqtt(true); } catch (e) {}
+      const cl = r && r.data && r.data.cleared;
+      if (cl) {
+        status('已切回空闲，并清空了：' + String(cl).split('+').join('、'), true);
+        toast('已清空配置：' + String(cl).split('+').join('、'));
+        return;
+      }
+    }
     status('已切换到 ' + (MODE_LABEL[mode] || mode) + ' 模式', true);
     toast('模式已切换：' + (MODE_LABEL[mode] || mode));
   } catch (e) {
@@ -2019,6 +2033,21 @@ const MODE_LABEL = {
   pollpull: 'poll（拉取配置）',
   sniff: '旁听 sniff'
 };
+// 切回空闲时设备会顺带复位用户配置, 确认弹窗里要多说一段。
+// 清的是哪些必须逐条列 —— 只说"会清空配置"用户无法判断要不要先备份。
+// 保留哪些也要说: 否则"首页填的 MQTT 还在不在"只能靠猜。
+// 只有 idle/stop 有这段, 其它模式不涉及。
+function idleWipeWarn(mode) {
+  if (mode !== 'idle') return '';
+  return '\n\n⚠️ 切回空闲会同时清空以下配置，且不可恢复：\n'
+       + '  • 485 手动配置（寄存器表 / 串口参数 / 从机地址）\n'
+       + '  • 485 平台拉取配置（下次进「拉取配置」档会重新向平台拉取）\n'
+       + '  • MQTT 手动档的凭证与发布/订阅 Topic\n\n'
+       + '保留不动：MQTT 服务器地址、端口、SSL、ClientID、上报周期，'
+       + '以及首页填的 MQTT 凭证密码。\n\n'
+       + '建议先到「配置」页点「导出配置」留一份备份。';
+}
+
 document.querySelectorAll('.mode-card').forEach(c => {
   c.onclick = async () => {
     const m = c.getAttribute('data-mode');
@@ -2030,7 +2059,10 @@ document.querySelectorAll('.mode-card').forEach(c => {
     const curLabel = MODE_LABEL[S.mode] || S.mode;
     if (!await askConfirm('确定把 485 运行模式从「' + curLabel + '」切换到「' + label + '」？\n\n'
                  + '切换时设备会先停掉旧模式再启动新模式（互斥），'
-                 + '正在进行的采集会中断。', '切换运行模式')) return;
+                 + '正在进行的采集会中断。'
+                 // 切回空闲不只是停总线, 设备会顺带复位用户配置。这是不可恢复的
+                 // 删除动作, 必须在同一个弹窗里一次说清, 不能让用户点完才知道
+                 + idleWipeWarn(m), '切换运行模式')) return;
     applyMode(m);
   };
 });
@@ -2225,19 +2257,23 @@ if (window.serial) {
 
 // mock 设备状态：切模式 / 保存配置后要能反映出来，否则预览时
 // 状态永远是初始值，看不出交互效果
+// 预览态配置的出厂值。MOCK.cfg 由它深拷贝而来, 切回空闲的"复位"也靠把它
+// 拷回去 —— 真设备是删 fskv 键, 预览没有持久层, 只能回到这份初始常量。
+// 少了它, 预览时"切回空闲会清空手配寄存器表"这条链路根本看不出来
+const MOCK_CFG_DEFAULT = {
+  baud: 9600, databits: 8, parity: 0, stopbits: 1, slave: 1,
+  interval_ms: 3000, timeout_ms: null,
+  regs: [
+    { addr: 0, count: 2, name: 'sensor1', alias: '传感器1', dtype: 'uint16' },
+    { addr: 2, count: 2, name: 'sensor2', alias: '传感器2', dtype: 'int16' },
+    { addr: 4, count: 2, name: 'temp', alias: '温度', dtype: 'float32' }
+  ]
+};
 const MOCK = {
   mode: 'idle',
   detecting: false,   // 预览用: 下一次 R:AUTODETECT 先回一次 BUSY
   pulling: false,     // 预览用: pollpull 的假拉取进行中(见 mockModeStat)
-  cfg: {
-    baud: 9600, databits: 8, parity: 0, stopbits: 1, slave: 1,
-    interval_ms: 3000, timeout_ms: null,
-    regs: [
-      { addr: 0, count: 2, name: 'sensor1', alias: '传感器1', dtype: 'uint16' },
-      { addr: 2, count: 2, name: 'sensor2', alias: '传感器2', dtype: 'int16' },
-      { addr: 4, count: 2, name: 'temp', alias: '温度', dtype: 'float32' }
-    ]
-  },
+  cfg: JSON.parse(JSON.stringify(MOCK_CFG_DEFAULT)),
   // 手动档（MQTT 配置页）+ 自动档（首页）两份凭证
   mqtt: { host: 'dz.voltkun.com', port: 1883, user: '', pass: '', ssl: false,
           pub_topic: '/sys/thing/node/property/post/{sn}',
@@ -2371,7 +2407,19 @@ function mockReply(line) {
     if (MOCK.pulling) {
       setTimeout(() => { MOCK.pulling = false; }, 1200);
     }
-    resp = 'RET:MODE=OK';
+    // 真设备切回空闲会复位配置并回报清了什么, 预览照样演一遍,
+    // 否则"切回空闲会清空配置"这条链路在没接设备时看不到
+    if (MOCK.mode === 'idle') {
+      // 手配寄存器表回到出厂值 + 手动档凭证/topic 回落默认模板,
+      // 对应真设备的 cfgstore.reset_user() + mqttcfg.clear_manual()。
+      // 首页那份(host/port/ssl/auto.pass)按定义不动
+      MOCK.cfg = JSON.parse(JSON.stringify(MOCK_CFG_DEFAULT));
+      MOCK.mqtt.manual_on = false;
+      MOCK.mqtt.user = ''; MOCK.mqtt.pass = '';
+      resp = 'RET:MODE=OK;cleared:poll+mqtt_manual';
+    } else {
+      resp = 'RET:MODE=OK';
+    }
   }
   else if (line.indexOf('W:BOOTMODE=') === 0) resp = 'RET:BOOTMODE=OK';
   else if (line.indexOf('W:CFG=') === 0) {

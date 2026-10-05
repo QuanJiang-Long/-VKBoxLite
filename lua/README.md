@@ -138,7 +138,11 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 
 - Value ≤255B：最多 **812** 个键值对（本框架全部配置均在此区间，JSON 限 512B 内）
 - Value ≥256B：每个占一个 4K block，最多 **14** 个
-- 当前键用量：`ds_poll`/`ds_pull`/`ds_sniff`/`ds_sys`/`mqtt_cfg`/`ds_enable`/`ds_boots`/`dev_sn*` 共 5 个 ≈ 10 个，余量充足
+- 当前键用量 **13 个**，余量充足：
+  - 配置 4 个：`ds_poll`（485 手配）/ `ds_pull`（485 平台拉取）/ `ds_sniff`（旁听）/ `mqtt_cfg`
+  - 系统 1 个：`ds_sys`（开机模式）
+  - SN 4 个：`dev_sn` / `dev_sn_lock` / `dev_sn_burn` / `dev_sn_btime`
+  - SN 指令开关 4 个：`sn_en_write` / `sn_en_clear` / `sn_en_lock` / `sn_en_unlock`
 
 ## poll / sniff 配置隔离
 
@@ -211,6 +215,46 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 > ⚠️ sniff 配置目前**前端没有编辑入口**（无 `W:SNIFFCFG` 指令），始终用 `cfg.BAUD`
 > 等默认值。如果现场总线不是默认波特率，旁听会看到乱码——这是已知缺口，不是本次要
 > 解决的问题。
+
+## 切回 idle 时的配置复位
+
+`W:MODE=idle`（含 `stop`）不只是停总线，还会把用户配过的东西复位。**不可恢复**——
+清掉的只有重新手填或前端「导入配置」能回来，所以前端在切换弹窗里逐条列明，并建议
+先「导出配置」备份。
+
+| 配置 | 键 | 处理 | 为什么 |
+|---|---|---|---|
+| 485 手配 | `ds_poll` | 清空 | 寄存器表/串口参数/从机地址是用户配置的主体 |
+| 485 平台拉取 | `ds_pull` | 清空 | ⚠️ **必须清**：`ctrl` 进 `pollpull` 前靠 `pull_src()=="default"` 决定要不要先 hello 拉一次。留着一份旧的 `ds_pull`，它会跳过拉取直接拿旧配置起轮询——用户以为平台的新配置生效了，其实采的还是上一轮 |
+| 旁听 | `ds_sniff` | 清空 | 本来就没有写入方，清了是空操作，按语义走一遍 |
+| 系统 | `ds_sys` | **不动** | `boot_mode` 是"开机该进什么模式"的意愿，不是配置内容。清了它下次开机又不 idle，和设备已经 idle 的事实矛盾 |
+| MQTT | `mqtt_cfg` | **部分清** | 见下 |
+
+MQTT 按"首页写入的算连接参数、MQTT 页写入的算手动档凭证"切两半：
+
+| 字段 | 处理 | 说明 |
+|---|---|---|
+| `host` `port` `ssl` `client_id` | 保留 | 首页「MQTT 服务器」面板可改。⚠️ `ssl` **必须和 host/port 一起保**：同一个 host 的 1883 明文和 8883 TLS 是两条路，只保地址不保 ssl 会把走 TLS 的用户打回明文，表现是"切回来就连不上了" |
+| `auto.pass` | 保留 | 首页填的 MQTT凭证密码，与手动档那个 `pass` 是两份独立的值 |
+| `interval_s` `qos` `allow_no_sn` `keep_session` | 保留 | 共用字段，首页「保存」会一并带走，算"首页写入的内容" |
+| `user` `pass` `pub_topic` `sub_topic` | 清空 | 手动档凭证与 topic，回落默认模板 |
+| `manual_on` | 强制置 `false` | ⚠️ **必须和清值在同一个 `save()` 里完成**。`normalize` 在 `manual_on=true` 时**使用** user/pass/topic，只清值不换档的话设备会拿空凭证匿名连平台——表现是"切回 idle 后再没连上过 MQTT"，且前端 MQTT 页显示成手动档。拆成两次 save，中间任何一次失败都会把设备留在那个失联状态 |
+
+三个实现细节：
+
+- **"清空"是 `fskv.set(k,"")` 而不是 `fskv.del(k)`**。`kv_get` / `poll_src` /
+  `pull_src` 都把 `""` 当"没写过"，语义完全够；而 `del` 在某些 LuatOS 版本上不存在，
+  为一行复位引入兼容性风险不划算。
+- **只清"写过"的槽**。没写过的槽也清一遍等于白写 fskv 外加一次 `save`，而 flash
+  擦写次数是有限的。同理 `mqttcfg.clear_manual()` 在 `manual_on` 已经是 false 时
+  直接返回 `wrote=false`，不落盘。
+- **`manual_on` 变了要 `iot.kick()` 重连**。旧凭证还挂在已建连的 client 上，不 kick
+  的话设备会继续用旧凭证跑，直到下次自然重连才换过来。`kick` 只在真的写过时才发。
+
+应答格式：`RET:MODE=OK`（什么都没清）或 `RET:MODE=OK;cleared:pull+mqtt_manual`。
+用 `k:v` 而不是 `k=v`，是因为 `protocol.js` 的 kv 解析要求整段里同时有 `;` 和 `:` 才
+拆键值对，写成 `cleared=...` 前端只会拿到一整条字符串、取不出清了什么。前端据此
+播报"已清空配置：xxx"，并重读 `R:CFG` / `R:MQTT` 让表单回落。
 
 ## sniff 通讯参数自动识别（`R:AUTODETECT`）
 

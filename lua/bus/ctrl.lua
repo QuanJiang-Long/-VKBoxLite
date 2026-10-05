@@ -5,6 +5,7 @@ local sys = corelib.try("sys")
 local poll = require "bus/poll"
 local mon = require "bus/mon"
 local cfgstore = require "cfg"
+local mqttcfg = require "iot/mqttcfg"
 local iot = corelib.try("iot/iot")
 
 local M = {}
@@ -81,11 +82,37 @@ function M.switch_mode(mode)
     elseif mode == "idle" or mode == "stop" then
         if poll.is_running() then poll.stop() end
         if mon.is_running() then mon.stop() end
-        return true, "OK idle (bus released)"
+        local cleared = M.reset_user_cfg()
+        -- 第三个返回值是给 W:MODE 拼应答的(见 cmd.lua 的 cleared: 那段),
+        -- msg 本身保持原样, 别把清单塞进去 —— switch_mode 的返回值有别的调用方
+        return true, "OK idle (bus released)", cleared
 
     else
         return false, "FAIL unknown mode (use poll/pollpull/sniff/idle)"
     end
+end
+
+-- 切回 idle 时的配置复位。清 485 三槽 + 手动档 MQTT, 首页配好的平台连接不动。
+-- 返回真正清掉的项名, 由 switch_mode 拼进应答, 用户看得见"到底清了什么"。
+--
+-- ⚠️ 只走 idle/stop 分支, 因为只有那时 poll/mon 已经停了。poll/pollpull
+--    正在用这两份配置, 清了等于当场自残。
+-- ⚠️ manual_on 变了必须 kick 重连: 旧的 user/pass/topic 还挂在已建连的
+--    client 上, 不 kick 的话设备会用旧凭证继续跑, 直到下次自然重连才生效
+function M.reset_user_cfg()
+    local cleared = cfgstore.reset_user()
+    -- wrote=false = 手动档本来就是干净的(从没配过), 不能报"已清空"骗用户
+    local ok, err, wrote = mqttcfg.clear_manual()
+    if ok then
+        if wrote then cleared[#cleared + 1] = "mqtt_manual" end
+    else
+        -- 复位失败不能让切 idle 失败(总线已经放了, 回退会自相矛盾),
+        -- 但必须留痕: 否则用户以为清干净了, 下次进 pollpull 拿旧配置起轮询
+        log.warn("ctrl", "reset mqtt_manual fail:", tostring(err))
+    end
+    -- 手动档开着时旧凭证还挂在已建连的 client 上, 必须重连换一套
+    if wrote and iot then pcall(iot.kick) end
+    return cleared
 end
 
 -- 前端据此高亮对应的卡。pollpull 要单列一张卡, 不能和 poll 混:
