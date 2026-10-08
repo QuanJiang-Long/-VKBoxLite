@@ -130,43 +130,16 @@ local function on_receive(id, len)
     end
 end
 
--- sniff 专用帧解析。与 mbus.parse_frame 的差别只有一处: fc3/4 的 8 字节
--- 形态(读请求)也认。那 8 字节是 slave fc addr(2) qty(2) crc(2), 第 3 字节是
--- 地址高字节不是 byte_count, parse_frame 按 5+bc 算必然拒收, 于是旁听只能
--- 看到应答看不到查询, REQ/RSP 配不上对(pair_state 全 orphan), R:INFER 推不出
--- 轮询表, R:AUTODETECT 也因解不出帧而 21 连空。
---
--- ⚠️ 为什么不在 mbus.parse_frame 上改: 那个函数被 poll 的 try_resp 用着,
--- 它的匹配条件只看 slave/fc 不看请求还是响应。总线上别的主站(或另一台网关)
--- 发来的 fc3 查询帧 slave/fc 与在途请求相同, 会被误收成响应, 而查询帧没有
--- data 字段, poll_reg 接着调 mbus.parse_regs(f.data) 就是 parse_regs(nil),
--- #nil 直接抛错把 poll_task 打断(表现为轮询突然不再打 round 日志)。
--- 所以 sniff 自己解析, parse_frame 一行不动, poll 行为零变化。
-local function sniff_parse(s)
-    local f = mbus.parse_frame(s)
-    if f then return f end
-    if #s ~= 8 then return nil end
-    local fc = s:byte(2)
-    if fc ~= 3 and fc ~= 4 then return nil end
-    -- try_extract_len 已按 crc_at(buf,6) 验过 8 字节帧, 这里再验一次是因为
-    -- sniff_parse 也可能被别处直接调; parse_frame 开头同样有 crc_ok, 双保险
-    if not mbus.crc_ok(s) then return nil end
-    return {
-        slave = s:byte(1), fc = fc,
-        addr = s:byte(3) * 256 + s:byte(4),
-        qty = s:byte(5) * 256 + s:byte(6),
-        raw = s,
-    }
-end
-
 -- CRC 试探法切帧: 逐个偏移找第一个 CRC 合法且长度自洽的帧,
--- 与 poll 同一套策略; 找不到才丢 1 字节继续找
+-- 与 poll 同一套策略; 找不到才丢 1 字节继续找。
+-- fc3/4 的 8 字节读请求形态由 mbus.decode_frame 认(process_frame 走的是它),
+-- 这里不做重复判定
 local function next_frame()
     for off = 1, #rxbuf do
         local s = rxbuf:sub(off)
         local n = mbus.try_extract_len(s)
         if n and #s >= n then
-            local f = sniff_parse(s:sub(1, n))
+            local f = mbus.decode_frame(s:sub(1, n))
             if f then
                 rxbuf = s:sub(n + 1)
                 return s:sub(1, n)

@@ -274,15 +274,41 @@ function M.try_extract_len(buf)
     return nil
 end
 
+-- sniff 专用帧解析: fc3/4 的 8 字节形态(读请求)也算合法帧。
+-- 那 8 字节是 slave fc addr(2) qty(2) crc(2), 第 3 字节是地址高字节不是
+-- byte_count, parse_frame 按 5+bc 算必然拒收 -- 于是旁听只能看到应答看不到
+-- 查询, REQ/RSP 配不上对(pair_state 全 orphan), R:INFER 推不出轮询表,
+-- R:AUTODETECT 也因解不出帧而 21 连空。
+--
+-- ⚠️ 为什么不直接改 parse_frame: 那个函数被 poll 的 try_resp 用着, 它的匹配
+-- 条件只看 slave/fc 不看请求还是响应。总线上别的主站(或另一台网关)发来的
+-- fc3 查询帧 slave/fc 与在途请求相同, 会被误收成响应, 而查询帧没有 data
+-- 字段, poll_reg 接着调 mbus.parse_regs(f.data) 就是 parse_regs(nil),
+-- #nil 直接抛错把 poll_task 打断(表现为轮询突然不再打 round 日志)。
+-- 所以只在这里兜底, parse_frame 一行不动, poll 行为零变化。
+local function sniff_req_frame(s)
+    if #s ~= 8 then return nil end
+    local fc = s:byte(2)
+    if fc ~= 3 and fc ~= 4 then return nil end
+    if not M.crc_ok(s) then return nil end
+    return {
+        slave = s:byte(1), fc = fc,
+        addr = s:byte(3) * 256 + s:byte(4),
+        qty = s:byte(5) * 256 + s:byte(6),
+        raw = s,
+    }
+end
+
 function M.decode_frame(s)
     local f = M.parse_frame(s)
+    if not f then f = sniff_req_frame(s) end
     if not f then
         return { kind = "other", hex = (s:gsub(".", function(c) return string.format("%02x", c:byte()) end)), raw = s }
     end
     f.hex = (s:gsub(".", function(c) return string.format("%02x", c:byte()) end))
     if f.err then
         f.kind = "err"
-    elseif f.fc == 3 then
+    elseif f.fc == 3 or f.fc == 4 then
         if f.data then f.kind = "rsp" else f.kind = "req" end
     elseif f.fc == 6 or f.fc == 16 then
         f.kind = "echo"
