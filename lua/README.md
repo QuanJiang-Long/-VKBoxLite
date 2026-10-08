@@ -111,6 +111,14 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 >
 > **写寄存器的入口**：MQTT 下行 `{"cmd":"WRITE","items":[...]}`（设备自动排进写队列）与前端「写寄存器」。原先的 `W:WRITE`/`W:WRITEJ` 已删除——字段名与 MQTT 下行解析完全一致，属重复实现。写结果看 `R:STAT` 的 `write` 段，**不是 `enqueue_write` 的返回值**（那只代表入队）。
 >
+> ⚠️ **下行写指令的 `id`→地址解析必须按当前在用的配置槽**。平台是按 `ds_pull` 里的寄存器表下发的（拉取时 `name` 字段就取自平台 id，见 `pullcfg.lua` 的 `props_to_regs`），所以 `downlink_write` 和 `alias_map` 都要走 `active_cfg()` 而不是写死 `load_poll`。曾写死过一次，后果是拉取档下**每一条按名字下发的写指令都静默失败**：`ds_poll` 通常是空的，`resolve_addr` 返回 nil 只打一行 `write item unresolvable`，平台那头完全看不出异常。
+>
+> 报文形状认这三种（`handle_downlink` 末尾开始分流）：
+> ① `[{"id":..,"value":..}]` 数组 → 整包当 items
+> ② `{"cmd":"WRITE","items":[...]}`
+> ③ 单对象带 `value`/`values`
+> `{"cmd":"REPORT"/"READALL"}` 只置脏等下一个上报周期，不回包。
+>
 > **已删除的前端零调用指令**：`R:SNIFFCFG`/`W:SNIFFCFG`（前端无入口）、`R:IOTSTAT` 与 `R:POLL`（被 `R:STAT` 的 iot/mqtt 段和 data 段覆盖）、`W:RST`（前端各自有「恢复默认」按钮）、`W:REG`（被 `W:CFG` 覆盖：前端「保存配置」把 regs 并进 cfg 一起发，单独写寄存器表的指令从来没被调过）。连带删掉只服务它们的 `cfg.reset()`、`mqttcfg.reset()`、`collector.clear()`。
 >
 > **删指令前必做的两步**：① 数前端 `Enc.xxx` 调用次数（`protocol.js` 里挂着但 app.js 零调用 = 候选）；② 查仓库外的 `pc_tool` 还在不在用。两步都过才能删。

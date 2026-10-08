@@ -35,6 +35,19 @@ local function poll_slot()
     return (p and p.slot()) or "poll"
 end
 
+-- 当前在用的那份轮询配置: 拉取档读 ds_pull, 其余读 ds_poll。
+-- ⚠️ 不能写死 load_poll: 平台是按 ds_pull 里的寄存器表下发的(报文里的 id
+--    就是那边的 name/alias), 拿 ds_poll 去解析必然找不到地址 —— 而 ds_poll
+--    在拉取档下通常是空的(从没手配过), 于是每条按名字下发的写指令都静默失败,
+--    只有一行 write item unresolvable 日志, 平台那头看不出任何异常。
+--    alias_map 同理: 上报的 name 字段也要按在用的那份映射, 否则平台上看到的
+--    名称和用户配的不是一套
+local function active_cfg()
+    local f = (poll_slot() == "pull") and cfgstore.load_pull or cfgstore.load_poll
+    local ok, c = pcall(f)
+    return (ok and c) or nil
+end
+
 local M = {}
 
 local S = {}
@@ -97,8 +110,8 @@ local function imei()
 end
 
 local function alias_map()
-    local ok, c = pcall(cfgstore.load_poll)
-    if not ok or not c or not c.regs then return {} end
+    local c = active_cfg()
+    if not c or not c.regs then return {} end
     local m = {}
     for _, r in ipairs(c.regs) do m[r.name] = r.alias or r.name end
     return m
@@ -401,10 +414,13 @@ local function downlink_write(items)
         log.error("iot", "downlink write: bus/poll 不可用")
         return 0, 0
     end
-    local okc, c = pcall(cfgstore.load_poll)
-    local regs = okc and c and c.regs or {}
+    -- ⚠️ 必须按当前在用的槽取寄存器表和默认从机地址, 不能写死 ds_poll:
+    --    拉取档在采的是 ds_pull, 平台的 id 是按那份表下发的。拿 ds_poll 解析
+    --    会全部落到 write item unresolvable, 从机地址也可能取错
+    local c = active_cfg()
+    local regs = (c and c.regs) or {}
     -- 默认从机地址只读一次: 挂在循环里等于每条缺 slave 的下行都重读一次 fskv+JSON
-    local dslave = (okc and c and c.slave) or cfg.SLAVE_ADDR
+    local dslave = (c and c.slave) or cfg.SLAVE_ADDR
     local function resolve_addr(k)
         if not k then return nil end
         if type(k) ~= "string" then
