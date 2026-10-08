@@ -150,8 +150,8 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 
 | 配置 | 键 | 字段 | 谁写它 |
 |---|---|---|---|
-| `poll` | `ds_poll` | 串口参数 + slave + interval + timeout + **regs 寄存器表** | `W:CFG`、前端「保存配置」 |
-| `pull` | `ds_pull` | 同 `ds_poll`（复用同一份 normalize/default） | 平台配置落地 `iot.auto_apply` |
+| `poll` | `ds_poll` | 串口参数 + slave + interval + timeout + **regs 寄存器表** | `W:CFG`（非 `pollpull` 模式下） |
+| `pull` | `ds_pull` | 同 `ds_poll`（复用同一份 normalize/default） | `W:CFG`（`pollpull` 模式下）+ 平台配置落地 `iot.auto_apply` |
 | `sniff` | `ds_sniff` | **只有串口参数** | 无（始终用默认值，见下） |
 | `sys` | `ds_sys` | boot_mode | `W:BOOTMODE` |
 
@@ -207,10 +207,16 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
   平台改了寄存器表。
 - **进 pollpull 前会先检查 `ds_pull` 拉过没有**。没拉过就直接拿 default 起轮询，等于
   凭空造一套寄存器表、从机地址多半还是错的，所以 `ctrl` 先 `iot.pull_start()`，成功才转正。
-- **`R:CFG` 按模式选槽**。`pollpull` 下返回 `ds_pull`（平台那份），`poll` 下返回 `ds_poll`。
-  不这么分的话拉取档表单显示的仍是手配寄存器表，用户改了存的还是手配槽，和"正在采的
-  那份"对不上。前端因此多一条「配置来源」提示，说明"保存写的是另一个槽"。
-- **`W:CFG` 只写 `ds_poll`**。拉取档下的表单是只读参考（平台那份的镜像），要改就回手动档。
+- **`R:CFG` / `W:CFG` 都按模式选槽**（`pollpull` → `ds_pull`，其余 → `ds_poll`）。
+  读写必须是同一套规则：只读分槽、保存写死 `ds_poll` 的话，拉取档下用户改完
+  看到的值和自己存的对不上。实测过的三种坏味道——改 `baud`/`slave` 时重启且
+  `poll.start()` 不传槽会把 `curSlot` 翻成 `"poll"`，界面自己跳回手动配置卡；
+  只改 `interval`/`regs` 时不重启，下次进拉取档又读回 `ds_pull` 的旧值。
+  前端因此有一条「配置来源」提示，说明平台下次下发会覆盖本地改动。
+- ⚠️ **`poll.start()` 必须带槽**。它是 `curSlot = (src == "pull") and "pull" or "poll"`，
+  不传 `src` 就等于强制置回 `"poll"`。`ctrl` 和 `W:CFG` 都要把槽传进去，否则
+  拉取档下一次保存就静默切档——`ctrl.get_mode()` 看的是 `poll.slot()`，
+  模式卡会跟着跳，而 `ds_pull` 还留着旧值。
 
 > ⚠️ sniff 配置目前**前端没有编辑入口**（无 `W:SNIFFCFG` 指令），始终用 `cfg.BAUD`
 > 等默认值。如果现场总线不是默认波特率，旁听会看到乱码——这是已知缺口，不是本次要

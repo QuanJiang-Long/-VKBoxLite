@@ -559,15 +559,16 @@ async function readInfo() {
 // 485 poll 配置读 / 写
 //=====================================================================
 // quiet=true 跳过「有未保存更改」确认（调用方已经问过了，或刚连上串口没有基线）
-// 配置来源提示条。拉取档下 R:CFG 返回的是平台那份（ds_pull），而「保存配置」
-// 写的是手配槽（ds_poll）—— 不说明白的话用户改了表单以为生效了，实际设备
-// 还在采平台那份。手动档下这个提示不出现（表单和落盘是同一份）
+// 配置来源提示条。拉取档下 R:CFG 返回的是平台那份（ds_pull），而保存也写
+// 同一个槽（W:CFG 按模式选槽，见 cmd.lua），所以这里是"所见即所存"，
+// 只是要提醒平台下次下发会盖掉本地改动。不说明白的话用户以为自己在改一份
+// 独立的副本，平台一推发现改动没了
 function renderCfgSrcHint(slot) {
   if (!el.cfgSrcHint) return;
   const h = el.cfgSrcHint;
   if (slot === 'pull') {
     h.hidden = false;
-    h.textContent = '当前显示的是平台拉取的配置（ds_pull）；「保存配置」写的是手动配置槽（ds_poll），本页改动不影响正在采集的那份';
+    h.textContent = '当前显示并保存的都是平台拉取的配置（ds_pull）；平台下次下发会覆盖本地的改动';
     h.style.color = '#b06a00';
   } else {
     h.hidden = true;

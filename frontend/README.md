@@ -258,8 +258,8 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 | 前端动作 | 指令 | 应答 | 说明 |
 |---|---|---|---|
 | 读设备信息 | `R:INFO` | `RET:INFO={json}` | SN/IMEI/ICCID/CSQ/RSRP/版本/项目/服务器/波特率/从机/寄存器数/锁状态 |
-| 读 poll 配置 | `R:CFG` | `RET:CFG={json}` | `{cfg:{baud,databits,parity,stopbits,slave,interval_ms,timeout_ms,regs},src}` |
-| 保存 poll 配置 | `W:CFG={json}` | `RET:CFG=OK` / `RET:FAIL:CFG:原因` | 串口参数变化自动重启轮询任务；间隔/寄存器表热更新 |
+| 读 poll 配置 | `R:CFG` | `RET:CFG={json}` | `{cfg:{baud,databits,parity,stopbits,slave,interval_ms,timeout_ms,regs},src,slot}`；`slot`=`poll`/`pull` 由当前运行模式决定 |
+| 保存 poll 配置 | `W:CFG={json}` | `RET:CFG=OK` / `RET:FAIL:CFG:原因` | 串口参数变化自动重启轮询任务；间隔/寄存器表热更新。**写哪个槽同样由运行模式决定**：`poll（拉取配置）` 档写 `ds_pull`，其余写 `ds_poll`。读写同槽才有"所见即所存" |
 | 读寄存器表 | `R:REG` | `RET:REG=[json]` | `[{addr,count,name,alias,dtype}]`。**只有读**：写寄存器表走 `W:CFG`（`regs` 并进 cfg 一起发），`W:REG` 已删 |
 | 读实时值 | `R:VAL` | `RET:VAL=[json]` | `[{name,addr,value,hex,ts,dtype}]`，设备已解好值 |
 | 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,mqtt}` 全量状态；`mqtt` 段另带 `push_n/push_seen/push_err/autosaved/autosave_at`（平台主动重推横幅用，见下）；`write` 段是写队列的 queued/done/fail |

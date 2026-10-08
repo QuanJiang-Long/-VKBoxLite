@@ -135,13 +135,24 @@ local function reg_cmds()
         if not t then return M.reply("RET:FAIL:CFG:bad json") end
         local n, err = cfgstore.normalize_poll(t)
         if not n then return M.reply("RET:FAIL:CFG:" .. tostring(err)) end
-        local ok, serr = cfgstore.save_poll(t)
+        -- 按当前运行模式选槽保存, 与 R:CFG 的选槽规则同一套:
+        -- 拉取档写 ds_pull, 其余写 ds_poll。
+        -- 不这么分的话, 实测会撞上三个去向三个语义: 改 baud/slave 时重启且
+        -- poll.start() 不传槽会把 curSlot 翻成 "poll", 界面自己跳回手动配置卡;
+        -- 只改 interval/regs 时不重启, 下次进拉取档又读回 ds_pull 的旧值。
+        -- 用户无法预期自己改的到底存在哪、采的是哪份
+        local slot = (ctrl.get_mode() == "pollpull") and "pull" or "poll"
+        local ok, serr
+        if slot == "pull" then ok, serr = cfgstore.save_pull(t)
+        else ok, serr = cfgstore.save_poll(t) end
         if not ok then return M.reply("RET:FAIL:CFG:" .. tostring(serr)) end
         if poll.needs_restart(n) then
             if poll.is_running() then
                 poll.stop()
                 poll.apply_cfg(n)
-                poll.start()
+                -- ⚠️ 必须带槽: poll.start() 不传 src 会把 curSlot 强制置成
+                -- "poll"(见 poll.lua 的 start), 拉取档下保存等于静默切档
+                poll.start(slot)
             else
                 poll.apply_cfg(n)
             end
