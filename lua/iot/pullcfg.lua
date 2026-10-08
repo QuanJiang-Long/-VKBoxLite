@@ -161,7 +161,7 @@ local function props_to_regs(props, limit)
             else
                 local alias = trim(pr.name)
                 -- 非 UTF-8(GBK 乱码)时 alias 退回 id。有两个好处：参数表不显示
-                -- 乱码；也不会被 build_payload 当 name 原样发回平台，把坏字节
+                -- 乱码；也不会被 build_items 当 name 原样发回平台，把坏字节
                 -- 循环发上去。平台哪天改用 UTF-8，这条自动失效
                 if not utf8_ok(alias) then
                     alias = ""
@@ -196,8 +196,9 @@ end
 M.topics = topics
 
 -- 解析平台下发的整包 JSON。
--- 只提取 commInterfaces 与 tsl.properties; 不写 fskv, 不重启轮询。
--- 返回 {poll, skipped, renamed, msg_id}；失败返回 nil, 原因
+-- 只提取 commInterfaces / devices.addr / tsl.properties; 不写 fskv, 不重启轮询。
+-- 返回 {poll, skipped, renamed, msg_id}（空快照返回 {empty=true, msg_id}）；
+-- 失败返回 nil, 原因
 function M.parse(payload)
     if not json then return nil, "no json lib" end
     if type(payload) ~= "string" or payload == "" then return nil, "empty payload" end
@@ -214,6 +215,25 @@ end
 function M.parse_snap(t, snap)
     if type(snap) ~= "table" then return nil, "缺少 configSnapshot" end
 
+    -- msgId 原样带出去：U6 回执必须回同一个值，平台据此核销。
+    -- 取不到就记 "unknown"（老平台/自测不带 msgId），回执照样发得出去
+    local msg_id = t.msgId
+    if type(msg_id) ~= "string" or msg_id == "" then msg_id = "unknown" end
+
+    -- 三个数组全空 = 平台侧【没有任何配置】。sniff 模式本来就是如此：设备档案
+    -- 本地自建(source='sniff')，平台的互斥守卫不覆盖现场调通的配置，所以
+    -- publishConfigSnapshot 只回一个空壳（mqttPlatform 也全空），整包 193B。
+    -- 这是【正常终态】不是失败：报错会让 S.push_err 锁死成假故障，且我们
+    -- 不回执平台就每 1s 重推一次同一份空包（2026-10-08 17:15 实测推了 5 次）。
+    -- 判据要三个同时为空：只空一个可能是平台挑着下发，不能当成"没配置"
+    local nd = type(snap.devices) == "table" and #snap.devices or 0
+    local np = type(snap.tsl) == "table" and type(snap.tsl.properties) == "table"
+        and #snap.tsl.properties or 0
+    local nc = type(snap.commInterfaces) == "table" and #snap.commInterfaces or 0
+    if nd == 0 and np == 0 and nc == 0 then
+        return { empty = true, msg_id = msg_id }, nil
+    end
+
     local dev = (snap.devices or {})[1]
     local slave = dev and num(dev.addr) or nil
     if not slave or slave < 1 or slave > 247 then return nil, "devices[0].addr 非法" end
@@ -229,11 +249,6 @@ function M.parse_snap(t, snap)
     poll.interval_ms = base.interval_ms
     poll.timeout_ms = base.timeout_ms
     poll.regs = regs
-
-    -- msgId 原样带出去：U6 回执必须回同一个值，平台据此核销。
-    -- 取不到就记 "unknown"（老平台/自测不带 msgId），回执照样发得出去
-    local msg_id = t.msgId
-    if type(msg_id) ~= "string" or msg_id == "" then msg_id = "unknown" end
 
     return { poll = poll, skipped = skipped, renamed = renamed, msg_id = msg_id }, nil
 end

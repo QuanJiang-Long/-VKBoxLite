@@ -124,13 +124,20 @@ function M.normalize_poll(c)
         out.timeout_ms = t
     end
     out.regs = {}
+    local seen = {}
     local regs = c.regs
     if type(regs) == "table" then
         for _, r in ipairs(regs) do
             local nr, err = normalize_reg(r)
             if not nr then return nil, err end
             if #out.regs >= cfg.MAX_REGS then return nil, "too many regs" end
-            out.regs[#out.regs + 1] = nr
+            -- 同 addr 只留首条。平台的 properties 实测会把同一属性发两遍
+            -- (2026-10-08 日志: skipped 里 reg_100/reg_250 各出现两次),
+            -- 原样存进重复项, 切 pollpull 后同一帧重复读, 白占总线时间
+            if not seen[nr.addr] then
+                seen[nr.addr] = true
+                out.regs[#out.regs + 1] = nr
+            end
         end
     end
     return out

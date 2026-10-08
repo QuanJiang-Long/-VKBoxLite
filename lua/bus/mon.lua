@@ -85,7 +85,7 @@ end
 
 -- B1: 配对成功就把旁听到的值写进 collector, 让 iot 现成的 dirty->publish
 -- 链路自己把数据发上平台。sniff 自己不发请求, 不写这里 dataCache 永远空,
--- build_payload 返回 "[]"、publish 直接 return, 上报链路整个空转。
+-- build_items 为空、publish 直接 return, 上报链路整个空转。
 -- 别名 s<从机>_r<地址>, 与前端 R:INFER 的行键保持一致; 旁听拿不到配置里的
 -- 数据类型, 统一按 uint16 大端解(poll 侧默认也是这个), 多寄存器逐个拆开
 local function push_rsp_value(slave, addr, f)

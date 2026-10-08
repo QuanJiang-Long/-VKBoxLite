@@ -558,6 +558,40 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 （「重连」按钮单独发 W:MQTTRC，只重连不动配置）
 ```
 
+### 平台 V3 数据面三条上行（U2 / U3 / U7）
+
+U4（数据上报）见上面 topic 表。这三条与订阅无关，都是 `publish`：
+
+| 编号 | topic | 时机 | 内容 |
+|---|---|---|---|
+| U3 | `/sys/thing/gw/property/post/{sn}` | 与 U4 同节奏（`interval_s`） | `ram_percent`（`rtos.meminfo("sys")`）、`uptime_sec`（`os.clock()`）、`cpu_percent`（主循环忙碌占比，**非 MCU CPU 占用率**，LuatOS 无 OS 级 CPU 接口） |
+| U7 | `/sys/thing/gw/function/post/{targetSN}` | 每次 D2/D3 下行执行后 | `[{"id":<下发 id>,"value":<值或 null>}]`。粒度只到**入队/拒绝**：`poll.enqueue_write` 是异步的，汇总 `write_status()` 分不出是哪一条，所以 `value` 非 null **不等于已写到总线** |
+
+**U2 是双重用途的**（`iot.lua` 的 `send_meta` / `send_topo`），靠 body 里有没有
+`nodes[]` 区分语义，所以拆成**两帧**各发一次（合成一帧平台拿不准该干嘛）：
+
+| 帧 | body | 平台行为 | 时机 |
+|---|---|---|---|
+| 元数据帧 | 不带 `nodes[]`：`sn`/`deviceSn`/`imei`/`iccid`/`fw`/`firmwareVersion`/`hw`/`capabilities`/`deviceName`/`serialNumber`/`csq`/`netRegister`/`networkAddress`/`isShadow`/`summary`/`ts` | 只更新网关属性，**不重建模型** | 元数据指纹（imei/iccid/csq/host）变化即发 |
+| 拓扑帧 | 带 `nodes[]`：`sn`/`deviceSn`/`ts`/`nodes[]` | 建子设备 + 绑定 + 物模型 | 拓扑签名变化即发，**且 detect 未跑完不发**（否则 baud 是上一轮的默认值，平台按错波特率建一次模型还得再重建） |
+
+两帧都**不做定时兜底**：实测（2026-10-08）留着 60s 兜底重发会形成
+"我们发拓扑 → 平台推配置 → 我们再发拓扑"的闭环，每 60s 一轮；而且兜底路径不打日志，
+现象是"sniff 档平台不断下发模型配置"，难查。
+
+`firmwareVersion` 是纯数字（`2.0.0` → `20000`）= major\*10000 + minor\*100 + patch：
+平台侧该字段是 BigDecimal，传字符串会**整帧被丢**。`ts` 用秒，毫秒会让平台按 1970 年解析。
+
+**U2 拓扑的两个来源保真度不同**（`iot.lua` 的 `build_nodes`）：
+
+| 模式 | 来源 | id / name / dtype |
+|---|---|---|
+| poll / pollpull | `active_cfg()` 平台下发的正经配置 | 全是真的（`name`/`alias`/`dtype`） |
+| sniff | `mon.infer()` ∪ `cfgstore.load_pull()`，按 `slave:addr` 合并，**平台配置覆盖推断** | 只有 slave/addr/count，id/name 按地址现造（`r<addr>`），dtype 默认 `uint16` |
+
+**U5 / U5b 告警事件（`gw/event/post`）本次未实现**，需要时按同一套方式补。
+
+
 > **保存与回执都发生在设备侧（`iot.auto_apply`），不经前端**：平台主动重推
 > 走的是同一条路径，靠前端的话没开串口就永远不落地。三道安全边界：
 >
@@ -575,10 +609,45 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 > 新一轮 `W:PULLCFG` 会重置 `msg_id`/`replied`。
 >
 > hello payload 带 6 个字段（V3 契约 U1）：`vendor`/`model`/`fwVersion`/`deviceId`
-> 加 **`topicFormat:"v3"`** 与 **`onboardingMode:"platform"`** 两个自述字段。
-> 缺了平台可能按旧版格式猜下行 topic，导致指令全丢且无报错；`onboardingMode`
-> 若写 `sniff`，平台会跳过推送配置，拉取直接废——我们这条链路就是找平台要配置，
-> 所以固定 `platform`。
+> 加 **`topicFormat:"v3"`** 与 **`onboardingMode`** 两个自述字段。
+> 缺 `topicFormat` 平台可能按旧版格式猜下行 topic，导致指令全丢且无报错。
+>
+> **`onboardingMode` 按当前 485 模式如实报**（文档：`sniff`/`platform`/`manual`）：
+>
+> | 模式 | 上报值 | 平台行为 |
+> |---|---|---|
+> | `sniff` | `sniff` | 跳过"对本地自建设备无效的配置快照推送" |
+> | `pollpull` | `platform` | 照常推 ConfigSnapshot（拉取档要的就是这个） |
+> | `poll`（手配） | `platform` | 该档不订 `config/get`，推了也收不到 |
+>
+> `manual` **不报**：文档只写明了 `sniff` 的行为，`manual` 收到会怎样没有定义，
+> 报一个行为未知的值风险大于收益。待确认后补，见 `NOTES-onboarding-manual.md`。
+>
+> ⚠️ 这里改过一次。早期固定报 `platform`，理由是"报 sniff 平台会直接不搭理"。
+> 拿到更精确的说明后确认：平台见 `sniff` 只是**跳过配置快照推送**，hello 本身照常
+> 处理（建/更新网关设备、回写 fw/hw/ip）。固定 `platform` 的真实代价是 sniff 档
+> 每次 hello/拓扑后都收到一份 193B 空壳快照，还要为它回执，否则平台每 1s 重推。
+>
+> `deviceId` 取 IMEI，取不到报 `"unknown"`（不报空串）。平台校验 `gateway_imei`，
+> 不一致会拒 hello。
+>
+> **sniff 档发完 hello 直接判完成，不进 waiting**：既知平台不推，等一个
+> `PULL_TIMEOUT_MS` 只会让前端显示"平台未下发配置(超时)"这种假故障。也不回 U6 ——
+> 没收到 D1 就没有 msgId 可核销。
+>
+> **pollpull 档每 30min 重发一次**（`HELLO_RE_S`，在 `task_main` 已连接分支里判）：
+> 平台侧网关档案可能被重置/白名单到期，设备侧无从得知，只靠上电那一次 hello 会
+> **永久失联且没有任何报错**。重发不走拉取状态机 —— 平台响应由 `recv_push` 直接
+> 落盘，不影响前端正在显示的拉取结果，也不需要用户再点一次「拉取配置」。
+> `hello_at` 记的是**本连接内最后一次 hello 成功发送**的时间，`reset_state` 置 0，
+> 所以开机不会白发；新一轮拉取/重连后重新起跑。
+> 三个前提都满足才发：`hello_at > 0`、当前是 pollpull 档、`pulling()` 为假
+> （握手中不发，避免和正在等的应答打架）。
+> sniff / poll 两档**不发**：前者没有"未拿到配置"这个状态，后者不订 `config/get`。
+>
+> hello 发送失败按 **1s/3s/9s** 退避重发（`HELLO_BACKOFF_S`），3 次都不成才报
+> `hello 发送失败`。不立即判死是因为失败多半是 `refresh_subs` 刚把 client 抽走，
+> 下一轮就好了；也不无限重发，否则"平台连不上"会被藏起来。
 
 > `W:PULLCFG` 处理器在 VUART 回调上下文，**不能 `sys.wait`**，所以握手跑在
 > `iot.task_main` 协程里；指令只置状态并立即应答，前端轮询拿结果。
@@ -644,7 +713,10 @@ handle_downlink
 
 | 用途 | topic | 说明 |
 |---|---|---|
-| 上报（发布） | `/sys/thing/node/property/post/{sn}` | 数据面。模板写死 `-1` 后缀（子设备站位），`{sn}` = 设备 SN。**前端可改**（`mqttcfg.pub_topic`） |
+| 上报（发布） | `/sys/thing/node/property/post/{sn}-{n}` | 数据面（U4）。`{n}` = 子设备序号，**从机地址升序**：一份轮询配置只有一个 slave 恒为 `-1`，sniff 档多从机才递增。`-{n}` 后缀不能省，缺了平台无法把数据归属到子设备、上报等于白发。**前端可改**（`mqttcfg.pub_topic`，改的是 `{sn}` 前那段） |
+| 拓扑上报（发布） | `/sys/thing/gw/info/post/{sn}` | U2 建档，带 `nodes[]`。**固定平台常量**（`cfg.PLATFORM_INFO_TOPIC`），不可改 |
+| 网关资源（发布） | `/sys/thing/gw/property/post/{sn}` | U3，`ram_percent`/`uptime_sec`/`cpu_percent`。**固定平台常量**（`cfg.PLATFORM_RES_TOPIC`），不可改 |
+| 指令回执（发布） | `/sys/thing/gw/function/post/{targetSN}` | U7，D2/D3 执行后回 `[{id,value}]`，失败项 `value:null`。**固定平台常量**（`cfg.PLATFORM_FPOST_TOPIC`），不可改 |
 | 订阅（下行） | `/sys/thing/gw/config/get/{sn}` | 主下行通道：平台配置下发 + 普通指令都走它。**前端可改**（`mqttcfg.sub_topic`） |
 | hello | `/sys/thing/gw/config/hello/{sn}` | 拉取握手，`{sn}` = 设备 SN。**固定平台常量**（`cfg.PLATFORM_HELLO_TOPIC`），不可改 |
 | 服务调用 | `/sys/thing/gw/function/get/{sn}` | 平台三类下行之一，conack 时订阅。**固定平台常量**（`cfg.PLATFORM_FUNC_TOPIC`） |
@@ -734,7 +806,27 @@ handle_downlink
 | `param.stopBits` | `stopbits` | 仅接受 1/2 |
 | `param.parity` | `parity` | `none`→0、`even`→1、`odd`→2 |
 
-**devices[0].addr → `slave`**（字符串转数字，须在 1~247）
+**从机号 → `slave`**：`devices[0].addr`，字符串转数字，须在 1~247（文档示例
+`"addr": "5"` 就是字符串）。
+
+**⚠️ 空快照是正常终态，不是失败**。`devices`/`tsl.properties`/`commInterfaces`
+三个数组**同时为空**（`mqttPlatform` 也全空）时，`parse_snap` 返回
+`{empty=true}` 而不是报错。这正是 sniff 模式的预期行为：设备档案本地自建
+（`source='sniff'`），平台互斥守卫不覆盖现场调通的配置，所以
+`publishConfigSnapshot` 只回一个 193B 的空壳。
+
+按成功收尾 + 回 U6（`message` = 那句话说清楚"平台未下发配置"）。不回执的代价是
+平台每 1s 重推一次同一份空包 —— 2026-10-08 17:15 实测连推 5 次。
+
+| 场景 | 平台会推什么 |
+|---|---|
+| sniff 模式 | **空快照**（本文所述） |
+| platform 模式 + 平台侧已建档 | 带 `devices`/`properties` 的真配置 |
+| platform 模式 + 平台侧还没建档 | 也是空快照，要在平台上建子设备/物模型 |
+
+**所以：想在 sniff 档验证"平台拉配置 → 自动保存"，是验证不到的** ——
+sniff 档的寄存器表本来就来自本地旁听推断。要验证拉取链路得切到 platform 档
+（前端「拉取配置」按钮所在的档）。
 
 **tsl.properties → 寄存器表**
 

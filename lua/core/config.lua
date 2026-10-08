@@ -46,12 +46,31 @@ M.PLATFORM_REPLY_TOPIC = "/sys/thing/gw/config/reply/%s"
 -- hello 是拉配置时的自述通道；func/pset/pget 是平台三类下行的订阅通道，
 -- 少订一条平台那类下发就永远收不到且无报错。
 M.PLATFORM_HELLO_TOPIC = "/sys/thing/gw/config/hello/%s"
+-- U2 拓扑上报: 带 nodes[] 向平台登记子设备(建档+绑定+物模型)。少了它,
+-- U4 带 -{n} 的数据平台认不出归属哪个子设备, 上报等于白发
+M.PLATFORM_INFO_TOPIC = "/sys/thing/gw/info/post/%s"
+-- U3 网关自身资源(cpu/ram/uptime), 顶层节点不是子设备, 所以不带 -{n}
+M.PLATFORM_RES_TOPIC = "/sys/thing/gw/property/post/%s"
+-- U7 指令回执: D2/D3 执行完回复, 平台据此更新 FunctionLog。目标 SN 可能是
+-- 子设备, 所以是 {targetSN} 而不是 {sn}
+M.PLATFORM_FPOST_TOPIC = "/sys/thing/gw/function/post/%s"
 M.PLATFORM_FUNC_TOPIC = "/sys/thing/gw/function/get/%s"
 M.PLATFORM_PSET_TOPIC = "/sys/thing/gw/property/set/%s"
 M.PLATFORM_PGET_TOPIC = "/sys/thing/gw/property/get/%s"
 M.PULL_TIMEOUT_MS = 15000
 -- 拉取前自动连 MQTT 的等待上限(设备可能刚上电, 网络还没就绪)
 M.PULL_CONNECT_MS = 20000
+-- U1 hello 重发周期(秒)。文档: "未拿到配置前每 30min 重发"。平台侧网关档案
+-- 可能被重置/白名单到期, 设备侧无从得知 —— 只靠上电那一次 hello, 之后档案没了
+-- 就永久失联, 且没有任何报错。平台收到 hello 会重推 ConfigSnapshot, 由
+-- recv_push 落盘, 不需要动拉取状态机。
+-- 只对 pollpull 档生效: sniff 档的 hello 发完就判完成(平台明确不推配置),
+-- 没有"未拿到配置"这个状态, 重发只会让平台侧无意义地刷新档案
+M.HELLO_RE_S = 1800
+-- U1 hello 发送失败时的重发间隔(秒), 文档规定 1s/3s/9s。只重发这么几次:
+-- 发送失败多半是连接刚被 refresh_subs 抽走, 下一轮就好了; 真连不上就该报出来,
+-- 而不是无限重发把"平台连不上"藏起来
+M.HELLO_BACKOFF_S = { 1, 3, 9 }
 -- 平台 modbus.dataType -> 本框架 dtype。
 -- 两套拼法都要收：doc 的 D1/U2 示例用 uint16/float，现网实测的运维平台用
 -- ushort/long-ABCD。两套并存（实测 13:29 那次 Ua=long-ABCD、PT/CT=ushort，

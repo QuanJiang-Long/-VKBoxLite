@@ -50,17 +50,17 @@ function M.switch_mode(mode)
         if iot then pcall(iot.set_manual, slot == "poll") end
         if not poll.start(slot) then return false, "FAIL poll start" end
         if slot == "pull" then
-            -- 平台配置还没拉过就直接拿 default 起轮询, 等于凭空造一套寄存器表,
-            -- 从机地址多半还是错的。必须先拉一次(异步, 最坏 35s), 成功才转正
-            if cfgstore.pull_src() == "default" then
-                local ok, err = iot and iot.pull_start()
-                if not ok then
-                    poll.stop()
-                    return false, "FAIL pull: " .. tostring(err)
-                end
-                return true, "OK pollpull, pulling"
+            -- 进拉取档一律向平台报到(hello)并重新拉一次, 不再看 ds_pull
+            -- 拉没拉过。之前只在 pull_src()=="default" 时才拉: 拿过一次
+            -- 配置后再进 pollpull 就静默用旧配置, 平台那头看不到设备重新
+            -- 上线, 而现场寄存器表可能已经在平台上改过了。拉取期间轮询继续
+            -- 跑旧配置, 新配置到了由 auto_apply 立即生效
+            local ok, err = iot and iot.pull_start()
+            if not ok then
+                poll.stop()
+                return false, "FAIL pull: " .. tostring(err)
             end
-            return true, "OK pollpull started"
+            return true, "OK pollpull, pulling"
         end
         return true, "OK poll started"
 
@@ -75,6 +75,10 @@ function M.switch_mode(mode)
             -- boot_mode)上也会被调用。同步等识别会把开机流程堵住, 而识别失败是
             -- 重试到成功为止的, 静默总线上开机就永远回不来
             mon.request_detect()
+            -- sniff 也向平台报到。以前这里不碰 iot, 设备进旁听后平台完全
+            -- 看不到它上线。失败不回滚: 旁听才是 sniff 的主职, 平台那头
+            -- 连不上不该让用户连旁听都用不了
+            if iot then pcall(iot.pull_start) end
             return true, "OK sniff started, detecting"
         end
         return false, "FAIL sniff start"

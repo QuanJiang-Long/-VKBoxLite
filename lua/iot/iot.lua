@@ -26,6 +26,19 @@ local function get_poll()
     return poll or nil
 end
 
+-- 当前运行模式(idle/poll/pollpoll/sniff)。问 ctrl 要, 和 poll_slot() 一样
+-- 走惰性 require: 依赖图已确认无环(全工程没有任何文件 require "iot/iot"),
+-- 但顶层 require 会把 iot 的加载时机提前到 main.lua 初始化序列里, 保持
+-- 惰性最稳。拿不到就当 idle -- 宁可少订也不能给未接任务的状态乱订
+local ctrl_mod
+local function get_mode()
+    if ctrl_mod == nil then
+        local ok, p = pcall(require, "bus/ctrl")
+        ctrl_mod = ok and p or false
+    end
+    return (ctrl_mod and ctrl_mod.get_mode()) or "idle"
+end
+
 -- 当前轮询引擎用的是哪个配置槽("poll"=手动 / "pull"=拉取)。
 -- 平台推送落地时据此决定要不要立即生效: 跑手动档就只存 ds_pull 备着，
 -- 不许把手配的寄存器表顶掉。问 poll 而不是问 ctrl 是为了不引入
@@ -75,6 +88,16 @@ local function reset_state()
         -- 所以必须单独挂在 status 段。autosaved 系列告诉前端"这次改动已落盘"
         push_n = 0, push_err = nil,
         autosaved = false, autosave_at = 0, autosave_regs = 0,
+        -- U2/U3 的节流状态: meta_sig = 已发出去的网关元数据指纹(不带 nodes 那帧),
+        -- topo_sig = 已发出去的拓扑指纹(带 nodes 那帧)。res_at = 上次发 U3
+        -- 资源的时间(OS time)。cpu_percent 的两个累加量也在这里, reset 时归零,
+        -- 否则重连后会拿上一个生命周期的残留算占比
+        meta_sig = nil, topo_sig = nil, res_at = 0,
+        busy_s = 0, span_s = 0,
+        -- hello_at 是【连接生命周期内最后一次 hello 成功发送】的时间(OS time),
+        -- 不是上电时间 —— task_main 靠它算 pollpull 档 30min 重发。置 0 表示
+        -- 这个连接还没发过 hello, 重发计时不起跑(否则开机就白发一次)
+        hello_at = 0,
     }
 end
 
@@ -107,6 +130,16 @@ local function imei()
     if type(f) ~= "function" then return "" end
     local ok, v = pcall(f)
     return ok and tostring(v) or ""
+end
+
+-- mobile.* 取号。全是无参函数, 塞引用不调用会让下游拿到函数体。
+-- 取不到返回 nil, 让调用方决定"留空"还是"整个字段不发", 不编假值
+local function mcall(k)
+    if not mobile then return nil end
+    local f = mobile[k]
+    if type(f) ~= "function" then return nil end
+    local ok, v = pcall(f)
+    return ok and v or nil
 end
 
 local function alias_map()
@@ -158,40 +191,356 @@ local function jnum(v)
     return tostring(v)
 end
 
-local function build_payload()
+-- U4 按子设备逐条上报: /sys/thing/node/property/post/{gwSn}-{n}。
+-- n = 子设备序号, 按从机地址升序排(同一份配置只有一个 slave, 所以轮询档
+-- 恒为 1; sniff 档才可能有多个从机)。从机地址从 key 里取:
+--   sniff 的 key 是 "s{slave}_r{addr}"(见 bus/mon.lua push_rsp_value), 带从机号
+--   轮询的 key 是配置里的 name 或 "r{addr}"(见 bus/poll.lua), 不带从机号
+--   —— 一份轮询配置只有一个 slave(cfg.normalize_poll), 直接取那份的
+-- 少了 -{n} 这个后缀, 平台无法把数据归属到子设备, 上报等于白发
+local function build_items()
     local amap = alias_map()
-    local parts = {}
+    local c = active_cfg()
+    local cfg_slave = c and c.slave or nil
+    local by_slave, order = {}, {}
     for k, d in pairs(collector.get_all_latest()) do
         local vs = jnum(d.value)
         if vs then
-            parts[#parts + 1] = string.format('{"id":%s,"name":%s,"value":%s,"ts":%s}',
-                jstr(k), jstr(amap[k] or k), vs, ms_of(d.ts))
+            local slave = tonumber(k:match("^s(%d+)_r%d+$")) or cfg_slave
+            if slave then
+                if not by_slave[slave] then
+                    by_slave[slave] = {}
+                    order[#order + 1] = slave
+                end
+                by_slave[slave][#by_slave[slave] + 1] =
+                    string.format('{"id":%s,"name":%s,"value":%s,"ts":%s}',
+                        jstr(k), jstr(amap[k] or k), vs, ms_of(d.ts))
+            end
         end
     end
-    return "[" .. table.concat(parts, ",") .. "]"
+    table.sort(order)
+    local items = {}
+    for n, slave in ipairs(order) do
+        items[#items + 1] = {
+            idx = n, slave = slave,
+            body = "[" .. table.concat(by_slave[slave], ",") .. "]",
+        }
+    end
+    return items
 end
 
 local function publish(force)
     if not S.client or not S.connected then return false end
-    local payload = build_payload()
-    if payload == "[]" then return false end
-    local ok, err = pcall(function()
-        S.client:publish(S.pub, payload, mqttcfg.load().qos)
-    end)
-    if ok then
-        S.published = S.published + 1
+    local items = build_items()
+    if #items == 0 then return false end
+    local base = S.pub or ""
+    local any = false
+    for _, it in ipairs(items) do
+        local ok, err = pcall(function()
+            S.client:publish(base .. "-" .. it.idx, it.body, mqttcfg.load().qos)
+        end)
+        if ok then
+            S.published = S.published + 1
+            any = true
+        else
+            S.failed = S.failed + 1
+            log.warn("iot", string.format("publish fail sub %d (slave %d): %s",
+                it.idx, it.slave, tostring(err)))
+        end
+    end
+    if any then
         S.dirty = false
         S.last_pub = os.time()
-        return true
     end
-    S.failed = S.failed + 1
-    log.warn("iot", "publish fail:", tostring(err))
-    return false
+    return any
 end
 
--- conack 时的订阅清单（文档"订阅关系"），按 manual_on 分两套：
+-- ===== U2 拓扑上报 / U3 网关资源 / U7 指令回执 =====
+-- 三条都是"发布", 与订阅清单无关(broker 负责路由, 见 build_subs 上头那段)。
+-- body 字段名/结构照平台文档 V3 的示例, 一个不多一个不少 —— 少字段平台解析
+-- 不出, 多字段平台可能按未知字段整包拒收
+
+-- Lua 堆/系统内存信息: 返回 total, used; 取不到返回 nil, nil
+-- Air780EP 堆约 300KB, mqtt.create 需要连续块, 建连前打印便于定位 OOM。
+-- 只依赖 rtos(第 8 行就 require 了), 所以放这么前: U3 要用它算 ram_percent
+local function heap_info()
+    if not rtos or type(rtos.meminfo) ~= "function" then return nil, nil end
+    local ok, a, b = pcall(rtos.meminfo, "sys")
+    if not ok or type(a) ~= "number" then return nil, nil end
+    return a, b
+end
+
+-- 内部 parity 0/1/2 -> 平台单字母。PULL_PARITY(core/config.lua)是正方向
+-- "none/even/odd"->0/1/2, 这里是它的逆; 单独写死而不是反查 PULL_PARITY,
+-- 免得为一次反查把整表遍历一遍
+local PARITY_LETTER = { [0] = "N", [1] = "E", [2] = "O" }
+
+-- U2 的 serial 段。port 固定 /dev/ttyS1: 485 走 uart1(日志 Uart_ChangeBR
+-- 一路都是 uart1), 平台侧也按这个名字认串口
+local function serial_json(c)
+    c = c or {}
+    return string.format('{"port":"/dev/ttyS1","baudRate":%d,"dataBits":%d,"stopBits":%d,"parity":%s}',
+        c.baud or cfg.BAUD, c.databits or cfg.DATABITS,
+        c.stopbits or cfg.STOPBITS, jstr(PARITY_LETTER[c.parity or cfg.PARITY] or "N"))
+end
+
+-- U2 的一个子设备。两个来源, 保真度差很远:
+--   poll/pollpull: active_cfg() —— 平台下发的正经配置, id/name/dtype 全是真的
+--   sniff: mon.infer() —— 旁听推断, 只有 slave/addr/count/fc, 没有名字和类型,
+--          id/name 只能按地址现造("r"+addr), dtype 默认 uint16。平台上看到
+--          的名字会是地址而不是中文别名, 想看得顺眼得让用户配一份轮询表
+-- ⚠️ nodeIndex 必须和 U4 的 -{n} 同一套序号(都按从机地址升序), 否则平台把
+--    建档的子设备和上报的数据对不上, 症状是"拓扑发成功了但数据不进去"
+local function node_json(idx, slave, c, regs)
+    local props = {}
+    for _, r in ipairs(regs) do
+        local dt = r.dtype or "uint16"
+        props[#props + 1] = string.format(
+            '{"id":%s,"name":%s,"dataType":%s,"modbus":{"slave":%d,"address":%d,"quantity":%d,"dataType":%s}}',
+            jstr(r.name), jstr(r.alias or r.name), jstr(dt), slave, r.addr, r.count or 1, jstr(dt))
+    end
+    return string.format(
+        '{"nodeIndex":%d,"slaveId":%d,"kind":"RTU","serial":%s,"model":{"tslName":%s,"properties":[%s]}}',
+        idx, slave, serial_json(c), jstr("node_" .. idx), table.concat(props, ","))
+end
+
+-- U2 的 nodes[]。返回 nil+原因表示拓扑还没成形(从机没识别出来/没配寄存器表)
+-- sniff 档的 RegisterData[] = 旁听推断 ∪ 平台下发配置, 同名同址以配置覆盖:
+-- 平台是按我们上报的拓扑来建设备和生成配置的(用户确认), 只报推断那几条,
+-- 平台就只认那几条; 配置落地后带真名(CT1/A相电流)的寄存器必须补进去才不缺项。
+-- 因为 topo_sig 拿本函数产物当指纹, 配置一落地签名就变, 会自动补发一次 ——
+-- 实测过的时序坑: 拓扑比配置落盘早 1 秒发(报的是推断出的 2 条裸名), 之后
+-- 签名不变就再也不补发, 平台上建的物模型和数据面对不上
+-- sniff 的 serial 参数必须用探测到的那几个值: active_cfg() 在 sniff 下返回的
+-- 是 ds_poll 手工档的默认 9600, 而总线的波特率是自动识别出来的。拿错的
+-- 波特率上报, 平台就照它建配置 —— 实测识别出 2400 却发了 9600, 平台回的
+-- 建设配置 baud 就是 9600, 拿这份配置去轮询一帧都收不到
+local function build_nodes()
+    local mode = get_mode()
+    local nodes, err = {}, nil
+    if mode == "sniff" then
+        local at, by = {}, {}
+        local function put(slave, r)
+            local k = slave .. ":" .. r.addr
+            local p = at[k]
+            if p then
+                p.count, p.name, p.alias, p.dtype = r.count, r.name, r.alias or r.name, r.dtype or "uint16"
+                return
+            end
+            -- 不记 slave: 分组已经由 by[] 的键承载, node_json 拿的是循环
+            -- 变量 s, 再存一份是只写不读
+            p = { addr = r.addr, count = r.count, name = r.name, alias = r.alias or r.name, dtype = r.dtype or "uint16" }
+            at[k] = p
+            by[slave] = by[slave] or {}
+            by[slave][#by[slave] + 1] = p
+        end
+        for _, r in ipairs(mon.infer().regs or {}) do
+            put(r.slave, { addr = r.addr, count = r.count, name = "r" .. r.addr, dtype = "uint16" })
+        end
+        local pc = cfgstore.load_pull()
+        for _, r in ipairs((pc and pc.regs) or {}) do
+            put(pc.slave, r)
+        end
+        local st = mon.status()
+        local d = st.detected
+        local ser = {
+            baud = (d and d.baud) or st.baud,
+            databits = (d and d.databits) or 8,
+            stopbits = (d and d.stopbits) or 1,
+            parity = (d and d.parity) or 0,
+        }
+        local sl = {}
+        for s in pairs(by) do sl[#sl + 1] = s end
+        table.sort(sl)
+        for i, s in ipairs(sl) do
+            nodes[#nodes + 1] = node_json(i, s, ser, by[s])
+        end
+        err = "还没识别到在线的从机"
+    else
+        -- 一份轮询配置只有一个 slave(cfg.normalize_poll), 所以轮询档恒一个节点
+        local c = active_cfg()
+        if c and c.regs and #c.regs > 0 then
+            nodes[#nodes + 1] = node_json(1, c.slave, c, c.regs)
+        end
+        err = "没有可用的寄存器表"
+    end
+    if #nodes == 0 then return nil, err end
+    return table.concat(nodes, ",")
+end
+
+-- 拓扑签名: 拿 build_nodes 的产物本身做指纹。不另造一套字段遍历是因为
+-- node_json 已经把从机/寄存器/串口参数全拼进去了, 那串字符串变了就是拓扑
+-- 真变了。重新 build 一次的代价是一次字符串拼接, 每秒一次可以忽略 —— 比
+-- 自己去遍历两套来源(poll 的 regs 表 / mon.infer 的 regs 表)要短得多
+local function topo_sig()
+    local nodes = build_nodes()
+    if not nodes then return nil end
+    return tostring(#nodes) .. ":" .. nodes
+end
+
+-- U2 是【双重用途】, 靠 body 里有没有 nodes[] 区分语义(用户确认):
+--   带 nodes[]    → 子设备拓补建档(建子设备 + 绑定 + 物模型)
+--   不带 nodes[]  → 上报网关元数据(imei/iccid/信号/经纬度)
+-- 所以拆成两个函数各发一帧, 不合成一帧 —— 合成会让平台拿不准这帧该干嘛。
+-- 两帧共用 topic 和 qos, 用 pcall 包 publish, 失败只回 false 不抛
+
+-- 把 "2.0.0" 变成 20000 这种纯数字。平台侧 firmwareVersion 是 BigDecimal,
+-- 传字符串会【整帧被丢】(用户确认), 而我们全程只有字符串版本号, 必须转。
+-- 取 major*10000 + minor*100 + patch, 与文档示例 v0.4.0 -> 400 同口径;
+-- 解析不出就退回 0, 不留字符串也不编一个大数
+local function fw_num()
+    local v = _G.VERSION or ""
+    local a, b, c = v:match("^(%d+)%.(%d+)%.(%d+)")
+    if not a then return 0 end
+    return tonumber(a) * 10000 + tonumber(b) * 100 + tonumber(c)
+end
+
+-- 不带 nodes 的那帧: 网关元数据。字段名/类型照平台 V3 文档示例, 一个不多一个
+-- 不少 —— 少字段平台解析不出, 多字段可能按未知字段整包拒收。
+-- 无源的字段(imei/iccid/经纬度)按注释留空或整项不发, 不编假值
+local function send_meta()
+    if not S.client or not S.connected then return false, "未连接" end
+    local did = S.device_id or device_id()
+    if not did or did == "" then return false, "无 SN" end
+    local csq = mcall("csq")
+    if type(csq) ~= "number" then csq = nil end
+    local p = {}
+    p[#p + 1] = string.format('"sn":%s', jstr(did))
+    p[#p + 1] = string.format('"deviceSn":%s', jstr(did))
+    p[#p + 1] = string.format('"imei":%s', jstr(imei()))
+    p[#p + 1] = string.format('"iccid":%s', jstr(tostring(mcall("iccid") or "")))
+    p[#p + 1] = string.format('"fw":%s', jstr("v" .. (_G.VERSION or "0.0.0")))
+    p[#p + 1] = string.format('"firmwareVersion":%d', fw_num())
+    p[#p + 1] = string.format('"hw":%s', jstr(cfg.PLATFORM_MODEL))
+    p[#p + 1] = string.format('"capabilities":[%s]', '"modbus","mqtt"')
+    p[#p + 1] = string.format('"deviceName":%s', jstr("VKBOX-" .. did))
+    p[#p + 1] = string.format('"serialNumber":%s', jstr(did))
+    if csq then p[#p + 1] = string.format('"csq":%d', csq) end
+    -- netRegister 口径与 net_ready() 一致(csq 为 0 即未注册), 这里内联是因为
+    -- net_ready 声明在后面, local function 前向拿不到; csq 上面已经取过了
+    p[#p + 1] = string.format('"netRegister":%s', tostring(not (type(csq) == "number" and csq == 0)))
+    p[#p + 1] = string.format('"networkAddress":%s', jstr(mqttcfg.load().host))
+    p[#p + 1] = string.format('"isShadow":0')
+    p[#p + 1] = string.format('"summary":%s', jstr("VKBox Bootstrap"))
+    -- ts 用秒: 文档示例 1721884800 是 10 位。毫秒会让平台按 1970 年解析
+    p[#p + 1] = string.format('"ts":%d', os.time())
+    local body = "{" .. table.concat(p, ",") .. "}"
+    local ok, e = pcall(function()
+        S.client:publish(string.format(cfg.PLATFORM_INFO_TOPIC, did), body, 1)
+    end)
+    if not ok then return false, tostring(e) end
+    return true
+end
+
+-- 带 nodes[] 的那帧: 子设备拓补建档。只带网关标识 + 拓扑, 自述性字段
+-- (fw/firmwareVersion/imei/...) 归 send_meta, 不在这儿重复发一遍
+local function send_topo()
+    if not S.client or not S.connected then return false, "未连接" end
+    local did = S.device_id or device_id()
+    if not did or did == "" then return false, "无 SN" end
+    local nodes, err = build_nodes()
+    if not nodes then return false, err end
+    local body = string.format('{"sn":%s,"deviceSn":%s,"ts":%d,"nodes":[%s]}',
+        jstr(did), jstr(did), os.time(), nodes)
+    local ok, e = pcall(function()
+        S.client:publish(string.format(cfg.PLATFORM_INFO_TOPIC, did), body, 1)
+    end)
+    if not ok then return false, tostring(e) end
+    return true
+end
+
+-- 元数据指纹: 只挑会变的字段(imei/iccid/csq/主机名), 版本和型号是常量不必算。
+-- 拿这几个字段拼串当指纹, 变了就重发, 和 topo_sig 同一套路
+local function meta_sig()
+    local csq = mcall("csq")
+    return string.format("%s|%s|%s|%s", imei(),
+        tostring(mcall("iccid") or ""), tostring(type(csq) == "number" and csq or ""),
+        tostring(mqttcfg.load().host or ""))
+end
+
+-- U3: 网关自身资源。口径要说清, 否则平台拿阈值做告警会定错:
+--   ram_percent  = rtos.meminfo("sys") 已用/总量, 真实系统内存(比 Lua 堆全)
+--   uptime_sec   = os.clock() 秒级单调计数, 开机起算, 不受 NTP 跳变影响
+--   cpu_percent  = 本框架主循环的忙碌占比(真实测量, 不是 MCU 的 CPU 占用率)。
+--                 LuatOS 没有 OS 级 CPU 接口(README 记过 fsinfo/fs 都不存在),
+--                 与其编一个 0 骗平台, 不如报一个能测的量。平台若按 90% 做
+--                 CPU 告警, 得知道这个口径 —— U5 告警本次不做(已确认)
+local function send_gw_res()
+    if not S.client or not S.connected then return false end
+    local did = S.device_id or device_id()
+    if not did or did == "" then return false end
+    local total, used = heap_info()
+    local ts = ms_of(os.time())
+    local parts = {}
+    local ram = 0
+    if total and total > 0 then
+        ram = math.floor(used * 1000 / total) / 10
+    end
+    parts[#parts + 1] = string.format('{"id":%s,"value":%s,"ts":%s}',
+        jstr("ram_percent"), jnum(ram), ts)
+    parts[#parts + 1] = string.format('{"id":%s,"value":%s,"ts":%s}',
+        jstr("uptime_sec"), jnum(math.floor(os.clock())), ts)
+    local cpu = 0
+    if S.busy_s and S.span_s and S.span_s > 0 then
+        cpu = math.min(100, math.max(0, math.floor(S.busy_s * 1000 / S.span_s) / 10))
+    end
+    parts[#parts + 1] = string.format('{"id":%s,"value":%s,"ts":%s}',
+        jstr("cpu_percent"), jnum(cpu), ts)
+    local ok = pcall(function()
+        S.client:publish(string.format(cfg.PLATFORM_RES_TOPIC, did),
+            "[" .. table.concat(parts, ",") .. "]", 1)
+    end)
+    if not ok then return false end
+    -- 占用比是"上一个区间"的值, 发完就归零重新攒。不清的话 busy 一直涨而
+    -- span 涨得更快, 占比会越算越小, 平台看到的是个单调下降的假曲线
+    S.res_at = os.time()
+    S.busy_s, S.span_s = 0, 0
+    return true
+end
+
+-- U7: 指令回执。粒度只到"入队/拒绝": poll.enqueue_write 是异步的, 真正上
+-- 总线的结果只有 write_status() 的汇总 done/fail, 分不出是哪一条。所以
+-- 入队成功的 value 回原值, 拒绝的(地址解析不出/值非法/队列满)回 null ——
+-- 这正是文档"失败项 value 回 null"里的失败项, 但【不等于已写到总线】。
+-- 要精确到总线结果得给 poll 的写队列加 per-item 回调, 本次不做
+local function func_reply(rs)
+    if not rs or #rs == 0 then return false end
+    if not S.client or not S.connected then return false end
+    local did = S.device_id or device_id()
+    if not did or did == "" then return false end
+    local parts = {}
+    for _, r in ipairs(rs) do
+        local v = "null"
+        if r.value ~= nil then
+            v = jnum(r.value) or "null"
+        end
+        parts[#parts + 1] = string.format('{"id":%s,"value":%s}', jstr(r.id or "unknown"), v)
+    end
+    local ok, e = pcall(function()
+        S.client:publish(string.format(cfg.PLATFORM_FPOST_TOPIC, did),
+            "[" .. table.concat(parts, ",") .. "]", 1)
+    end)
+    if not ok then
+        log.warn("iot", "func reply fail:", tostring(e))
+        return false
+    end
+    return true
+end
+
+-- conack 时的订阅清单（文档"订阅关系"）。按运行模式分三档：
 --
--- 自动档：订 4 条 gw 平台前缀 + S.sub。三条要点：
+-- idle：什么都不订。idle 是"未接任务"的原始态，此时 MQTT 连接可以是通的
+--   （凭证、broker 都与模式无关），但订阅意味着接收平台下行，而拉取配置
+--   (config/get) 和下行写 (property/set 系列) 都只在 poll/pollpull/sniff
+--   下才有意义。idle 订着 = 设备还没开始采数就先挂在平台的接收侧，
+--   看着像已经接了任务，实际一个字节都不会用上。
+--
+-- poll（手动配置）：只订 S.sub 一条。手动档接用户自己的 broker 和自己的
+--   topic 命名，平台那套 /sys/thing/gw/{sn} 拼出来也没人往那儿发，订着
+--   纯属噪音 —— 界面上"订阅Topic"列一堆自己没配过的东西，用户会以为
+--   手动配置没生效。
+--
+-- pollpull / sniff：订 4 条 gw 平台前缀 + S.sub。要点：
 --   ① D1(/gw/config/get/{sn}) 必须无条件订上：它是"拉取配置"链路唯一的
 --      入口。业务 sub_topic 虽默认同形，但用户改到别处时不能跟着丢，
 --      否则 handle_downlink 永远等不到 configSnapshot。
@@ -200,13 +549,11 @@ end
 --      这三条已按"代码精简"写死成 core/config.lua 的平台常量，不再可配。
 --   ③ 与 S.sub 同形的先去重再订，同一个 topic 订两遍纯属浪费。
 --
--- 手动档：只订 S.sub 一条，上面 4 条一条都不订。
---   手动档接的是用户自己的 broker 和自己的 topic 命名，平台那套
---   /sys/thing/gw/{sn} 拼出来也没人往那儿发，订着纯属噪音 —— 界面
---   上"订阅Topic"列一堆自己没配过的东西，用户会以为手动配置没生效。
---   ⚠️ 代价：拉取配置在手动档必然超时，它的应答走 config/get，
---     而手动档不订这条。前端已在手动档把「拉取配置」按钮置灰。
---     曾只按"少订会静默失效"把 4 条无条件全订，结果就是上面那个误会
+-- ⚠️ sniff 必须显式覆盖：它和 poll 共用"自动档"凭证，但早期只按 manual_on
+--    分流，导致 sniff 沿用切入前那份清单 —— 从 idle 进 sniff 会是空的，
+--    从手动配置进 sniff 又少订 4 条平台 topic，平台下发到设备全丢。
+-- ⚠️ 代价：拉取配置在 poll 手动档必然超时，它的应答走 config/get，而该
+--    档不订这条。前端已在手动档把「拉取配置」按钮置灰。
 local function build_subs()
     local subs = {}
     local function add(t)
@@ -216,16 +563,21 @@ local function build_subs()
         end
         subs[#subs + 1] = t
     end
-    local did = S.device_id
-    if did and did ~= "" and not S.manual_on then
-        add(string.format(cfg.PLATFORM_GET_TOPIC, did))
-        -- 另外 3 条 gw 下行订阅，固定平台常量。少订一条 = 平台那类
-        -- 下发永远收不到且无报错，所以这三行一条都不能删
-        add(string.format(cfg.PLATFORM_FUNC_TOPIC, did))
-        add(string.format(cfg.PLATFORM_PSET_TOPIC, did))
-        add(string.format(cfg.PLATFORM_PGET_TOPIC, did))
+    local mode = get_mode()
+    if mode == "pollpull" or mode == "sniff" then
+        local did = S.device_id
+        if did and did ~= "" then
+            add(string.format(cfg.PLATFORM_GET_TOPIC, did))
+            -- 另外 3 条 gw 下行订阅，固定平台常量。少订一条 = 平台那类
+            -- 下发永远收不到且无报错，所以这三行一条都不能删
+            add(string.format(cfg.PLATFORM_FUNC_TOPIC, did))
+            add(string.format(cfg.PLATFORM_PSET_TOPIC, did))
+            add(string.format(cfg.PLATFORM_PGET_TOPIC, did))
+        end
     end
-    add(S.sub)
+    if mode ~= "idle" then
+        add(S.sub)
+    end
     return subs
 end
 
@@ -300,15 +652,6 @@ local function on_mqtt(cli, event, data, payload)
         end
         log.warn("iot", event, tostring(data))
     end
-end
-
--- Lua 堆信息: 返回 total, used; 取不到返回 nil, nil
--- Air780EP 堆约 300KB, mqtt.create 需要连续块, 建连前打印便于定位 OOM
-local function heap_info()
-    if not rtos or type(rtos.meminfo) ~= "function" then return nil, nil end
-    local ok, a, b = pcall(rtos.meminfo, "sys")
-    if not ok or type(a) ~= "number" then return nil, nil end
-    return a, b
 end
 
 local function net_ready()
@@ -443,6 +786,9 @@ local function downlink_write(items)
         local n = tonumber(v)
         return n
     end
+    -- 每条的结果, 给 U7 指令回执用: value = 入队成功的原值, nil = 拒绝。
+    -- 只能到这个粒度, 理由见 func_reply 上头那段
+    local results = {}
     local nok, nfail = 0, 0
     for _, it in ipairs(items) do
         local dkey = it.id or it.name or it.key or it.regName or it.reg_name
@@ -450,6 +796,10 @@ local function downlink_write(items)
         if not addr then addr = resolve_addr(dkey) end
         local slave = dnum(it.slave or it.dev or it.device or it.slaveId or it.slave_id)
         if not slave then slave = dslave end
+        -- 回执的 id: 平台给的 id/name 优先, 没有就按地址现造一个, 否则
+        -- 平台那头对不上是哪一条
+        local rid = dkey
+        if type(rid) ~= "string" or rid == "" then rid = "r" .. tostring(addr or 0) end
         if it.values and type(it.values) == "table" and addr then
             local vals = {}
             for _, v in ipairs(it.values) do
@@ -459,17 +809,21 @@ local function downlink_write(items)
             end
             local okw = poll.enqueue_write({ slave = slave, addr = addr, values = vals })
             if okw then nok = nok + 1 else nfail = nfail + 1 end
+            results[#results + 1] = { id = rid, value = okw and #vals or nil }
         elseif addr then
             local v = dnum(it.value or it.val or it.data)
             if v then
                 local okw = poll.enqueue_write({ slave = slave, addr = addr, value = v })
                 if okw then nok = nok + 1 else nfail = nfail + 1 end
+                results[#results + 1] = { id = rid, value = okw and v or nil }
             else
                 nfail = nfail + 1
+                results[#results + 1] = { id = rid, value = nil }
                 log.warn("iot", "write item bad value:", tostring(dkey))
             end
         else
             nfail = nfail + 1
+            results[#results + 1] = { id = rid, value = nil }
             log.warn("iot", "write item unresolvable:", tostring(dkey))
         end
     end
@@ -478,7 +832,7 @@ local function downlink_write(items)
     -- 不能再写成 "downlink write: ok=N" —— 现场看到这句会以为写成功了，
     -- 而实际可能还压在队列里
     log.info("iot", string.format("downlink write: queued=%d rejected=%d", nok, nfail))
-    return nok, nfail
+    return results
 end
 
 -- SN 归属过滤（文档"订阅关系" + "{targetSN} = 网关 SN 或其子设备 SN"）：
@@ -577,9 +931,11 @@ local function reply_config()
     local did = device_id()
     if not did or did == "" then return false, "无 SN" end
     local topic = string.format(cfg.PLATFORM_REPLY_TOPIC, did)
+    -- message 用拉取结果里的那句话: 空快照时写 "config applied" 是撒谎,
+    -- 平台侧核销记录会看着像真配了一份
     local body = string.format(
-        '{"msgId":%s,"code":200,"message":"config applied","status":"ok","appliedTs":%d}',
-        jstr(p.msg_id), os.time())
+        '{"msgId":%s,"code":200,"message":%s,"status":"ok","appliedTs":%d}',
+        jstr(p.msg_id), jstr(p.msg ~= "" and p.msg or "config applied"), os.time())
     log.info("iot", "config/reply " .. topic .. " " .. body)
     local ok, err = pcall(function() S.client:publish(topic, body, 1) end)
     if not ok then return false, tostring(err) end
@@ -596,14 +952,31 @@ M.reply_config = reply_config
 -- 放在设备侧而不是前端侧，是为了让前端不在线时也生效——平台主动重推
 -- 走的是同一条路径，靠前端的话没开串口就永远不落地。
 -- 做法是把它塞进拉取结果槽位、以 done 态呈现，前端复用同一套回填渲染
-local function recv_push(t)
+local function recv_push(t, payload)
     local r, err = pullcfg.parse_snap(t, t.configSnapshot)
     if not r then
         S.push_err = tostring(err)
-        log.warn("iot", "push parse fail: " .. tostring(err))
+        -- 原始报文必须打出来: 解析失败只说"哪个字段不对", 不说了收到什么,
+        -- 现场照着改不了。整包打, 不占多少日志
+        log.warn("iot", "push parse fail: " .. tostring(err) .. " body=" .. tostring(payload))
         return false
     end
     S.push_err = nil
+    -- 空快照 = 平台侧没有配置(sniff 互斥守卫), 与拉取链路同一套收尾方式：
+    -- 按成功算 + 回执。不回执平台就每 1s 重推一次同一份空包
+    if r.empty then
+        S.pull.state = "done"
+        S.pull.src = "push"
+        S.pull.seen = os.time()
+        S.pull.msg = "平台未下发配置，本地嗅探自建生效"
+        S.pull.result = nil
+        S.pull.msg_id = r.msg_id
+        S.pull.replied = false
+        pcall(reply_config)
+        S.push_n = S.push_n + 1
+        log.info("iot", "push recv empty snapshot, 平台无配置, msgId=" .. r.msg_id)
+        return true
+    end
     S.pull.state = "done"
     S.pull.src = "push"
     S.pull.seen = os.time()
@@ -640,7 +1013,8 @@ local function handle_downlink(topic, payload)
     -- 只有拉取状态机正在 waiting 时才当配置包; 其余情况按普通指令解析。
     if type(topic) == "string" and topic:find("/gw/config/get/", 1, true) then
         if S.pull.state == "waiting" then
-            log.info("iot", string.format("pullcfg recv topic=%s len=%d", topic, #tostring(payload)))
+            log.info("iot", string.format("pullcfg recv topic=%s len=%d body=%s",
+                topic, #tostring(payload), tostring(payload)))
             S.pull_payload = payload
             return
         end
@@ -663,7 +1037,7 @@ local function handle_downlink(topic, payload)
                 S.pull.state, #tostring(payload)))
             return
         end
-        recv_push(t)
+        recv_push(t, payload)
         return
     end
     local cmd = t.cmd and t.cmd:upper() or nil
@@ -671,20 +1045,23 @@ local function handle_downlink(topic, payload)
         S.dirty = true
         return
     end
+    -- 回执一律走 func_reply(returns 的第一个值就是 per-item 结果)。
+    -- 每个分支都要发: 平台按收到的回执核销指令, 漏一个分支那类指令就永远
+    -- 停在 "已下发未执行", FunctionLog 里看不到结果
     if cmd == "WRITE" and type(t.items) == "table" then
-        downlink_write(t.items)
+        func_reply(downlink_write(t.items))
         return
     end
     if t[1] and type(t[1]) == "table" then
-        downlink_write(t)
+        func_reply(downlink_write(t))
         return
     end
     if t.items and type(t.items) == "table" then
-        downlink_write(t.items)
+        func_reply(downlink_write(t.items))
         return
     end
     if t.value or t.values or t.val or t.data then
-        downlink_write({ t })
+        func_reply(downlink_write({ t }))
         return
     end
     -- 走到这里说明报文形状一个都不认识。以前是静默 return，平台以为发了、
@@ -695,6 +1072,11 @@ end
 -- 平台配置拉取状态机。
 -- W:PULLCFG 只置状态并立即应答; 握手跑在 task_main 协程里(那里才能 sys.wait)。
 local function pull_active() return pulling() end
+
+-- 拉取是否正在进行(connecting/helloing/waiting)。导出给 W:PULLCFG 判重:
+-- pull_start() 对"已在拉取中"改成返回 true, 调用方就分不出是新一轮
+-- 启动还是复用旧的一轮, 判重只能由它自己来
+function M.pulling() return pulling() end
 
 -- 不要求 MQTT 已连上: 只要配好服务器地址/端口, 设备自己去连, 连上再握手。
 -- 这是新设备首次使用的正常顺序(先配 MQTT, 再拉配置)。
@@ -741,7 +1123,9 @@ function M.set_manual(on)
 end
 
 function M.pull_start()
-    if pull_active() then return false, "正在拉取中" end
+    -- 已在拉取中就直接当成功: 调用方主要是 ctrl.switch_mode, 它不该因为
+    -- "重复请求"就把整个切模式判失败。W:PULLCFG 那边自己先查 busy 再调
+    if pull_active() then return true end
     if not get_topic() then return false, "无 SN" end
     local c = mqttcfg.load()
     if not c.host or c.host == "" then return false, "请先配置 MQTT 服务器地址" end
@@ -750,6 +1134,10 @@ function M.pull_start()
         state = "connecting", msg = "", result = nil,
         deadline = os.time() + math.floor(cfg.PULL_CONNECT_MS / 1000),
         msg_id = nil, replied = false,
+        -- hello 发送失败的重发计数(见 pull_step 的 helloing 分支)。
+        -- 放在 pull 状态里而不放 S: 一轮拉取结束它就跟着作废, 不会把上一轮的
+        -- 失败计数带给下一轮
+        hello_try = 0,
     }
     -- 未连上时打断退避等待, 让 task_main 立刻重连, 不必等下一个周期
     if not S.connected then M.kick() end
@@ -785,6 +1173,48 @@ function M.pull_status()
     return r
 end
 
+-- U1 hello。payload 的 6 个字段照文档 V3 契约，另带两个自述字段。
+-- 单独抽出来是因为有两个调用方：pull_step 的握手，以及 task_main 里 pollpull
+-- 档的 30min 周期重发 —— 两处发的是同一帧，不应各写一份
+-- 返回 true, onboardingMode / false, err
+local function send_hello()
+    if not S.client or not S.connected then return false, "未连接" end
+    local did = device_id()
+    if not did or did == "" then return false, "无 SN" end
+    -- hello topic 走固定平台常量(不再可配); 无 SN 时 resolve_hello 返回 nil，
+    -- 这时候发出去就是把不带 SN 的 topic 发给平台
+    local topic = mqttcfg.resolve_hello(did)
+    if not topic then return false, "hello topic 解析失败(无 SN)" end
+    -- topicFormat 固定 v3：自述 topic 形状，消除"平台硬编码旧版 / 固件烧新版"
+    -- 漂移导致下行 topic 错位（指令全丢且无报错）。
+    --
+    -- onboardingMode 按当前 485 模式如实报（文档：sniff/platform/manual）：
+    --   sniff     → 平台跳过"对本地自建设备无效的配置快照推送"。这正是我们要的：
+    --               sniff 档的寄存器表来自本地旁听推断，平台推过来的只会是 193B
+    --               空壳（devices/properties/commInterfaces 全空），收了还得回执，
+    --               不回执平台每 1s 重推一次
+    --   platform  → 平台照常推 ConfigSnapshot（pollpull 档要的就是这个）
+    -- manual 不报：文档没定义平台收到 manual 会怎么处理，只有 sniff 的行为写明
+    -- 了。报一个行为未知的值，风险大于收益
+    local onboard = get_mode() == "sniff" and "sniff" or "platform"
+    -- deviceId 按文档取 IMEI，取不到报 "unknown"（不报空串：平台校验
+    -- gateway_imei，空串和缺字段是两回事）。不一致会被拒 hello
+    local dv = imei()
+    if dv == "" then dv = "unknown" end
+    local body = string.format(
+        '{"vendor":%s,"model":%s,"fwVersion":%s,"deviceId":%s,"topicFormat":"v3","onboardingMode":%s}',
+        jstr(cfg.PLATFORM_VENDOR), jstr(cfg.PLATFORM_MODEL), jstr(_G.VERSION or "0.0.0"),
+        jstr(dv), jstr(onboard))
+    log.info("iot", string.format("pullcfg hello topic=%s sn=%s imei=%s mode=%s body=%s",
+        topic, did, imei(), onboard, body))
+    local ok, err = pcall(function() S.client:publish(topic, body, 1) end)
+    if not ok then return false, tostring(err) end
+    -- 记【本连接内最后一次 hello 成功发送】的时间: task_main 靠它算 pollpull 档
+    -- 的 30min 重发。reset_state 里置 0 表示这个连接还没发过, 计时不起跑
+    S.hello_at = os.time()
+    return true, onboard
+end
+
 local function pull_finish(state, msg, result)
     S.pull.state = state
     S.pull.msg = msg
@@ -802,28 +1232,54 @@ local function pull_step()
         -- 实际建连由 task_main 的常规连接分支做, 这里只等, 避免两处同时
         -- 建连建出两个 client 互相覆盖
         if S.connected then
+            -- deadline 必须清零: 它还留着 connecting 态的"等连接"上限(+20s),
+            -- 不清的话 helloing 分支的"退避中就等着"会把第一次 hello 也当成
+            -- 退避期跳过, 用户白等一个 PULL_CONNECT_MS 才看到 hello 发出去
+            p.deadline = 0
+            p.hello_try = 0
             p.state = "helloing"
         elseif os.time() >= p.deadline then
             local why = S.reject_reason or S.last_err or "超时"
             pull_finish("fail", "MQTT 连接失败: " .. tostring(why))
         end
     elseif p.state == "helloing" then
-        local did = device_id()
-        -- hello topic 走固定平台常量(不再可配); 无 SN 返回 nil,
-        -- 这时候发出去就是把不带 SN 的 topic 发给平台
-        local topic = mqttcfg.resolve_hello(did)
-        if not topic then return pull_finish("fail", "hello topic 解析失败(无 SN)") end
-        -- topicFormat/onboardingMode 是文档 U1 的"自述字段"，缺了平台可能
-        -- 按旧版格式猜下行 topic 导致指令全丢且无报错。本链路就是找平台要
-        -- 配置的那一路，固定报 v3/platform。
-        -- 不报 sniff：文档明确"平台见 sniff 跳过推送配置"，Pull 会直接废。
-        local body = string.format(
-            '{"vendor":%s,"model":%s,"fwVersion":%s,"deviceId":%s,"topicFormat":"v3","onboardingMode":"platform"}',
-            jstr(cfg.PLATFORM_VENDOR), jstr(cfg.PLATFORM_MODEL), jstr(_G.VERSION or "0.0.0"), jstr(imei()))
-        log.info("iot", string.format("pullcfg hello topic=%s sn=%s imei=%s body=%s",
-            topic, tostring(did), imei(), body))
-        local ok, err = pcall(function() S.client:publish(topic, body, 1) end)
-        if not ok then return pull_finish("fail", "hello 发送失败: " .. tostring(err)) end
+        -- pull_step 跑在 while 循环的连接判断之前(connecting 态要能在未连接
+        -- 时也走), 所以这里不能假定 S.client 还在: 同一轮循环里 refresh_subs
+        -- 发现模式变了订阅清单就 destroy_client() 把 client 抽走, 下一轮重进
+        -- 来时 state 已经是 helloing, 直接索引 nil 就是
+        -- "attempt to index a nil value (field 'client')", 整轮拉取被
+        -- pull_finish 判死、平台再也收不到 hello。退回 connecting 重等。
+        -- 不是空转: refresh_subs 只在清单真变时才抽一次, 重连后就位了
+        if not S.client or not S.connected then
+            p.state = "connecting"
+            p.deadline = os.time() + math.floor(cfg.PULL_CONNECT_MS / 1000)
+            return
+        end
+        -- 退避中(上一次发送失败定的重发时刻还没到)就等着, 不重发
+        if p.deadline > os.time() then return end
+        local ok, onboard, err = send_hello()
+        if not ok then
+            -- 按文档 1s/3s/9s 退避重发, 不立即判死: 发送失败多半是连接刚被
+            -- refresh_subs 抽走, 下一轮就好了。超过 3 次才报 —— 真连不上就该
+            -- 让用户看见, 无限重发等于把"平台连不上"藏起来
+            p.hello_try = (p.hello_try or 0) + 1
+            local bo = cfg.HELLO_BACKOFF_S[p.hello_try]
+            if not bo then
+                return pull_finish("fail", "hello 发送失败: " .. tostring(err))
+            end
+            p.deadline = os.time() + bo
+            log.warn("iot", string.format("hello 发送失败(%d/3), %ds 后重发: %s",
+                p.hello_try, bo, tostring(err)))
+            return
+        end
+        p.hello_try = 0
+        -- sniff 档的 hello 报的就是 sniff，平台明确不会推配置快照 —— 等也等不到，
+        -- 干等一个 PULL_TIMEOUT_MS 只会让前端显示"平台未下发配置(超时)"这种假故障。
+        -- hello 本身照发：它负责建/更新网关设备、回写 fw/hw/ip，与推不推配置无关。
+        -- 这里也不回 U6：没有收到 D1，没有 msgId 可核销
+        if onboard == "sniff" then
+            return pull_finish("done", "sniff 模式平台不下发配置，寄存器表用本地嗅探结果")
+        end
         p.state = "waiting"
         p.deadline = os.time() + math.floor(cfg.PULL_TIMEOUT_MS / 1000)
     elseif p.state == "waiting" then
@@ -831,11 +1287,22 @@ local function pull_step()
             local payload = S.pull_payload
             S.pull_payload = nil
             local r, err = pullcfg.parse(payload)
-            if not r then return pull_finish("fail", tostring(err)) end
+            if not r then
+                log.warn("iot", "pull parse fail: " .. tostring(err) .. " body=" .. tostring(payload))
+                return pull_finish("fail", tostring(err))
+            end
             p.src = "pull"
             p.seen = os.time()
             p.msg_id = r.msg_id
             p.replied = false
+            -- 空快照 = 平台侧没有配置(sniff 互斥守卫)。按成功收尾：不回执的话
+            -- 平台每 1s 重推一次同一份空包, 前端还会看到一条假的失败提示
+            if r.empty then
+                p.result = nil
+                p.msg = "平台未下发配置，本地嗅探自建生效"
+                pcall(reply_config)
+                return pull_finish("done", p.msg)
+            end
             -- 用户要求：拉取成功即自动保存，不再等前端「保存配置」确认。
             -- 落盘失败（配置不合法/存不下）不当成功：平台会继续重推，
             -- 而设备留着的还是旧配置，此时报 fail 比假装成功好排查
@@ -849,6 +1316,33 @@ local function pull_step()
         end
         if os.time() >= p.deadline then pull_finish("fail", "平台未下发配置(超时)") end
     end
+end
+
+-- 订阅清单变了就断开重刷。为什么必须放在这个循环里而不是只在 conack 算:
+-- build_subs() 挂在 conack 上, 而切模式(set_manual 的 kick / 进 sniff 不
+-- 调 iot)时设备是已经连着的, 不会自己重读一遍。而 ctrl 是"先切凭证档位
+-- 再 poll.start()", set_manual 触发重连的那一刻 get_mode() 还是旧值
+-- (它靠 poll/mon 的 is_running 推导), 连上来拿到的仍是旧清单。放这里每秒
+-- 比一次, 一次 mode/凭证/SN 的错配都会被自动纠正, 不用给 ctrl 的每个
+-- return 点补一句刷新
+local function subs_same(a, b)
+    if not a or not b or #a ~= #b then return false end
+    for i = 1, #a do
+        if a[i] ~= b[i] then return false end
+    end
+    return true
+end
+
+local function refresh_subs()
+    if not S.client or not S.connected then return end
+    local want = build_subs()
+    if subs_same(want, S.subs) then return end
+    -- 先记账再断开: 让 on_mqtt 的 conack 分支和这里看到的是同一份诉求,
+    -- 否则某一轮两边不一致会来回重连
+    S.subs = want
+    destroy_client()
+    M.kick()
+    log.info("iot", "subs changed by mode, reconnect: [" .. table.concat(want, " ") .. "]")
 end
 
 local function task_main()
@@ -887,11 +1381,16 @@ local function task_main()
                 wait_kickable(10000)
             end
         else
+            -- cpu_percent 的忙碌占比: 每轮循环量一次干活耗时(不含 sys.wait),
+            -- 攒到发 U3 时算成占比。os.clock() 在本工程里当秒级单调时钟用
+            -- (见 bus/mon.lua 的配对超时), 不是 CPU 时间
+            local t0 = os.clock()
             if S.recv_pending then
                 local rp = S.recv_pending
                 S.recv_pending = nil
                 pcall(handle_downlink, rp.topic, rp.payload)
             end
+            refresh_subs()
             local c = mqttcfg.load()
             local due = false
             if c.interval_s > 0 then
@@ -901,7 +1400,66 @@ local function task_main()
             end
             if S.dirty then due = true end
             if due then publish(false) end
+            -- U3 网关资源与 U4 同一节奏(interval_s), 两者互不相干
+            if (os.time() - (S.res_at or 0)) >= c.interval_s then send_gw_res() end
+            -- 把这一轮的干活耗时记进 busy, 区间长度记进 span。span 与 busy
+            -- 必须同一轮清零, 否则占比会越算越小
+            S.busy_s = (S.busy_s or 0) + (os.clock() - t0)
+            S.span_s = (S.span_s or 0) + (os.clock() - t0) + 1.0
+            -- U2 两帧, 各按自己的指纹发, 都不做定时兜底:
+            --   元数据帧(不带 nodes): imei/iccid/信号/经纬度会变(csq 尤其), 所以
+            --     按内容指纹变化即发; 平台收到只更新属性, 不会重建模型
+            --   拓扑帧(带 nodes): 建子设备 + 绑定 + 物模型。签名没变就是子设备
+            --     清单没变, 平台那边的档还在, 不需要重建 —— 实测(2026-10-08)留了
+            --     个 60s 兜底重发, 平台一收到带 nodes 的 info/post 就重建模型并
+            --     回推 config/get, 形成"我们发拓扑 → 平台推配置 → 我们再发拓扑"
+            --     的闭环, 每 60s 一轮。兜底路径还不打日志, 现象是"sniff 档平台
+            --     不断下发模型配置", 难查
+            local msig = meta_sig()
+            if msig and msig ~= S.meta_sig then
+                local ok, e = send_meta()
+                if ok then
+                    S.meta_sig = msig
+                    log.info("iot", "gw meta posted: " .. msig)
+                else
+                    log.info("iot", "gw meta skip: " .. tostring(e))
+                end
+            end
+            -- detect 跑完之前不发拓扑: 这期间 serial 参数还是上一轮的默认值
+            -- (9600), 发出去平台就按错波特率建一次模型, detect 完还得再重建 ——
+            -- 白推一次配置, 白占一次 info/post
+            local sig = nil
+            if not mon.status().detecting then sig = topo_sig() end
+            if sig and sig ~= S.topo_sig then
+                local ok, e = send_topo()
+                if ok then
+                    S.topo_sig = sig
+                    log.info("iot", "topology posted: " .. sig)
+                else
+                    log.info("iot", "topology skip: " .. tostring(e))
+                end
+            end
             if sys then sys.wait(1000) end
+            -- 周期重发 hello。放在 sys.wait 之后，保证每轮循环只判一次、且不和
+            -- 本轮的上报挤在一起
+            --
+            -- 只对 pollpull 档：那是唯一"在等平台下发配置"的档。sniff 档的 hello
+            -- 发完就判完成，没有"未拿到配置"这个状态，重发只会让平台侧无意义地
+            -- 刷新档案。手配档(poll)不订 config/get，推了也收不到。
+            --
+            -- 平台收到 hello 会重推 ConfigSnapshot，由 recv_push 自动落盘 ——
+            -- 不走拉取状态机，所以不影响前端正在显示的拉取结果，也不需要用户
+            -- 再点一次「拉取配置」。这正是文档"未拿到配置前每 30min 重发"的用途：
+            -- 平台侧档案被重置/白名单到期时，设备侧无从得知，只靠上电那一次 hello
+            -- 会永久失联且没有任何报错
+            --
+            -- hello_at == 0(这个连接还没发过 hello) 时不起跑，否则开机就白发一次
+            if S.hello_at and S.hello_at > 0 and get_mode() == "pollpull"
+                and not pulling()
+                and (os.time() - S.hello_at) >= cfg.HELLO_RE_S then
+                log.info("iot", "hello re-send (30min), mode=pollpull")
+                pcall(send_hello)
+            end
         end
     end
 end

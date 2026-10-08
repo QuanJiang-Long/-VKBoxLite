@@ -200,8 +200,12 @@ local function reg_cmds()
 
     -- 平台配置拉取: W 发起(立即应答), R 轮询状态。
     -- 握手在 iot 的 task_main 协程里跑, 这里不能阻塞等待 MQTT 回包。
+    -- pull_start() 现在对"已在拉取中"返回 true(不让 ctrl 切模式因重复请求
+    -- 而失败), 所以判重挪到这里做, 否则前端连按两下只会收到两个 started,
+    -- 看不出其实只有一轮在跑
     M.reg("W:PULLCFG", function()
         if not iot then return M.reply("RET:FAIL:PULLCFG:iot 不可用") end
+        if iot.pulling() then return M.reply("RET:PULLCFG=BUSY") end
         local ok, err = iot.pull_start()
         if not ok then return M.reply("RET:FAIL:PULLCFG:" .. tostring(err)) end
         M.reply("RET:PULLCFG=started")
