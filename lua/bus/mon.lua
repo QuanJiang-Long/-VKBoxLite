@@ -8,7 +8,6 @@ local sys = corelib.try("sys")
 
 local mbus = require "bus/mbus"
 local collector = require "data/collector"
-local cfgstore = require "cfg"
 
 local M = {}
 
@@ -254,7 +253,10 @@ end
 
 function M.start(c)
     if running then return true end
-    c = c or cfgstore.load_sniff()
+    -- 没有 sniff 持久槽: 参数由 auto_detect() 现场试出来, 只存本次会话。
+    -- 调用方不传 c 时用编译期默认(core/config 的 9600 8N1), 与原来读那个
+    -- 空槽拿到的值逐字节相同
+    c = c or { baud = cfg.BAUD, databits = cfg.DATABITS, stopbits = cfg.STOPBITS, parity = cfg.PARITY }
     if gpio then
         pcall(gpio.setup, mbus.DE_PIN, 0)
         pcall(gpio.set, mbus.DE_PIN, 0)
@@ -283,7 +285,7 @@ function M.trim_reqs() lastReqs = {} end
 -- 一个候选(1200 8O1), 接下来 3s 等待期里到的真流量全成乱码, 而下一轮又要从
 -- 9600 重新开始 —— 中间那段窗口看着像"总线时好时坏", 查不出原因
 local function restore_params()
-    local c = bootCfg or cfgstore.load_sniff()
+    local c = bootCfg or { baud = cfg.BAUD, databits = cfg.DATABITS, stopbits = cfg.STOPBITS, parity = cfg.PARITY }
     pcall(uart.setup, mbus.UART_ID, c.baud or cfg.BAUD,
         c.databits or cfg.DATABITS, c.stopbits or cfg.STOPBITS,
         mbus.parity_to_uart(c.parity or cfg.PARITY))

@@ -7,11 +7,14 @@ local json = corelib.try("json")
 
 local M = {}
 
-local K_POLL, K_SNIFF, K_SYS = "ds_poll", "ds_sniff", "ds_sys"
+local K_POLL, K_SYS = "ds_poll", "ds_sys"
 -- ds_pull: 平台拉取配置的独立槽。和 ds_poll 同构(串口参数+slave+regs),
 -- 复用同一份 normalize_poll/default_poll, 不新增校验代码。
 -- 为什么必须分开: 手动配置和平台配置原本共用一个槽, 拉一次平台配置就把
 -- 手配的寄存器表覆盖掉了, 用户没法两个都要(见 lua/README.md 配置来源隔离)
+-- 没有 sniff 槽: sniff 的串口参数是 auto_detect() 现场试出来的, 结果只存本次
+-- 会话(mon.lua 的 bootCfg), 从不落 fskv —— 识别出的参数悄悄写进持久槽会污染
+-- 手配/拉取两档, 所以这里刻意不留可写的 sniff 槽, 从结构上堵住误存
 local K_PULL = "ds_pull"
 
 local function num(v, d)
@@ -69,13 +72,6 @@ M.default_poll = {
     interval_ms = cfg.POLL_INTERVAL_MS,
     timeout_ms = cfg.TIMEOUT_MS,
     regs = cfg.REG_DEFAULT,
-}
-
-M.default_sniff = {
-    baud = cfg.BAUD,
-    databits = cfg.DATABITS,
-    stopbits = cfg.STOPBITS,
-    parity = cfg.PARITY,
 }
 
 M.default_sys = { boot_mode = "idle" }
@@ -143,10 +139,6 @@ function M.normalize_poll(c)
     return out
 end
 
-function M.normalize_sniff(c)
-    return normalize_common(c, M.default_sniff)
-end
-
 function M.normalize_sys(c)
     c = c or {}
     local mode = str(c.boot_mode, "idle"):lower():gsub("^%s+", ""):gsub("%s+$", "")
@@ -158,14 +150,13 @@ function M.normalize_sys(c)
     return { boot_mode = mode }
 end
 
--- 四套配置(poll/pull/sniff/sys)的读写除了键、归一化函数、默认值以外完全同构，
--- 各写一遍就是三处要同步改。这里合成一张表驱动，函数名是它们唯一的差别。
+-- 三套配置(poll/pull/sys)的读写除了键、归一化函数、默认值以外完全同构，
+-- 各写一遍就是两处要同步改。这里合成一张表驱动，函数名是它们唯一的差别。
 -- 注意 load 失败时静默退回默认值(load 用在启动路径, 崩了整个设备起不来),
 -- 而 save 失败必须把原因带回去给 W:CFG 显示
 local SECTIONS = {
     poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll },
     pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll },
-    sniff = { key = K_SNIFF, norm = M.normalize_sniff, default = M.default_sniff },
     sys = { key = K_SYS, norm = M.normalize_sys, default = M.default_sys },
 }
 
@@ -217,7 +208,7 @@ end
 --
 -- ⚠️ 刻意不碰 ds_sys: boot_mode 是"开机该进什么模式"的意愿, 不是配置内容。
 --    清了它下次开机又不 idle, 和设备已经 idle 的事实矛盾。
-local RESET_SLOTS = { { "poll", K_POLL }, { "pull", K_PULL }, { "sniff", K_SNIFF } }
+local RESET_SLOTS = { { "poll", K_POLL }, { "pull", K_PULL } }
 
 function M.reset_user()
     local cleared = {}

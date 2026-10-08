@@ -229,7 +229,7 @@ local function build_items()
     return items
 end
 
-local function publish(force)
+local function publish()
     if not S.client or not S.connected then return false end
     local items = build_items()
     if #items == 0 then return false end
@@ -682,10 +682,6 @@ local function try_connect()
     local prof, terr = mqttcfg.profile(did == "unknown" and nil or did)
     if not prof then return false, terr end
     S.pub, S.sub = prof.pub, prof.sub
-    -- build_subs() 挂在 conack 回调里，拿不到这里的局部变量 c，而
-    -- mqttcfg.load() 要读 fskv 解 JSON，不能在每个 topic 上重跑一遍。
-    -- 所以档位顺手存进 S，和 pub/sub 同一处赋值
-    S.manual_on = not not c.manual_on
     -- B 模型: clientId = "SN_"(见 default_client_id), username = 裸 SN,
     -- 密码是平台签发的凭证密码。
     -- 填了 client_id/user 才用手填值, 否则一律按平台格式兜底
@@ -1085,10 +1081,10 @@ function M.pulling() return pulling() end
 --   poll(拉取配置)    -> false  订平台 4 条, 否则 hello 发出去没人应答
 -- 手动/自动没有混搭场景(要么全手配, 要么全平台拉), 所以档位直接跟模式走。
 --
--- 为什么要 destroy+kick: S.manual_on 是在 try_connect() 里读的, 订阅清单
--- build_subs() 挂在 conack 上, 已连接的 client 不会自己重读一遍。不断开
--- 重连的话, 从拉取档切回手动档后设备还订着平台 topic, 看起来像"手动配置
--- 没生效"。断开重连只是丢一次心跳周期, collector 的数据和寄存器表不动
+-- 为什么要 destroy+kick: 订阅清单 build_subs() 挂在 conack 上, 已连接的
+-- client 不会自己重读一遍。不断开重连的话, 从拉取档切回手动档后设备还订着平台
+-- topic, 看起来像"手动配置没生效"。断开重连只是丢一次心跳周期, collector 的
+-- 数据和寄存器表不动
 function M.set_manual(on)
     on = on and true or false
     local c = mqttcfg.load()
@@ -1115,7 +1111,6 @@ function M.set_manual(on)
         })
         if not ok then return false, err end
     end
-    S.manual_on = on
     destroy_client()
     M.kick()
     log.info("iot", "mqtt manual_on ->", tostring(on))
@@ -1399,7 +1394,7 @@ local function task_main()
                 due = S.dirty
             end
             if S.dirty then due = true end
-            if due then publish(false) end
+            if due then publish() end
             -- U3 网关资源与 U4 同一节奏(interval_s), 两者互不相干
             if (os.time() - (S.res_at or 0)) >= c.interval_s then send_gw_res() end
             -- 把这一轮的干活耗时记进 busy, 区间长度记进 span。span 与 busy
@@ -1486,7 +1481,7 @@ end
 function M.is_running() return S.want_run end
 
 function M.report_now()
-    return publish(true)
+    return publish()
 end
 
 function M.kick()
