@@ -315,6 +315,18 @@ function M.decode_frame(s)
     else
         f.kind = "req"
     end
+    -- parse_frame 的读响应分支只给 data, 不给 bc/qty/vhex。三种后果:
+    --   ① 前端读 f.bc 得 nil, 显示成"字节数 0 值 []", 明明 bc=4 却说没数据
+    --   ② pop_req/guess_last_req 都按 qty 配对, rsp 没 qty 就永远配不上 ->
+    --      paired 恒 0、rsp 全 orphan; 而 pop_req 又是边删边比, 每进一个
+    --      rsp 就把 pendingReqs 整队抽空, 之后主机的查询也再配不上
+    --   ③ guess_last_req 开头 if not qty then return nil 直接放弃
+    -- 按字节数反推: fc3/4 是寄存器(2 字节/个), fc1/2 是位(8 位/字节)
+    if f.data and not f.qty then
+        f.bc = #f.data
+        f.qty = (f.fc == 3 or f.fc == 4) and math.floor(#f.data / 2) or (#f.data * 8)
+        f.vhex = f.data:gsub(".", function(c) return string.format("%02x", c:byte()) end)
+    end
     return f
 end
 

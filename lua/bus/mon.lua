@@ -61,20 +61,22 @@ local function guess_last_req(fc, slave, qty)
     return r
 end
 
+-- 从 pendingReqs[fc] 里找最晚一条同 slave 同 qty 的在途请求。
+-- ⚠️ 只能命中才 table.remove: 原来是"边删边比"(remove 写在校验前面),
+--    于是任何一次不匹配都会把整队清空 -- 一个 rsp 打飞全部在途请求,
+--    之后同 fc 的其他 rsp 只能全 orphan。这也是 paired 恒 0 的直接原因。
+-- ⚠️ 必须比 slave: 总线上同时有两台从机、qty 又撞上时(现场 s1 读 qty=2、
+--    s11 也读 qty=2), 不比从机会把 s11 的请求配给 s1 的响应。
 local function pop_req(fc, slave, qty, now)
     local q = pendingReqs[fc]
-    if not q or #q == 0 then return nil end
-    while #q > 0 do
-        if (now - q[1].ts) <= (PAIR_TIMEOUT_MS / 1000) then break end
+    if not q then return nil end
+    while #q > 0 and (now - q[1].ts) > (PAIR_TIMEOUT_MS / 1000) do
         table.remove(q, 1)
     end
-    if #q == 0 then return nil end
     for i = #q, 1, -1 do
         local r = q[i]
-        table.remove(q, i)
-        if fc >= 3 then
-            if r.qty == qty then return r end
-        else
+        if r.slave == slave and r.qty == qty then
+            table.remove(q, i)
             return r
         end
     end
