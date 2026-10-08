@@ -1716,6 +1716,7 @@ function renderInfer() {
   const regs = toArr(inf.regs);
   el.inferHint.textContent = regs.length
     ? '监听到 ' + toArr(inf.slaves).length + ' 个从机，共 ' + regs.length + ' 个轮询项'
+      + (inf.ignored ? '；已过滤 ' + inf.ignored + ' 条无应答的请求（从机可能不在线）' : '')
     : '';
   if (regs.length === 0) {
     el.inferTbody.innerHTML = '<tr><td colspan="6" style="color:#999;">暂无推断结果</td></tr>';

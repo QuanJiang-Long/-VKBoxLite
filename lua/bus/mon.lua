@@ -174,17 +174,30 @@ end
 -- 从旁听到的 REQ 帧反推轮询表(前端 R:INFER)
 -- 按 slave+addr+qty+fc 聚合命中次数
 function M.infer()
-    local agg, slaves = {}, {}
-    for _, f in ipairs(collector.get_frames()) do
+    local fs = collector.get_frames()
+    -- 健康度: 见到 RSP 的从机才算在线。主机轮询一个没接线的从机时只见请求不见
+    -- 应答(实测 slave=11 三项 req、零 rsp), 那种 req 列进轮询表只会误导 ——
+    -- 用户会照着配一个根本不存在的从机。必须单独走一遍: RSP 可能排在对应 req
+    -- 后面, 边扫边判会漏掉刚扫过的那批
+    local online = {}
+    for _, f in ipairs(fs) do
+        if f.kind == "rsp" and f.slave then online[f.slave] = true end
+    end
+    local agg, slaves, ignored = {}, {}, 0
+    for _, f in ipairs(fs) do
         if f.kind == "req" and f.addr ~= nil and f.qty then
-            local key = f.slave .. ":" .. f.addr .. ":" .. f.qty .. ":" .. f.fc
-            local a = agg[key]
-            if not a then
-                a = { slave = f.slave, addr = f.addr, count = f.qty, fc = f.fc, hits = 0 }
-                agg[key] = a
-                slaves[f.slave] = true
+            if online[f.slave] then
+                local key = f.slave .. ":" .. f.addr .. ":" .. f.qty .. ":" .. f.fc
+                local a = agg[key]
+                if not a then
+                    a = { slave = f.slave, addr = f.addr, count = f.qty, fc = f.fc, hits = 0 }
+                    agg[key] = a
+                    slaves[f.slave] = true
+                end
+                a.hits = a.hits + 1
+            else
+                ignored = ignored + 1
             end
-            a.hits = a.hits + 1
         end
     end
     local regs = {}
@@ -200,6 +213,9 @@ function M.infer()
     return {
         regs = regs,
         slaves = sl,
+        -- 被健康度过滤掉的请求条数。不是 0 就说明总线上有"主机在轮询但没人应答"
+        -- 的地址, 前端据此提示用户排查
+        ignored = ignored,
         -- 统计段原样带出, 前端据此判断"旁听到的帧够不够多、配出来可不可信"
         stat = stat,
     }
