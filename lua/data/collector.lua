@@ -7,6 +7,12 @@ local frames = {}
 local ring, ringIdx = {}, 0
 local updateCbs = {}
 local stat = { pushed = 0, frames = 0, raw = 0 }
+-- dataCache 必须封顶, 且只能封在这里: poll 档靠配置的寄存器数天然有界
+-- (MAX_REGS), sniff 档旁听的地址集却不可预知 -- 主站读到哪就从机吐到哪,
+-- 几百个不同地址就能吃穿 203K 的 Lua 堆。而 OOM 兜底 trim_cache() 只清
+-- frames/ring, 碰不到 dataCache, 等它涨高再救就晚了。超限按插入序淘汰最旧
+local MAX_DATA_POINTS = cfg.MAX_REGS
+local dataOrder = {}
 
 local function ring_add(s)
     ringIdx = (ringIdx % cfg.RING_SIZE) + 1
@@ -23,6 +29,13 @@ function M.push_data(addr, alias, hex, value, ts, dtype)
     if value == nil then return false end
     if not alias or alias == "" then alias = "r" .. addr end
     if not ts then ts = os.time() end
+    -- 新 key 才记账, 老 key 更新值不挪位; 超限就把最旧的连记账一起丢
+    if not dataCache[alias] then
+        dataOrder[#dataOrder + 1] = alias
+        while #dataOrder > MAX_DATA_POINTS do
+            dataCache[table.remove(dataOrder, 1)] = nil
+        end
+    end
     dataCache[alias] = { addr = addr, hex = hex, value = value, ts = ts, dtype = dtype }
     stat.pushed = stat.pushed + 1
     ring_add(string.format("data %s=%s", alias, tostring(value)))
@@ -80,6 +93,9 @@ function M.on_update(cb) updateCbs[#updateCbs + 1] = cb end
 function M.trim_cache()
     local n = #frames + #ring
     frames, ring, ringIdx = {}, {}, 0
+    -- dataOrder 是 dataCache 的记账表, 必须跟着一起清, 否则两边不同步,
+    -- 下次 push_data 的淘汰会拿着一个不存在 dataCache 里的 key 白删
+    dataOrder = {}
     return n
 end
 

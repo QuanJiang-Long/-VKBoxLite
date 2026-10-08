@@ -83,6 +83,22 @@ local function pop_req(fc, slave, qty, now)
     return nil
 end
 
+-- B1: 配对成功就把旁听到的值写进 collector, 让 iot 现成的 dirty->publish
+-- 链路自己把数据发上平台。sniff 自己不发请求, 不写这里 dataCache 永远空,
+-- build_payload 返回 "[]"、publish 直接 return, 上报链路整个空转。
+-- 别名 s<从机>_r<地址>, 与前端 R:INFER 的行键保持一致; 旁听拿不到配置里的
+-- 数据类型, 统一按 uint16 大端解(poll 侧默认也是这个), 多寄存器逐个拆开
+local function push_rsp_value(slave, addr, f)
+    if not f.data or not addr then return end
+    for i = 0, math.floor(#f.data / 2) - 1 do
+        local b = f.data:sub(i * 2 + 1, i * 2 + 2)
+        if #b == 2 then
+            collector.push_data(addr + i, "s" .. slave .. "_r" .. (addr + i),
+                f.hex, b:byte(1) * 256 + b:byte(2), nil, "uint16")
+        end
+    end
+end
+
 local function process_frame(s)
     local f = mbus.decode_frame(s)
     stat.frames = stat.frames + 1
@@ -92,20 +108,16 @@ local function process_frame(s)
         pair_state = "err"
     elseif f.kind == "rsp" then
         stat.rsps = stat.rsps + 1
-        local now = os.clock()
-        local hit = pop_req(f.fc, f.slave, f.qty, now)
+        -- pop_req 命中不了再退 guess_last_req(靠 lastReqs 兜 10 秒内的旧请求),
+        -- 两条路都通到同一个 paired 处理, 别再抄一遍
+        local hit = pop_req(f.fc, f.slave, f.qty, os.clock()) or guess_last_req(f.fc, f.slave, f.qty)
         if hit then
             stat.paired = stat.paired + 1
             pair_state, paired_addr = "paired", hit.addr
+            push_rsp_value(f.slave, hit.addr, f)
         else
-            local g = guess_last_req(f.fc, f.slave, f.qty)
-            if g then
-                stat.paired = stat.paired + 1
-                pair_state, paired_addr = "paired", g.addr
-            else
-                stat.orphans = stat.orphans + 1
-                pair_state = "orphan"
-            end
+            stat.orphans = stat.orphans + 1
+            pair_state = "orphan"
         end
     elseif f.kind == "req" then
         stat.reqs = stat.reqs + 1
