@@ -1,6 +1,7 @@
 local corelib = require "core/corelib"
 local cfg = require "core/config"
 local cfgstore = require "cfg"
+local util = require "util/collect_table_util"
 local log = corelib.log()
 local json = corelib.try("json")
 
@@ -145,16 +146,27 @@ local function props_to_regs(props, limit)
             local dt, dtwhy = map_dtype(mb.dataType)
             local addr = num(mb.address)
             local qty = num(mb.quantity)
-            if id == "" then
-                skipped[#skipped + 1] = "第" .. i .. "条 id 为空"
-            elseif not id:match("^%w+$") or #id > 16 then
-                skipped[#skipped + 1] = "第" .. i .. "条 id「" .. id .. "」含非字母数字或超 16 字符"
-            elseif not dt then
-                skipped[#skipped + 1] = id .. "：" .. (dtwhy or ("不支持的 dataType「" .. tostring(mb.dataType) .. "」"))
-            elseif not addr or addr < 0 or addr > 65535 then
-                skipped[#skipped + 1] = id .. "：address 非法"
-            elseif not qty or qty < 1 or qty > 125 then
-                skipped[#skipped + 1] = id .. "：quantity 非法"
+            -- 字段范围/格式校验委托给 util.validate_reg(共享 ds_poll 实现)
+            local vok, vwhy = util.validate_reg({
+                addr = addr, count = qty, name = id, dtype = dt,
+            })
+            if not vok then
+                -- 工具返回短词 'bad addr' / 'bad count' / 'bad dtype' / 'bad name'.
+                -- pullcfg 这条路径的 skipped 消息直接给用户看(R:PULLCFG 无翻译表),
+                -- 翻译回中文. dtype 的 dtwhy(平台字段名)比通用更具体, 优先用.
+                local zh = ({
+                    ["bad addr"]  = "address 非法",
+                    ["bad count"] = "quantity 非法",
+                    ["bad dtype"] = dtwhy or ("不支持的 dataType「" .. tostring(mb.dataType) .. "」"),
+                    ["bad name"]  = "id「" .. id .. "」含非字母数字或超 16 字符",
+                })[vwhy] or vwhy
+                if id == "" and vwhy == "bad name" then
+                    skipped[#skipped + 1] = "第" .. i .. "条 id 为空"
+                elseif id == "" then
+                    skipped[#skipped + 1] = "第" .. i .. "条" .. zh
+                else
+                    skipped[#skipped + 1] = id .. "：" .. zh
+                end
             elseif #regs >= limit then
                 skipped[#skipped + 1] = id .. "：超过 " .. limit .. " 个上限，已截断"
             else

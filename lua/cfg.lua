@@ -4,6 +4,7 @@ local log = corelib.log()
 
 local fskv = corelib.try("fskv")
 local json = corelib.try("json")
+local util = require "util/collect_table_util"
 
 local M = {}
 
@@ -78,19 +79,14 @@ M.default_sys = { boot_mode = "idle" }
 
 local function normalize_reg(r)
     if type(r) ~= "table" then return nil, "not table" end
-    local addr = num(r.addr)
-    if not addr or addr < 0 or addr > 65535 then return nil, "bad addr" end
-    local count = num(r.count, 1)
-    if count < 1 or count > 125 then return nil, "bad count" end
-    local dtype = str(r.dtype, "uint16")
-    if not ({ uint16 = 1, int16 = 1, uint32 = 1, int32 = 1, float32 = 1, uint64 = 1, int64 = 1, float64 = 1 })[dtype] then
-        return nil, "bad dtype"
-    end
-    local name = str(r.name)
-    if not name or #name > 16 or not name:match("^%w+$") then return nil, "bad name" end
+    -- 范围/格式校验委托给 util.validate_reg(抽离后 ds_poll/ds_pull 共享)
+    local ok, why = util.validate_reg(r)
+    if not ok then return nil, why end
     return {
-        addr = addr, count = count, dtype = dtype, name = name,
-        alias = str(r.alias, name),
+        addr = num(r.addr), count = num(r.count, 1),
+        dtype = str(r.dtype, "uint16"),
+        name = r.name,
+        alias = str(r.alias, r.name),
     }
 end
 
