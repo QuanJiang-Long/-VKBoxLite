@@ -444,7 +444,7 @@ end
 
 -- 不带 nodes 的那帧: 网关元数据。字段名/类型照平台 V3 文档示例, 一个不多一个
 -- 不少 —— 少字段平台解析不出, 多字段可能按未知字段整包拒收。
--- 无源的字段(imei/iccid/经纬度)按注释留空或整项不发, 不编假值
+-- 无源的字段(imei/iccid/longitude/latitude)按注释留空或整项不发, 不编假值
 local function send_meta()
     local did = cur_did()
     if not did then return false, "无 SN" end
@@ -466,6 +466,11 @@ local function send_meta()
     p[#p + 1] = string.format('"networkAddress":%s', jstr(mqttcfg.load().host))
     p[#p + 1] = string.format('"isShadow":0')
     p[#p + 1] = string.format('"summary":%s', jstr("VKBox Bootstrap"))
+    -- deviceType 固定 3(产品定义: 网关). locationWay 0=未定位/2=LBS 成功.
+    -- longitude/latitude 暂不发(LBS 未集成), 等拿到 iot.openluat.com
+    -- 的 project_id 调 lbsLoc2.request, 成功时同时上报经纬度 + locationWay=2.
+    p[#p + 1] = '"deviceType":3'
+    p[#p + 1] = '"locationWay":0'
     -- ts 用秒: 文档示例 1721884800 是 10 位。毫秒会让平台按 1970 年解析
     p[#p + 1] = string.format('"ts":%d', os.time())
     return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did), "{" .. table.concat(p, ",") .. "}", 1)
