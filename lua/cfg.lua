@@ -8,6 +8,9 @@ local util = require "util/collect_table_util"
 
 local M = {}
 
+-- 4 种工作模式提到模块顶部(与 cmd.lua 共享语义, 不同文件独立常量是 Lua 闭包隔离的代价)
+local MODE_POLL, MODE_PULL, MODE_IDLE, MODE_SNIFF = "poll", "pull", "idle", "sniff"
+
 local K_POLL, K_SYS = "ds_poll", "ds_sys"
 -- ds_pull: 平台拉取配置的独立槽。和 ds_poll 同构(串口参数+slave+regs),
 -- 复用同一份 normalize_poll/default_poll, 不新增校验代码。
@@ -75,7 +78,7 @@ M.default_poll = {
     regs = cfg.REG_DEFAULT,
 }
 
-M.default_sys = { boot_mode = "idle" }
+M.default_sys = { boot_mode = MODE_IDLE }
 
 local function normalize_reg(r)
     if type(r) ~= "table" then return nil, "not table" end
@@ -137,10 +140,10 @@ end
 
 function M.normalize_sys(c)
     c = c or {}
-    local mode = str(c.boot_mode, "idle"):lower():gsub("^%s+", ""):gsub("%s+$", "")
+    local mode = str(c.boot_mode, MODE_IDLE):lower():gsub("^%s+", ""):gsub("%s+$", "")
     -- pollpull = 拉取配置档: 用 ds_pull 轮询, 且开机后自动 hello 拉一次平台配置。
     -- 和 poll 共用同一套 normalize_poll, 只是配置来源不同
-    if mode ~= "idle" and mode ~= "poll" and mode ~= "pollpull" and mode ~= "sniff" then
+    if mode ~= MODE_IDLE and mode ~= MODE_POLL and mode ~= "pollpull" and mode ~= MODE_SNIFF then
         return nil, "bad boot_mode"
     end
     return { boot_mode = mode }
@@ -204,7 +207,7 @@ end
 --
 -- ⚠️ 刻意不碰 ds_sys: boot_mode 是"开机该进什么模式"的意愿, 不是配置内容。
 --    清了它下次开机又不 idle, 和设备已经 idle 的事实矛盾。
-local RESET_SLOTS = { { "poll", K_POLL }, { "pull", K_PULL } }
+local RESET_SLOTS = { { MODE_POLL, K_POLL }, { MODE_PULL, K_PULL } }
 
 function M.reset_user()
     local cleared = {}

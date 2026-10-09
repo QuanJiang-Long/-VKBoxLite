@@ -1,11 +1,4 @@
--- 采集表工具: 抽离 ds_poll/ds_pull 两套配置共用的校验/归一化逻辑.
--- 第一版: validate_reg 单条寄存器字段校验. cfg.normalize_reg 和
--- pullcfg.props_to_regs 都接它, 重复的 addr/count/dtype/name 范围
--- 校验只剩一处. 后续 to_modbus_tasks / build_u4_payload 在迭代 B
--- 收 poll 路径时再加.
---
--- 错误消息保持英文短词("bad addr" / "bad count" / "bad dtype" / "bad name")
--- 以兼容前端 app.js:764-767 的字面翻译表.
+-- 采集表工具. 错误消息保持英文短词以兼容前端 app.js:764-767 翻译表.
 local M = {}
 
 -- 支持的 dtype 白名单
