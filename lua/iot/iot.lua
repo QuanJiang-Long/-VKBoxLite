@@ -267,20 +267,17 @@ local function build_items()
     return items
 end
 
--- U4 子设备数据上报。topic 是固定平台常量 PLATFORM_PUB_TOPIC 加 -{n} 后缀:
---   文档"数据上报 topic"三路同(sniff/platform/manual 都是
---   /sys/thing/node/property/post/{gwSn}-{n}), 所以不吃任何用户配置 ——
---   曾把它做成 mqttcfg.pub_topic 可配, 用户按自己的命名填了一份, 数据就
---   发去了文档外的 topic, 平台按 /sys/thing/... 收, 两边谁都不知道
+-- U4 子设备数据上报。topic = profile 出的 base 加 -{n} 后缀:
+--   手动档 = 用户填的 pub_topic(连自己的 broker, 用自己的命名)
+--   自动档 = PLATFORM_PUB_TOPIC 固定常量
 -- {gwSn} 是网关 SN(顶层网关自己的设备号), -{n} 是子设备序号。少了 -{n}
 -- 平台认不出数据归属哪个子设备, 上报等于白发
 local function publish()
     if not S.client or not S.connected then return false end
     local items = build_items()
     if #items == 0 then return false end
-    local did = cur_did()
-    if not did then return false end
-    local base = string.format(cfg.PLATFORM_PUB_TOPIC, did)
+    local base = S.pub or ""
+    if base == "" then return false end
     local any = false
     for _, it in ipairs(items) do
         local ok, err = pcall(function()
@@ -558,9 +555,11 @@ end
 --   ① D1(/gw/config/get/{sn}) 是"拉取配置"链路唯一的入口
 --   ② function/get + property/set + property/get 是平台侧另外三类下行，
 --      不订就收不到服务调用/属性设置/全量查询，且无报错
---   这 4 条已按"代码精简"写死成 core/config.lua 的平台常量，不再可配 ——
---   文档明确三路同，可配只会让三档画出不同的清单，平台那头对不上
+--   这 4 条是 core/config.lua 的平台常量，不随配置变
 --
+-- ⚠️ 手动档额外还要订用户填的 sub_topic：手动档连的是用户自己的 broker，
+--    平台那套 /sys/thing/gw/{sn} 拼出来也没人往那儿发。不订用户那条 =
+--    用户配的下行永远收不到。自动档的 sub 与 config/get 同形，上面已去重
 -- ⚠️ 曾按 manual_on 分流过，导致 sniff 沿用切入前那份清单：从 idle 进 sniff
 --    会是空的，从手动配置进 sniff 又少订 4 条平台 topic，平台下发到设备全丢。
 local function build_subs()
@@ -579,6 +578,7 @@ local function build_subs()
     add(string.format(cfg.PLATFORM_FUNC_TOPIC, did))
     add(string.format(cfg.PLATFORM_PSET_TOPIC, did))
     add(string.format(cfg.PLATFORM_PGET_TOPIC, did))
+    add(S.sub)
     return subs
 end
 
@@ -676,11 +676,12 @@ local function try_connect()
         did = "unknown"
     end
     S.device_id = did
-    -- 凭证按 manual_on 取: 手动档用前端填的, 自动档用户名留空(iot 兜底填 SN)
-    -- + 首页那份 MQTT凭证密码(见 mqttcfg.profile)。topic 不在这条链上,
-    -- 三路同全是固定常量, 由各发送函数自己拼
-    local prof, terr = mqttcfg.profile()
+    -- 凭证和 topic 都按 manual_on 取: 手动档用前端填的 user/pass/pub_topic/
+    -- sub_topic, 自动档用户名留空(iot 兜底填 SN) + 首页那份 MQTT凭证密码,
+    -- topic 用 PLATFORM_* 固定常量(见 mqttcfg.profile)
+    local prof, terr = mqttcfg.profile(did)
     if not prof then return false, terr end
+    S.pub, S.sub = prof.pub, prof.sub
     -- B 模型: clientId = "SN_"(见 default_client_id), username = 裸 SN,
     -- 密码是平台签发的凭证密码。
     -- 填了 client_id/user 才用手填值, 否则一律按平台格式兜底
@@ -1145,6 +1146,12 @@ function M.pull_status()
         r.poll = p.result.poll
         r.skipped = p.result.skipped
         r.renamed = p.result.renamed
+        -- 只带发布/订阅两个 topic 成品给前端回显(手动档填输入框)。
+        -- 另外 3 条 gw 下行订阅是设备端固定常量, 前端没有对应输入框
+        local prof = mqttcfg.profile(device_id())
+        r.mqtt = {
+            pub = prof and prof.pub, sub = prof and prof.sub,
+        }
     end
     -- 回执状态单独给：前端据此提示"已回执"还是"平台还在重推"
     r.msg_id = p.msg_id
@@ -1512,9 +1519,9 @@ end
 
 function M.status()
     local c = mqttcfg.load()
-    -- 未建连时按当前档次兜底算一份, 与 try_connect 同源, 否则这个值在
-    -- 建连前是空的, 而 CONACK 0x05 时现场最需要看的正是它
-    local prof = mqttcfg.profile()
+    -- 未建连时按当前档次兜底算一份, 与 try_connect 同源, 否则这几行在
+    -- 建连前是空的, 而 CONACK 0x05 时现场最需要看的正是 clientId/user/pub/sub
+    local prof = mqttcfg.profile(device_id())
     return {
         want_run = S.want_run,
         connected = S.connected,
@@ -1522,6 +1529,8 @@ function M.status()
         device_id = S.device_id,
         client_id = S.client_id or (c.client_id ~= "" and c.client_id or default_client_id(device_id())),
         user = S.user or ((prof and prof.user ~= "" and prof.user) or device_id()),
+        pub = S.pub or (prof and prof.pub),
+        sub = S.sub or (prof and prof.sub),
         keep_session = c.keep_session,
         manual_on = c.manual_on,
         host = c.host,

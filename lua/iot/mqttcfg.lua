@@ -13,14 +13,16 @@ local K_CFG = "mqtt_cfg"
 -- 参数, 自动档和手动档建连都读这份。user/pass 是【手动档】独有, 只有
 -- manual_on 为真时才用。manual_on 为假时改用下面 auto 那套: 用户名留空
 -- (iot 兜底填 SN) + 首页那份 MQTT凭证密码。
--- 发布/订阅 topic 已从配置项删除: 平台文档明确它们三路同(sniff/platform/
--- manual 完全一样), 全部走 core/config.lua 的 PLATFORM_* 固定常量。
--- hello/服务调用/属性设置/属性查询 4 条同理, 同样是固定常量。
+-- pub_topic/sub_topic 也是【手动档】独有: 手动档连的是用户自己的 broker 和
+-- 自己的 topic 命名, 这两条由用户填。自动档不用它们, 直接走
+-- core/config.lua 的 PLATFORM_* 固定常量(见 profile)。
 M.default = {
     host = "dz.voltkun.com",
     port = 1883,
     user = "",
     pass = "",
+    pub_topic = "/sys/thing/node/property/post/{sn}",
+    sub_topic = "/sys/thing/gw/config/get/{sn}",
     ssl = false,
     client_id = "",
     interval_s = cfg.MQTT_INTERVAL_S,
@@ -33,10 +35,19 @@ M.default = {
     manual_on = false,
 }
 
--- topic 字段已删除, 只剩长度校验的表驱动入口也一并去掉
 local function num(v, d)
     if v == nil then return d end
-    return tonumber(v) or d end
+    return tonumber(v) or d
+end
+
+-- topic 模板校验: 截断到 128, 去掉首尾空格。{sn} 是占位符, 由
+-- profile() 代。空串 = 用默认模板
+local function norm_topic(v, d)
+    if type(v) ~= "string" then return d end
+    v = v:gsub("^%s*(.-)%s*$", "%1")
+    if v == "" then return d end
+    return v:sub(1, 128)
+end
 
 -- 自动档密码。两种来源: c.auto.pass 是已落盘的表, c.auto_pass 是前端
 -- W:MQTT 下发的新键(与手动档的 pass 区分, 否则前端无法表达"改哪个密码")
@@ -77,6 +88,8 @@ function M.normalize(c)
     if type(c.client_id) == "string" then cid = c.client_id:gsub("^%s*(.-)%s*$", "%1"):sub(1, 128) end
     local out = {
         host = host, port = port, user = user, pass = pass,
+        pub_topic = norm_topic(c.pub_topic, d.pub_topic),
+        sub_topic = norm_topic(c.sub_topic, d.sub_topic),
         ssl = c.ssl and true or false,
         client_id = cid,
         interval_s = math.floor(num(c.interval_s, d.interval_s)),
@@ -131,8 +144,8 @@ function M.save(c)
     if not json then return false, "no json lib" end
     local oke, s = pcall(json.encode, n)
     if not oke or not s then return false, "encode fail" end
-    -- 上限 2048。原 512 根本不够: host 128 + clientId 128 + 三段密码
-    -- 直接超。2048 对最长字段仍有 3 倍余量
+    -- 上限 2048。原 512 根本不够: host 128 + clientId 128 + 两段密码 +
+    -- 两条 topic(各 128) 直接超。2048 对最长字段仍有 2 倍余量
     if #s > 2048 then return false, "too large" end
     if not fskv then return false, "no fskv" end
     fskv.set(K_CFG, s)
@@ -141,15 +154,37 @@ function M.save(c)
 end
 
 -- 设备实际建连要用的那套凭证, 由 manual_on 决定:
---   手动档 = 前端「MQTT 配置」页填的 user/pass
---   自动档 = 用户名留空(iot 兜底填 SN) + 首页那份 MQTT凭证密码
--- topic 不在这里出: 文档明确三路同, 全是 core/config.lua 的固定常量
-function M.profile()
+--   手动档 = 前端「MQTT 配置」页填的 user/pass/pub_topic/sub_topic
+--   自动档 = 用户名留空(iot 兜底填 SN) + 首页那份 MQTT凭证密码,
+--            topic 用 PLATFORM_* 固定常量(默认模板与常量同形, 见 M.default)
+-- {sn} 占位符在这里代, 调用方拿到的是成品 topic。
+-- did 为空(未烧号)时两档都返回 nil: 手动档的 resolve 和自动档的 format
+-- 都不做兜底 —— string.format("%s", nil) 在 Lua 5.1 下直接报错, 而
+-- "没有 SN 的设备连上去也没有意义", 让调用方自己判空更清楚
+local function resolve(tpl, did)
+    if not did or did == "" then return nil end
+    return (tpl:gsub("{sn}", did))
+end
+
+local function fmt_const(tpl, did)
+    if not did or did == "" then return nil end
+    return string.format(tpl, did)
+end
+
+function M.profile(did)
     local c = M.load()
     if c.manual_on then
-        return { user = c.user, pass = c.pass }
+        return {
+            user = c.user, pass = c.pass,
+            pub = resolve(c.pub_topic, did),
+            sub = resolve(c.sub_topic, did),
+        }
     end
-    return { user = "", pass = c.auto.pass }
+    return {
+        user = "", pass = c.auto.pass,
+        pub = fmt_const(cfg.PLATFORM_PUB_TOPIC, did),
+        sub = fmt_const(cfg.PLATFORM_GET_TOPIC, did),
+    }
 end
 
 -- 给前端 R:MQTT 用: cfg 是原值(表单回填), ready 表示当前档次凭证齐了能连
@@ -170,8 +205,9 @@ end
 --   ⚠️ ssl 尤其必须留: 同一个 host 的 1883 明文和 8883 TLS 是两条路, 只保
 --      host+port 不保 ssl 会把走 TLS 的用户打回明文, 表现是"切回来就连不上了"
 --
--- 清掉: user / pass(手动档凭证)。置空即可, normalize 在 manual_on=false 时
---      会强制把它们清空(见 normalize 末尾), 不用在这里拼默认值。
+-- 清掉: user / pass / pub_topic / sub_topic(手动档凭证与 topic)。
+--      置空即可, normalize 在 manual_on=false 时会强制把它们清空
+--      (见 normalize 末尾), 不用在这里拼默认值。
 --
 -- ⚠️ manual_on 必须和"清值"在同一个 save 里完成: normalize 在 manual_on=true 时
 --    【使用】user/pass。只清值不换档的话, 设备会拿空凭证匿名连平台 ——
@@ -184,10 +220,11 @@ function M.clear_manual()
     local c = M.load()
     -- 已经是干净态就别写: 每次切空闲都白写一次 fskv + save, 而 flash
     -- 擦写次数是有限的。判据只看 manual_on —— normalize 在它为 false 时
-    -- 已强制把 user/pass 清空, 所以这两项不可能"单独脏"
+    -- 已强制把 user/pass/pub/sub 清空, 所以这几项不可能"单独脏"
     if not c.manual_on then return true, nil, false end
     c.manual_on = false
     c.user, c.pass = "", ""
+    c.pub_topic, c.sub_topic = "", ""
     local ok, err = M.save(c)
     return ok, err, ok
 end

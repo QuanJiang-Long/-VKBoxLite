@@ -43,9 +43,9 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .tab-pane.active{display:block;}
 /* 表单行 */
 .form-row{margin:8px 0;display:flex;align-items:center;gap:8px;}
-/* 只属于「手动档」的 3 个输入行（.manual-only）。
-   关闭手动配置时整行藏掉：自动档下用户名/密码/ClientID 都归设备管，
-   摆在页面上只会让人以为改了能生效。
+/* 只属于「手动档」的 5 个输入行（.manual-only）。
+   关闭手动配置时整行藏掉：自动档下用户名/密码/ClientID/发布Topic/订阅Topic
+   都归设备管，摆在页面上只会让人以为改了能生效。
    ⚠️ 「保存」按钮不在这之列：两个档位都有可改的共用项（地址/端口/SSL/
    上报间隔/会话管理/允许无 SN），自动档同样需要保存入口
    JS 只切这个 class，不写 style.display，避免和 .form-row 的 flex 打架 */
@@ -480,6 +480,14 @@ body:not(.mq-manual) .manual-only{display:none !important;}
                         <label>ClientID</label>
                         <input id="mqClientId" type="text" placeholder="留空即用设备 SN 加下划线，如 11802026092600016_">
                     </div>
+                    <div class="form-row manual-only">
+                        <label>发布Topic</label>
+                        <input id="mqPub" type="text" placeholder="留空即用设备默认模板 /sys/thing/node/property/post/{SN}">
+                    </div>
+                    <div class="form-row manual-only">
+                        <label>订阅Topic</label>
+                        <input id="mqSub" type="text" placeholder="留空即用设备默认模板 /sys/thing/gw/config/get/{SN}">
+                    </div>
                     <div class="form-row">
                         <label>上报周期(秒)</label>
                         <input id="mqInterval" type="number" value="60" min="0" max="86400" style="max-width:140px;">
@@ -512,6 +520,8 @@ body:not(.mq-manual) .manual-only{display:none !important;}
                         <div class="kv"><b>用户名</b><span id="mqStUser">--</span></div>
                         <div class="kv"><b>设备编号</b><span id="mqStDevId">--</span></div>
                         <div class="kv"><b>当前档次</b><span id="mqStMode">--</span></div>
+                        <div class="kv"><b>生效发布</b><span id="mqStPub">--</span></div>
+                        <div class="kv"><b>生效订阅</b><span id="mqStSub">--</span></div>
                         <div class="kv"><b>已订阅</b><span id="mqStSubed">--</span></div>
                         <div class="kv"><b>订阅Topic</b><span id="mqStSubs">--</span></div>
                         <div class="kv"><b>配置回执</b><span id="mqStReplied">--</span></div>

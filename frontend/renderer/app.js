@@ -108,10 +108,9 @@ const el = new Proxy({
   mqPass: $('mqPass'), mqClientId: $('mqClientId'),
   // 密码框右侧小眼睛：显/隐切换
   btnMqttPassEye: $('btnMqttPassEye'),
-  // hello topic：设备向平台自述身份用的发布 topic，与数据上报 topic 分开
-  // 发布/订阅 Topic 保留在「MQTT 连接」面板（R1），随手动/自动开关切只读。
-  // hello/服务调用/属性设置/属性查询 4 条 topic 已从界面和设备端配置项一并
-  // 删除（设备走固定平台常量），所以这几个键不再注册
+  // 发布/订阅 Topic：只属于手动档（.manual-only），自动档整行藏掉。
+  // 手动档连的是用户自己的 broker，这两条由用户填；自动档走设备默认模板
+  mqPub: $('mqPub'), mqSub: $('mqSub'),
   mqInterval: $('mqInterval'),
   mqAllowNoSn: $('mqAllowNoSn'),
   // MQTT 会话管理：select（离线自动销毁=0 / 持久会话=1），不是开关
@@ -283,6 +282,7 @@ function mqSnap() {
   return JSON.stringify({
     host: g(el.mqHost), port: g(el.mqPort), ssl: c(el.mqSsl),
     user: g(el.mqUser), pass: g(el.mqPass), cid: g(el.mqClientId),
+    pub: g(el.mqPub), sub: g(el.mqSub),
     iv: g(el.mqInterval),
     noSn: c(el.mqAllowNoSn), keep: g(el.mqKeepSession),
     hHost: g(el.hMqHost), hPort: g(el.hMqPort), hPass: g(el.hMqPass),
@@ -292,14 +292,27 @@ function mqSnap() {
 
 function snapMqClean() { S.mqSnap = mqSnap(); refreshMqDirty(); }
 
+// 打开手动档时把手动档那几项从设备当前值回填出来。
+// 单独抽出来是因为调用点有两个（setManualMode 的 refill 分支、readMqtt 的
+// 档位切换分支），且都发生在 R:MQTT 应答刚落地之后 —— 此时 S.mqtt.cfg 里
+// 是设备实际存的那份，回填它等于"把你上次填的还给你"
+function refillManual() {
+  const c = (S.mqtt && S.mqtt.cfg) || {};
+  if (fillOk(el.mqUser)) el.mqUser.value = c.user || '';
+  if (fillOk(el.mqPass)) el.mqPass.value = c.pass || '';
+  if (fillOk(el.mqClientId)) el.mqClientId.value = c.client_id || '';
+  if (fillOk(el.mqPub)) el.mqPub.value = c.pub_topic || '';
+  if (fillOk(el.mqSub)) el.mqSub.value = c.sub_topic || '';
+}
+
 //---------------------------------------------------------------------
 // 手动/自动切换 = 建连档位切换
-//   自动（默认）：用户名/密码/ClientID 全部归设备管 —— 用户名固定 SN，
-//              密码用首页那份 MQTT凭证密码。这几项整行藏掉（.manual-only），
-//              但「保存」按钮两档都在：自动档还有地址/端口/SSL/周期/会话/
-//              no_SN 可改。发布/订阅 topic 两档都是设备固定常量，界面不显示。
-//   手动：      那几项显示出来，保存时连用户名/密码一起下发，设备先清掉
-//              自动拼的那套再写这套，然后按这套建连上报。
+//   自动（默认）：用户名/密码/ClientID/发布Topic/订阅Topic 全部归设备管 ——
+//              用户名固定 SN、密码用首页那份 MQTT凭证密码、topic 用默认
+//              模板。这几项整行藏掉（.manual-only），但「保存」按钮两档都
+//              在：自动档还有地址/端口/SSL/周期/会话/no_SN 可改。
+//   手动：      那几项显示出来，保存时连用户名/密码/topic 一起下发，设备
+//              先清掉自动拼的那套再写这套，然后按这套建连上报。
 // 注意：开手动档是保存时才生效（用户填完再点「保存」）；
 // 关手动档是当场生效 —— 屏幕上那几个手动档的值会被自动档顶掉，
 // 所以关档必须自己把指令发下去（见下面 btnManualCfg.onclick）
@@ -317,6 +330,9 @@ function setManualMode(on, opts) {
       ? '关闭后设备改用 SN + 首页凭证密码'
       : '手动配置：用本页填的用户名/密码建连';
   syncPullCfgBtn();
+  // 关档时把手动档那几项整行藏掉。留着已填的值不清 —— R:MQTT 回来会按
+  // manual_on 重填，期间留着只是看不见，不会误发
+  if (S.mqManual && opts.refill) refillManual();
   // 换内容等于换了一遍表单，必须重新取基线，否则会误报"有未保存更改"
   if (opts.snap !== false) snapMqClean();
 }
@@ -1420,8 +1436,11 @@ function renderMqtt() {
     if (fillOk(el.mqUser)) el.mqUser.value = c.user || '';
     if (fillOk(el.mqPass)) el.mqPass.value = c.pass || '';
     if (fillOk(el.mqClientId)) el.mqClientId.value = c.client_id || '';
-    // user/client_id 留空是故意的: 设备兜底填 SN, 所以这里显示空属正常。
-    // 实际生效值看首页那两个框(用户名只读/ClientID 可填)或下面的连接状态面板。
+    // 发布/订阅 topic：手动档专属，自动档整行藏掉。留空 = 用设备默认模板
+    if (fillOk(el.mqPub)) el.mqPub.value = c.pub_topic || '';
+    if (fillOk(el.mqSub)) el.mqSub.value = c.sub_topic || '';
+    // user/client_id/topic 留空是故意的: 设备兜底填 SN 和默认模板, 所以这里
+    // 显示空属正常。实际生效值看下面的连接状态面板。
     if (fillOk(el.mqInterval)) el.mqInterval.value = c.interval_s != null ? c.interval_s : 60;
     // QoS 已从界面移除：设备端发布/订阅固定用 QoS 1，
     // 这里不再显示也不再下发（设备 normalize 会退回默认值 1）。
@@ -1434,6 +1453,12 @@ function renderMqtt() {
   setKv('mqStClientId', s.client_id || s.device_id || s.sn || '');
   setKv('mqStUser', s.user || s.device_id || s.sn || '');
   setKv('mqStDevId', s.device_id || s.sn || '');
+  // 生效发布/生效订阅：当前档次实际在用的两条 topic 成品（{SN} 已代入）。
+  // 手动档 = 本页填的模板代出来的；自动档 = PLATFORM_* 固定常量。
+  // 只在连上后有值（未建连时 S.pub/S.sub 是 nil，profile 兜底算的那份要用
+  // 设备号，没有 SN 时也是空）
+  setKv('mqStPub', s.pub || '未连接', !s.pub);
+  setKv('mqStSub', s.sub || '未连接', !s.sub);
   // 当前档次: 手动 = 用本页填的凭证；自动 = 首页那份凭证 + SN
   setKv('mqStMode', c.manual_on ? '手动配置' : '自动（设备拼接）', !!c.manual_on);
   setKv('mqStSubed', s.subscribed ? '是' : '否', !s.subscribed);
@@ -1490,6 +1515,9 @@ async function saveMqtt() {
     user: el.mqUser.value.trim(),
     pass: el.mqPass.value,
     client_id: el.mqClientId.value.trim(),
+    // 手动档专属。自动档下这两个键省掉不发，设备端 normalize 会退回默认模板
+    pub_topic: S.mqManual ? el.mqPub.value.trim() : undefined,
+    sub_topic: S.mqManual ? el.mqSub.value.trim() : undefined,
     interval_s: parseInt(el.mqInterval.value, 10) || 0,
     // QoS 界面已移除，不再下发；设备端固定用 QoS 1
     allow_no_sn: el.mqAllowNoSn.checked,
@@ -1499,6 +1527,17 @@ async function saveMqtt() {
     // + 首页那份 MQTT凭证密码 + 默认模板
     manual_on: S.mqManual
   };
+  // {SN} 占位符必须有 SN 才代得出来。填了 {SN} 但设备没烧号 = 保存一个
+  // 永远代不出成品 topic 的模板，连上了也发不出去，不如当场拦住
+  if (S.mqManual) {
+    const d = S.mqtt && S.mqtt.stat && (S.mqtt.stat.device_id || S.mqtt.stat.sn);
+    for (const [k, v] of [['pub_topic', cfg.pub_topic], ['sub_topic', cfg.sub_topic]]) {
+      if (v && v.indexOf('{SN}') >= 0 && !d) {
+        toast(`「${k}」含 {SN} 占位符，但设备未烧号，请先烧号或改用完整 topic`);
+        return;
+      }
+    }
+  }
   try {
     await sendCmd(Protocol.Enc.writeMqtt(cfg), 'MQTT', 5000);
     snapMqClean();                     // 保存成功 = 表单和设备一致，清掉「未保存」标记
@@ -1808,6 +1847,9 @@ function exportCfg() {
       // 手动档凭证 + 自动档凭证密码分两个键，与设备端一致
       pass: el.mqPass.value,
       client_id: el.mqClientId.value.trim(),
+      // 手动档 topic。留空 = 用设备默认模板
+      pub_topic: el.mqPub.value.trim(),
+      sub_topic: el.mqSub.value.trim(),
       interval_s: parseInt(el.mqInterval.value, 10) || 0,
       allow_no_sn: el.mqAllowNoSn.checked,
       keep_session: el.mqKeepSession.value === '1',
@@ -1856,14 +1898,15 @@ async function importCfg() {
           el.mqUser.value = d.mqtt.user || '';
           el.mqPass.value = d.mqtt.pass || '';
           el.mqClientId.value = d.mqtt.client_id || '';
+          // 发布/订阅 topic：手动档专属，导入时一并带进来
+          el.mqPub.value = d.mqtt.pub_topic || '';
+          el.mqSub.value = d.mqtt.sub_topic || '';
           el.mqInterval.value = d.mqtt.interval_s != null ? d.mqtt.interval_s : 60;
           el.mqAllowNoSn.checked = !!d.mqtt.allow_no_sn;
           el.mqKeepSession.value = d.mqtt.keep_session ? '1' : '0';
           // 自动档凭证密码回首页那个框；档次按钮按导入的 manual_on 切
           if (el.hMqPass && d.mqtt.auto) el.hMqPass.value = d.mqtt.auto.pass || '';
           setManualMode(!!d.mqtt.manual_on, { refill: true });
-          // 发布/订阅 topic 已无输入框（两档都是设备固定常量），导入时忽略
-          // （设备端是固定平台常量，配置文件里带了也不生效）
         }
         toast('配置已导入：' + regs.length + ' 个寄存器');
         snapClean();                   // 导入的内容成为新基线
@@ -2077,6 +2120,10 @@ el.btnMqttReset.onclick = async () => {
   el.mqPass.value = 'VKBOXGW2026KEY';
   if (el.hMqPass) el.hMqPass.value = 'VKBOXGW2026KEY';
   el.mqClientId.value = '';
+  // topic 恢复默认模板。留空 = 用设备默认模板(normalize 见空串回退),
+  // 与设备端 mqttcfg.default 的 pub_topic/sub_topic 一致
+  el.mqPub.value = '';
+  el.mqSub.value = '';
   el.mqInterval.value = 60;
   el.mqAllowNoSn.checked = false;
   el.mqKeepSession.value = '0';     // 离线自动销毁（与设备默认一致）
@@ -2196,6 +2243,9 @@ const MOCK = {
   cfg: JSON.parse(JSON.stringify(MOCK_CFG_DEFAULT)),
   // 手动档（MQTT 配置页）+ 自动档（首页）两份凭证
   mqtt: { host: 'dz.voltkun.com', port: 1883, user: '', pass: '', ssl: false,
+          // 手动档 topic 模板。{SN} 由设备代入；留空 = 用设备默认模板
+          pub_topic: '/sys/thing/node/property/post/{SN}',
+          sub_topic: '/sys/thing/gw/config/get/{SN}',
           interval_s: 60, allow_no_sn: false, keep_session: false,
           auto: { pass: 'VKBOXGW2026KEY' }, manual_on: false },
   published: 0
@@ -2279,6 +2329,13 @@ function mockReply(line) {
     stat: { want_run: true, connected: true, subscribed: true,
             device_id: 'VK20260925001', published: MOCK.published,
             user: 'VK20260925001', client_id: 'VK20260925001_',
+            // 生效发布/生效订阅：当前档次实际在用的两条成品 topic
+            pub: '/sys/thing/node/property/post/VK20260925001-1',
+            sub: '/sys/thing/gw/config/get/VK20260925001',
+            subs: ['/sys/thing/gw/config/get/VK20260925001',
+                   '/sys/thing/gw/function/get/VK20260925001',
+                   '/sys/thing/gw/property/set/VK20260925001',
+                   '/sys/thing/gw/property/get/VK20260925001'],
             manual_on: MOCK.mqtt.manual_on,
             failed: 0, last_pub: 0, last_err: '', backoff: 1, dirty: false,
             sn: 'VK20260925001' }
@@ -2332,6 +2389,9 @@ function mockReply(line) {
       MOCK.cfg = JSON.parse(JSON.stringify(MOCK_CFG_DEFAULT));
       MOCK.mqtt.manual_on = false;
       MOCK.mqtt.user = ''; MOCK.mqtt.pass = '';
+      // topic 回落默认模板（设备端 norm_topic 见空串回退默认值）
+      MOCK.mqtt.pub_topic = '/sys/thing/node/property/post/{SN}';
+      MOCK.mqtt.sub_topic = '/sys/thing/gw/config/get/{SN}';
       resp = 'RET:MODE=OK;cleared:poll+mqtt_manual';
     } else {
       resp = 'RET:MODE=OK';
