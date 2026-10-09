@@ -142,7 +142,6 @@ if prov then
     end)
 end
 
-log.info("main", "boot complete, entering sys.run()")
-print("[main] boot complete, entering sys.run() build=" .. BUILD_ID)
+log.info("main", "boot complete, entering sys.run() build=" .. BUILD_ID)
 
 sys.run()

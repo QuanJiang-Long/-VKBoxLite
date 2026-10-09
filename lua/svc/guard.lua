@@ -61,7 +61,7 @@ local function monitor()
             parts[#parts + 1] = string.format("mem=%d/%d", used, total or 0)
         end
     end
-    print("[guard] " .. table.concat(parts, " "))
+    log.info("guard", table.concat(parts, " "))
     if stall and stall > cfg.STALL_LIMIT_S then
         log.error("guard", "collector stalled!")
         if cfg.AUTO_REBOOT and rtos and rtos.reboot then pcall(rtos.reboot) end
