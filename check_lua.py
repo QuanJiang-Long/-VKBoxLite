@@ -150,7 +150,11 @@ def check_forward_refs(code, path, errors):
         decls.setdefault(name, []).append(line)
     if not decls:
         return
-    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", code):
+    # ⚠️ 必须排除 . / : 前缀: obj:publish() 是方法调用, 与同名的文件级
+    # local function publish 毫无关系。少了这个前瞻, 只要有个同名局部函数
+    # 声明在后面, 所有早于它的方法调用都会误报 —— 实测 iot.lua 抽 pub()
+    # helper 时就踩到: S.client:publish() 被当成调用第 270 行的 publish
+    for m in re.finditer(r"(?<![.:\w])([A-Za-z_]\w*)\s*\(", code):
         name = m.group(1)
         if name not in decls:
             continue
