@@ -5,9 +5,12 @@ main.lua - 启动编排
       绝不要拼 package.path (LuatOS 里是 nil, 拼了 VM 启动即崩)
 ]]
 
-PROJECT = "vkbox_485_collect"
-VERSION = "2.0.0"
+PROJECT = "VKBoxLite"
+VERSION = "2.0.1"
 BUILD_ID = "2026-10-01-new"
+-- 发布版开关: true=发布, false=开发。改 lua/_build_flag.lua 即可切版本。
+_G.BUILD_RELEASE = require "_build_flag"
+_G.DEBUG = not _G.BUILD_RELEASE
 
 local _raw_require = require
 local _pkg_ok = (type(package) == "table" and type(package.loaded) == "table")
