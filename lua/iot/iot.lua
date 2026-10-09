@@ -1186,16 +1186,13 @@ local function send_hello()
     -- 漂移导致下行 topic 错位（指令全丢且无报错）。
     --
     -- onboardingMode 按当前 485 档位如实报(文档: sniff/platform/manual):
-    --   sniff     → 平台跳过"对本地自建设备无效的配置快照推送"。这正是我们要的:
-    --               sniff 档的寄存器表来自本地旁听推断, 平台推过来的只会是 193B
-    --               空壳(devices/properties/commInterfaces 全空), 收了还得回执,
-    --               不回执平台每 1s 重推一次
+    --   sniff     → 平台跳过"对本地自建设备无效的配置快照推送"。sniff 档的
+    --               寄存器表来自本地旁听推断, 平台推过来的只会是 193B 空壳
     --   platform  → 平台照常推 ConfigSnapshot(pollpull 档要的就是这个)
-    -- manual 档也发 hello, 但报 platform 而不是 manual: 文档只定义了 sniff
-    -- 的行为(跳过快照推送), manual 的行为没写。报一个未定义的值风险大于
-    -- 收益; 手动档本来就不等 configSnapshot(不发 pull_start), 平台推了也
-    -- 由 recv_push 直接落盘, 不会卡住任何流程
-    local onboard = get_mode() == "sniff" and "sniff" or "platform"
+    --   manual    → 平台见 manual 不推配置(行为同 sniff: 用户手配档案, 平台
+    --               侧不预知具体设备, 靠上报 auto-provision 补建)
+    local m = get_mode()
+    local onboard = m == "sniff" and "sniff" or m == "pollpull" and "platform" or "manual"
     -- deviceId 按文档取 IMEI，取不到报 "unknown"（不报空串：平台校验
     -- gateway_imei，空串和缺字段是两回事）。不一致会被拒 hello
     local dv = imei()

@@ -12,17 +12,19 @@
 都收到一份 193B 空壳快照（`devices`/`tsl.properties`/`commInterfaces` 全空），
 还要为它回 U6，不回执平台每 1s 重推一次。
 
-## 现在的实现（iot.lua send_hello，2026-10-09 更新）
+## 现在的实现（iot.lua send_hello，2026-10-09 更新；2026-10-10 三档完整化）
 ```lua
-local onboard = get_mode() == "sniff" and "sniff" or "platform"
+local m = get_mode()
+local onboard = m == "sniff" and "sniff" or m == "pollpull" and "platform" or "manual"
 ```
 - `sniff` 档 → `"sniff"`，发完 hello 直接 `pull_finish("done", ...)`，
   **不进 waiting**（等也等不到，干等只会显示"平台未下发配置(超时)"的假故障），
   也**不回 U6**（没收到 D1 就没有 msgId 可核销）
 - `pollpull` 档 → `"platform"`，照常等 D1
-- **`poll` 手动档根本不发 hello**（文档：manual 档**不走 onboarding 链路**，
-  档案来源是用户 Web 界面，平台侧不预知具体设备，靠上报 auto-provision 补建）。
-  曾给手动档加过 hello + `onboardingMode=manual`，与文档冲突，已回退。
+- `poll` 手动档 → `"manual"`，**也发 hello**（让平台知道"这台网关上线了"），
+  但**不发 pull_start**——档案由 recv_push 直接落盘，用户手配的寄存器表
+  在 ds_poll, 不被覆盖。平台见 manual 应当跳过 ConfigSnapshot
+  （同 sniff；用户手配档案，平台侧不预知具体设备，靠上报 auto-provision 补建）
 
 ⚠️ `get_mode()` **能**区分 poll / pollpull（靠 `poll.slot()`）：
 ```lua
