@@ -191,6 +191,44 @@ local function jnum(v)
     return tostring(v)
 end
 
+-- ===== 收拢重复样板的 helper =====
+-- 上行帧的 7 个发送点(send_meta/send_topo/send_gw_res/func_reply/reply_config/
+-- send_hello/claim_ok 的 did 解析)原来各写一遍"判连接 + pcall + tostring(e)",
+-- 抄 7 遍必然改一处漏一处。pub 同时是连接闸门: 未连接就返回 false, "未连接"
+local function pub(topic, body, qos)
+    if not S.client or not S.connected then return false, "未连接" end
+    local ok, e = pcall(function() S.client:publish(topic, body, qos or 1) end)
+    if not ok then return false, tostring(e) end
+    return true
+end
+
+-- 当前网关 SN, 取不到返回 nil。7 个调用点都要它, 各自判空后报不同的错
+local function cur_did()
+    local d = S.device_id or device_id()
+    return (d and d ~= "") and d or nil
+end
+
+-- U3/U7 共用的 [{id,value,ts}] 数组。ts 传 nil 则不带该字段(U7 不要 ts)
+-- id 兜底 "unknown": downlink_write 已保证 rid 非空, 但这是平台核销指令的
+-- 键, 缺了平台对不上是哪一条, 代价只是一行 or
+local function items_json(list, ts)
+    local out = {}
+    for _, it in ipairs(list) do
+        local v = jnum(it.value) or "null"
+        out[#out + 1] = ts
+            and string.format('{"id":%s,"value":%s,"ts":%s}', jstr(it.id or "unknown"), v, ts)
+            or string.format('{"id":%s,"value":%s}', jstr(it.id or "unknown"), v)
+    end
+    return "[" .. table.concat(out, ",") .. "]"
+end
+
+-- csq 为 0 即未注册。全项目只此一处定义 —— send_meta 的 netRegister 字段和
+-- net_ready 的建连判据原本是两套同形算法, 口径一旦漂移, 平台看到的注册状态
+-- 和设备实际能否建连就对不上, 且两边都不报错
+local function net_registered(csq)
+    return not (type(csq) == "number" and csq == 0)
+end
+
 -- U4 按子设备逐条上报: /sys/thing/node/property/post/{gwSn}-{n}。
 -- n = 子设备序号, 按从机地址升序排(同一份配置只有一个 slave, 所以轮询档
 -- 恒为 1; sniff 档才可能有多个从机)。从机地址从 key 里取:
@@ -399,9 +437,8 @@ end
 -- 不少 —— 少字段平台解析不出, 多字段可能按未知字段整包拒收。
 -- 无源的字段(imei/iccid/经纬度)按注释留空或整项不发, 不编假值
 local function send_meta()
-    if not S.client or not S.connected then return false, "未连接" end
-    local did = S.device_id or device_id()
-    if not did or did == "" then return false, "无 SN" end
+    local did = cur_did()
+    if not did then return false, "无 SN" end
     local csq = mcall("csq")
     if type(csq) ~= "number" then csq = nil end
     local p = {}
@@ -416,37 +453,25 @@ local function send_meta()
     p[#p + 1] = string.format('"deviceName":%s', jstr("VKBOX-" .. did))
     p[#p + 1] = string.format('"serialNumber":%s', jstr(did))
     if csq then p[#p + 1] = string.format('"csq":%d', csq) end
-    -- netRegister 口径与 net_ready() 一致(csq 为 0 即未注册), 这里内联是因为
-    -- net_ready 声明在后面, local function 前向拿不到; csq 上面已经取过了
-    p[#p + 1] = string.format('"netRegister":%s', tostring(not (type(csq) == "number" and csq == 0)))
+    p[#p + 1] = string.format('"netRegister":%s', tostring(net_registered(csq)))
     p[#p + 1] = string.format('"networkAddress":%s', jstr(mqttcfg.load().host))
     p[#p + 1] = string.format('"isShadow":0')
     p[#p + 1] = string.format('"summary":%s', jstr("VKBox Bootstrap"))
     -- ts 用秒: 文档示例 1721884800 是 10 位。毫秒会让平台按 1970 年解析
     p[#p + 1] = string.format('"ts":%d', os.time())
-    local body = "{" .. table.concat(p, ",") .. "}"
-    local ok, e = pcall(function()
-        S.client:publish(string.format(cfg.PLATFORM_INFO_TOPIC, did), body, 1)
-    end)
-    if not ok then return false, tostring(e) end
-    return true
+    return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did), "{" .. table.concat(p, ",") .. "}", 1)
 end
 
 -- 带 nodes[] 的那帧: 子设备拓补建档。只带网关标识 + 拓扑, 自述性字段
 -- (fw/firmwareVersion/imei/...) 归 send_meta, 不在这儿重复发一遍
 local function send_topo()
-    if not S.client or not S.connected then return false, "未连接" end
-    local did = S.device_id or device_id()
-    if not did or did == "" then return false, "无 SN" end
+    local did = cur_did()
+    if not did then return false, "无 SN" end
     local nodes, err = build_nodes()
     if not nodes then return false, err end
-    local body = string.format('{"sn":%s,"deviceSn":%s,"ts":%d,"nodes":[%s]}',
-        jstr(did), jstr(did), os.time(), nodes)
-    local ok, e = pcall(function()
-        S.client:publish(string.format(cfg.PLATFORM_INFO_TOPIC, did), body, 1)
-    end)
-    if not ok then return false, tostring(e) end
-    return true
+    return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did),
+        string.format('{"sn":%s,"deviceSn":%s,"ts":%d,"nodes":[%s]}',
+            jstr(did), jstr(did), os.time(), nodes), 1)
 end
 
 -- 元数据指纹: 只挑会变的字段(imei/iccid/csq/主机名), 版本和型号是常量不必算。
@@ -466,30 +491,24 @@ end
 --                 与其编一个 0 骗平台, 不如报一个能测的量。平台若按 90% 做
 --                 CPU 告警, 得知道这个口径 —— U5 告警本次不做(已确认)
 local function send_gw_res()
-    if not S.client or not S.connected then return false end
-    local did = S.device_id or device_id()
-    if not did or did == "" then return false end
+    local did = cur_did()
+    if not did then return false end
     local total, used = heap_info()
     local ts = ms_of(os.time())
-    local parts = {}
     local ram = 0
     if total and total > 0 then
         ram = math.floor(used * 1000 / total) / 10
     end
-    parts[#parts + 1] = string.format('{"id":%s,"value":%s,"ts":%s}',
-        jstr("ram_percent"), jnum(ram), ts)
-    parts[#parts + 1] = string.format('{"id":%s,"value":%s,"ts":%s}',
-        jstr("uptime_sec"), jnum(math.floor(os.clock())), ts)
     local cpu = 0
     if S.busy_s and S.span_s and S.span_s > 0 then
         cpu = math.min(100, math.max(0, math.floor(S.busy_s * 1000 / S.span_s) / 10))
     end
-    parts[#parts + 1] = string.format('{"id":%s,"value":%s,"ts":%s}',
-        jstr("cpu_percent"), jnum(cpu), ts)
-    local ok = pcall(function()
-        S.client:publish(string.format(cfg.PLATFORM_RES_TOPIC, did),
-            "[" .. table.concat(parts, ",") .. "]", 1)
-    end)
+    local ok = pub(string.format(cfg.PLATFORM_RES_TOPIC, did),
+        items_json({
+            { id = "ram_percent", value = ram },
+            { id = "uptime_sec", value = math.floor(os.clock()) },
+            { id = "cpu_percent", value = cpu },
+        }, ts), 1)
     if not ok then return false end
     -- 占用比是"上一个区间"的值, 发完就归零重新攒。不清的话 busy 一直涨而
     -- span 涨得更快, 占比会越算越小, 平台看到的是个单调下降的假曲线
@@ -505,21 +524,10 @@ end
 -- 要精确到总线结果得给 poll 的写队列加 per-item 回调, 本次不做
 local function func_reply(rs)
     if not rs or #rs == 0 then return false end
-    if not S.client or not S.connected then return false end
-    local did = S.device_id or device_id()
-    if not did or did == "" then return false end
-    local parts = {}
-    for _, r in ipairs(rs) do
-        local v = "null"
-        if r.value ~= nil then
-            v = jnum(r.value) or "null"
-        end
-        parts[#parts + 1] = string.format('{"id":%s,"value":%s}', jstr(r.id or "unknown"), v)
-    end
-    local ok, e = pcall(function()
-        S.client:publish(string.format(cfg.PLATFORM_FPOST_TOPIC, did),
-            "[" .. table.concat(parts, ",") .. "]", 1)
-    end)
+    local did = cur_did()
+    if not did then return false end
+    local ok, e = pub(string.format(cfg.PLATFORM_FPOST_TOPIC, did),
+        items_json(rs, nil), 1)
     if not ok then
         log.warn("iot", "func reply fail:", tostring(e))
         return false
@@ -654,15 +662,10 @@ local function on_mqtt(cli, event, data, payload)
     end
 end
 
+-- 能否建连: 只有"明确知道没注册"才算不能。mobile 库缺失时返回 true ——
+-- 没有依据就不能拦着连接, 那是把"测不出"当成"连不上"
 local function net_ready()
-    if not mobile then return true end
-    local csq = mobile.csq
-    if type(csq) == "function" then
-        local ok, v = pcall(csq)
-        csq = ok and v or nil
-    end
-    if type(csq) == "number" and csq == 0 then return false end
-    return true
+    return net_registered(mcall("csq"))
 end
 
 local function try_connect()
@@ -840,8 +843,8 @@ end
 local function claim_ok(topic)
     if type(topic) ~= "string" then return true end
     if topic:sub(1, 11) ~= "/sys/thing/" then return true end
-    local did = S.device_id or device_id()
-    if not did or did == "" then return true end
+    local did = cur_did()
+    if not did then return true end
     local last = topic:match("([^/]+)$")
     if not last then return false end
     if last == did then return true end
@@ -924,8 +927,8 @@ local function reply_config()
     if p.replied then return true end
     if not p.msg_id or p.msg_id == "" then return true end
     if not S.connected or not S.client then return false, "MQTT 未连接" end
-    local did = device_id()
-    if not did or did == "" then return false, "无 SN" end
+    local did = cur_did()
+    if not did then return false, "无 SN" end
     local topic = string.format(cfg.PLATFORM_REPLY_TOPIC, did)
     -- message 用拉取结果里的那句话: 空快照时写 "config applied" 是撒谎,
     -- 平台侧核销记录会看着像真配了一份
@@ -933,8 +936,8 @@ local function reply_config()
         '{"msgId":%s,"code":200,"message":%s,"status":"ok","appliedTs":%d}',
         jstr(p.msg_id), jstr(p.msg ~= "" and p.msg or "config applied"), os.time())
     log.info("iot", "config/reply " .. topic .. " " .. body)
-    local ok, err = pcall(function() S.client:publish(topic, body, 1) end)
-    if not ok then return false, tostring(err) end
+    local ok, err = pub(topic, body, 1)
+    if not ok then return false, err end
     p.replied = true
     S.replied = S.replied + 1
     return true
@@ -1202,8 +1205,10 @@ local function send_hello()
         jstr(dv), jstr(onboard))
     log.info("iot", string.format("pullcfg hello topic=%s sn=%s imei=%s mode=%s body=%s",
         topic, did, imei(), onboard, body))
-    local ok, err = pcall(function() S.client:publish(topic, body, 1) end)
-    if not ok then return false, tostring(err) end
+    -- 发送失败不能记 hello_at: 那是"本连接最后一次 hello 成功发送"的时间,
+    -- 记了失败这一次, task_main 的 30min 重发会从一个假起点起算
+    local ok, err = pub(topic, body, 1)
+    if not ok then return false, err end
     -- 记【本连接内最后一次 hello 成功发送】的时间: task_main 靠它算 pollpull 档
     -- 的 30min 重发。reset_state 里置 0 表示这个连接还没发过, 计时不起跑
     S.hello_at = os.time()
