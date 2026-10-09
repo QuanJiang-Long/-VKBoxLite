@@ -189,7 +189,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 
 | 运行模式 | `W:MODE=` | MQTT 档位 | 配置槽 | 行为 |
 |---|---|---|---|---|
-| poll（手动配置） | `poll` | `manual_on=true` | `ds_poll` | 用手配的寄存器表和 MQTT，**也向平台发 hello**（`onboardingMode=manual`） |
+| poll（手动配置） | `poll` | `manual_on=true` | `ds_poll` | 用手配的寄存器表和 MQTT。**不发 hello**（文档：manual 档不走 onboarding 链路，档案来源是用户 Web 界面，平台侧靠上报 auto-provision 补建） |
 | poll（拉取配置） | `pollpull` | `manual_on=false` | `ds_pull` | 进入即自动 hello 拉平台配置（`onboardingMode=platform`） |
 | 旁听 sniff | `sniff` | 无所谓 | 不用 | 只收不发 |
 | 空闲 idle | `idle` | 不变 | 不用 | 不动总线 |
@@ -198,18 +198,17 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 要么全平台拉取。`ctrl.SLOT` 这张表就是这个映射，改任何一个都要三处同步。
 
 ⚠️ **`iot.set_manual(on)` 的 `on=true` 是手动档**。切换档位那一行写的是
-`iot.set_manual(slot == "poll")` —— 写反的后果是手动档收不到自己的 topic、
-拉取档订不上平台 topic，两个模式一起废，而且界面上看不出原因（MQTT 页只是
-手动配置行集体消失）。改这行前后各读一遍 `set_manual` 的注释。
+`iot.set_manual(slot == "poll")` —— 写反的后果是拿手动档的凭证去连平台，
+拉取档的 hello 没人应答，而且界面上看不出原因（MQTT 页只是手动配置行
+集体消失）。改这行前后各读一遍 `set_manual` 的注释。
 
-- **拉取档必须关掉手动档**。hello 的应答走 `config/get` 下行，而 `build_subs()` 在
-  手动档**不订这条**（手动档接的是用户自己的 broker，平台那套 topic 订着也是噪音），
-  所以 `ctrl` 进 `pollpull` 前先 `iot.set_manual(false)`。少了这步，hello 发出去
-  必然等满 15s 超时——`iot.lua` 的 build_subs 注释里记着这个坑。
-- **拉取档连的是平台那头**。`mqttcfg.normalize` 只在手动档写入时清 user/pass/topic，
+- **拉取档必须关掉手动档**。`mqttcfg.normalize` 只在手动档写入时清 user/pass，
   `host/port/ssl` 是两档共用字段。手动档用户可能填了自建 broker，带着那个地址发
-  hello 没人应答，只会白等 35s 再报超时，所以 `set_manual(false)` 顺带把
-  host/port/ssl 归位到默认值（`auto.pass` 会带过去，不让用户自己设的平台密码被重置）。
+  hello 没人应答，只会白等 35s 再报超时，所以 `ctrl` 进 `pollpull` 前先
+  `iot.set_manual(false)`，它顺带把 host/port/ssl 归位到默认值
+  （`auto.pass` 会带过去，不让用户自己设的平台密码被重置）。
+  ⚠️ 订阅清单**不再**是切换档位的理由：`build_subs()` 现在除 idle 外三档同一份，
+  手动档也订那 4 条 gw 平台前缀（文档"下行 topic 三路同"）。
 - **档位切换要断开重连**。`S.manual_on` 是在 `try_connect()` 里读的，订阅清单挂在
   conack 上，已连接的 client 不会自己重读。`set_manual()` 因此 `destroy_client()`
   + `kick()`，让 `task_main` 用新档位重连重建订阅。代价只是丢一次心跳周期，
@@ -254,8 +253,8 @@ MQTT 按"首页写入的算连接参数、MQTT 页写入的算手动档凭证"�
 | `host` `port` `ssl` `client_id` | 保留 | 首页「MQTT 服务器」面板可改。⚠️ `ssl` **必须和 host/port 一起保**：同一个 host 的 1883 明文和 8883 TLS 是两条路，只保地址不保 ssl 会把走 TLS 的用户打回明文，表现是"切回来就连不上了" |
 | `auto.pass` | 保留 | 首页填的 MQTT凭证密码，与手动档那个 `pass` 是两份独立的值 |
 | `interval_s` `qos` `allow_no_sn` `keep_session` | 保留 | 共用字段，首页「保存」会一并带走，算"首页写入的内容" |
-| `user` `pass` `pub_topic` `sub_topic` | 清空 | 手动档凭证与 topic，回落默认模板 |
-| `manual_on` | 强制置 `false` | ⚠️ **必须和清值在同一个 `save()` 里完成**。`normalize` 在 `manual_on=true` 时**使用** user/pass/topic，只清值不换档的话设备会拿空凭证匿名连平台——表现是"切回 idle 后再没连上过 MQTT"，且前端 MQTT 页显示成手动档。拆成两次 save，中间任何一次失败都会把设备留在那个失联状态 |
+| `user` `pass` | 清空 | 手动档凭证 |
+| `manual_on` | 强制置 `false` | ⚠️ **必须和清值在同一个 `save()` 里完成**。`normalize` 在 `manual_on=true` 时**使用** user/pass，只清值不换档的话设备会拿空凭证匿名连平台——表现是"切回 idle 后再没连上过 MQTT"，且前端 MQTT 页显示成手动档。拆成两次 save，中间任何一次失败都会把设备留在那个失联状态 |
 
 三个实现细节：
 
@@ -624,23 +623,16 @@ U4（数据上报）见上面 topic 表。这三条与订阅无关，都是 `pub
 > |---|---|---|
 > | `sniff` | `sniff` | 跳过"对本地自建设备无效的配置快照推送" |
 > | `pollpull` | `platform` | 照常推 ConfigSnapshot（拉取档要的就是这个） |
-> | `poll`（手配） | `manual` | 等待人工在平台上配置，**不推任何东西**（已与平台确认） |
 >
-> 判据用 `poll_slot()` 而不是 `get_mode()`：后者对 `poll` 和 `pollpull` 都返回
-> `"poll"`，区分不了手配和拉取；`poll_slot()` 返回 `"poll"`/`"pull"` 正是"当前在采
-> 哪份配置"，与 `manual`/`platform` 的语义一一对应。
+> **`poll` 手动档根本不发 hello**（文档：manual 档**不走 onboarding 链路**）。
+> 档案来源是用户 Web 界面，平台侧不预知具体设备，靠上报 auto-provision 补建 ——
+> 也就是说平台是靠拓扑/数据帧认识这台设备的，不是靠 hello。曾给手动档加过
+> hello + `onboardingMode=manual`，与文档冲突，已回退。
 >
-> **手动档也向平台报到**（`ctrl` 进 `poll` 档时调 `iot.hello`）：手动档连的是
-> 同一个平台 broker，平台靠 hello 知道这台设备在线且在等人工配置。收不到 hello
-> 会判设备离线。失败不回滚切模式 —— 手动档的主职是采用户配的寄存器表，平台那头
-> 看不到不影响采集；真没发出去时由 `task_main` 的"连接后补发"分支兜住。
->
-> ⚠️ 这里改过两次。早期固定报 `platform`，理由是"报 sniff 平台会直接不搭理"；
+> ⚠️ 这里改过一次。早期固定报 `platform`，理由是"报 sniff 平台会直接不搭理"；
 > 拿到更精确的说明后确认：平台见 `sniff` 只是**跳过配置快照推送**，hello 本身照常
 > 处理（建/更新网关设备、回写 fw/hw/ip）。固定 `platform` 的真实代价是 sniff 档
 > 每次 hello/拓扑后都收到一份 193B 空壳快照，还要为它回执，否则平台每 1s 重推。
-> 第二次是把 `poll` 档从 `platform` 改成 `manual` —— 平台 manual 模式下不推东西，
-> 手动档不需要为一份永远不来的快照订 `config/get`。
 >
 > `deviceId` 取 IMEI，取不到报 `"unknown"`（不报空串）。平台校验 `gateway_imei`，
 > 不一致会拒 hello。
@@ -649,22 +641,15 @@ U4（数据上报）见上面 topic 表。这三条与订阅无关，都是 `pub
 > `PULL_TIMEOUT_MS` 只会让前端显示"平台未下发配置(超时)"这种假故障。也不回 U6 ——
 > 没收到 D1 就没有 msgId 可核销。
 >
-> **hello 的两个时机**（都在 `task_main` 已连接分支里判）：
->
-> ① **连接后补发一次**（所有非 idle 档）。进模式那一刻 MQTT 往往还没连上
-> （`set_manual` 刚触发断开重连），`ctrl` 里那次 hello 是静默失败的。判据是
-> `hello_at == 0`（`reset_state` 里"这个连接还没发过"的语义）。`on_mqtt` 的
-> conack 分支会把 `hello_at` 清零 —— `reset_state` 只在 `start()` 时跑，不断线
-> 重连不清的话，重连后这个分支永远不成立，平台看到的是设备中途消失再回来而
-> 没有任何 hello。
-> ② **pollpull 档每 30min 重发**（`HELLO_RE_S`）。平台侧网关档案可能被重置/
+> **pollpull 档每 30min 重发一次**（`HELLO_RE_S`）。平台侧网关档案可能被重置/
 > 白名单到期，设备侧无从得知，只靠上电那一次 hello 会**永久失联且没有任何报错**。
 > 重发不走拉取状态机 —— 平台响应由 `recv_push` 直接落盘，不影响前端正在显示的
 > 拉取结果，也不需要用户再点一次「拉取配置」。
 >
-> 时机②的三个前提都满足才发：`hello_at > 0`、当前是 pollpull 档、`pulling()` 为假
-> （握手中不发，避免和正在等的应答打架）。sniff 档没有"未拿到配置"这个状态、
-> 手动档平台不推东西，两档都**不做周期重发** —— 发了只会无意义地刷新档案。
+> 三个前提都满足才发：`hello_at > 0`（这个连接发过 hello，否则开机白发一次）、
+> 当前是 pollpull 档、`pulling()` 为假（握手中不发，避免和正在等的应答打架）。
+> sniff 档没有"未拿到配置"这个状态、手动档不走 onboarding 链路，两档都**不做
+> 周期重发** —— 发了只会无意义地刷新档案。
 >
 > hello 发送失败按 **1s/3s/9s** 退避重发（`HELLO_BACKOFF_S`），3 次都不成才报
 > `hello 发送失败`。不立即判死是因为失败多半是 `refresh_subs` 刚把 client 抽走，
@@ -734,11 +719,11 @@ handle_downlink
 
 | 用途 | topic | 说明 |
 |---|---|---|
-| 上报（发布） | `/sys/thing/node/property/post/{sn}-{n}` | 数据面（U4）。`{n}` = 子设备序号，**从机地址升序**：一份轮询配置只有一个 slave 恒为 `-1`，sniff 档多从机才递增。`-{n}` 后缀不能省，缺了平台无法把数据归属到子设备、上报等于白发。**前端可改**（`mqttcfg.pub_topic`，改的是 `{sn}` 前那段） |
+| 上报（发布） | `/sys/thing/node/property/post/{sn}-{n}` | 数据面（U4）。`{n}` = 子设备序号，**从机地址升序**：一份轮询配置只有一个 slave 恒为 `-1`，sniff 档多从机才递增。`-{n}` 后缀不能省，缺了平台无法把数据归属到子设备、上报等于白发。**固定平台常量**（`cfg.PLATFORM_PUB_TOPIC`），不可改 |
 | 拓扑上报（发布） | `/sys/thing/gw/info/post/{sn}` | U2 建档，带 `nodes[]`。**固定平台常量**（`cfg.PLATFORM_INFO_TOPIC`），不可改 |
 | 网关资源（发布） | `/sys/thing/gw/property/post/{sn}` | U3，`ram_percent`/`uptime_sec`/`cpu_percent`。**固定平台常量**（`cfg.PLATFORM_RES_TOPIC`），不可改 |
 | 指令回执（发布） | `/sys/thing/gw/function/post/{targetSN}` | U7，D2/D3 执行后回 `[{id,value}]`，失败项 `value:null`。**固定平台常量**（`cfg.PLATFORM_FPOST_TOPIC`），不可改 |
-| 订阅（下行） | `/sys/thing/gw/config/get/{sn}` | 主下行通道：平台配置下发 + 普通指令都走它。**前端可改**（`mqttcfg.sub_topic`） |
+| 订阅（下行） | `/sys/thing/gw/config/get/{sn}` | 主下行通道：平台配置下发 + 普通指令都走它。**固定平台常量**（`cfg.PLATFORM_GET_TOPIC`），不可改 |
 | hello | `/sys/thing/gw/config/hello/{sn}` | 拉取握手，`{sn}` = 设备 SN。**固定平台常量**（`cfg.PLATFORM_HELLO_TOPIC`），不可改 |
 | 服务调用 | `/sys/thing/gw/function/get/{sn}` | 平台三类下行之一，conack 时订阅。**固定平台常量**（`cfg.PLATFORM_FUNC_TOPIC`） |
 | 属性设置 | `/sys/thing/gw/property/set/{sn}` | 同上（`cfg.PLATFORM_PSET_TOPIC`） |
@@ -747,30 +732,31 @@ handle_downlink
 | 上报（平台） | `/sys/thing/node/property/post/{SN}-1` | 拉取结果里回给前端展示，当前不订阅 |
 | 下行命令（平台） | `/sys/thing/gw/function/get/{SN}` | 拉取结果里回给前端展示，当前不订阅 |
 
-> 上表只有 **发布 / 订阅 2 条**带 `{sn}` 的是模板、可从前端改；其余 4 条
-> （hello / 服务调用 / 属性设置 / 属性查询）已按"代码精简"从 `mqttcfg` 配置项
-> 里删除，改为 `core/config.lua` 的 `PLATFORM_*_TOPIC` 固定常量。这 4 条平台侧
-> 几乎不会变，每配一条就要在 normalize、`build_subs`、`effective`、前端表单里
-> 各留一份逻辑。**发布/订阅行为完全不变**，只是不能再从界面改。
-> 2 条模板都存在 `mqtt_cfg` 这一条 fskv 里，落盘上限已从 512 抬到 **2048**——
-> 原上限下 host(128)+clientId(128) 就会到 300B+，加上 2 条 topic 仍可能超。
-> 缺字段的键用设备默认值补，所以老固件/老配置（带 hello/func/pset/pget 键）
-> 也能正常加载，多出来的键被忽略。
+> **上表全部是固定平台常量，一条都不可从前端改。**
+> 平台文档明确这些 topic **三路同**（sniff / platform / manual 三个档位完全一样），
+> 所以没有"按档位配不同 topic"的需求。曾把发布/订阅两条做成 `mqttcfg.pub_topic`
+> / `sub_topic` 可配，用户按自己的命名填了一份，数据就发去了文档外的 topic，
+> 平台按 `/sys/thing/...` 收，两边谁都不知道 —— 现在已删除这两个配置项。
+> 每配一条就要在 normalize、`build_subs`、`effective`、前端表单里各留一份逻辑，
+> 按"代码精简"要求全部收敛到 `core/config.lua` 的 `PLATFORM_*_TOPIC`。
+> `mqtt_cfg` 这条 fskv 里只剩连接参数和凭证，落盘上限 **2048**。
+> 缺字段的键用设备默认值补，所以老固件/老配置（带 topic 键）也能正常加载，
+> 多出来的键被忽略。
 >
 > #### `mqtt_cfg` 的字段分档
 >
 > | 分组 | 字段 | 说明 |
 > |---|---|---|
 > | 共用 | `host` `port` `ssl` `client_id` `interval_s` `qos` `allow_no_sn` `keep_session` | 自动档和手动档建连都读这份 |
-> | 手动档 | `user` `pass` `pub_topic` `sub_topic` | 只有 `manual_on` 为真时才用。置假时 `normalize` 会把它们清空，回到默认模板 |
+> | 手动档 | `user` `pass` | 只有 `manual_on` 为真时才用。置假时 `normalize` 会把它们清空 |
 > | 自动档 | `auto.pass` | 首页「MQTT凭证密码」。`profile()` 里用户名固定留空 → `try_connect` 兜底填 SN |
 > | 开关 | `manual_on` | 当前档位。`W:MQTT` 下发；`R:MQTT` 的 `manual_on` / `auto_pass` 给前端回显 |
 >
 > 前端两页分别写不同键：首页「MQTT 服务器」写 `auto_pass`（+ 共用的地址/端口/ClientID），
-> 「MQTT配置」页写 `user`/`pass`/`pub_topic`/`sub_topic` + `manual_on`。
+> 「MQTT配置」页写 `user`/`pass` + `manual_on`。
 > **两个密码必须分成两个键**，否则前端无法表达"这次改的是哪一档"，改一个就会把另一个冲掉。
 
-> 业务订阅模板默认与「配置下发」topic 同形，所以 conack 时会去重（同一 topic 只订一次），
+> 业务订阅与「配置下发」topic 同形（都是 `config/get`），所以 conack 时只会订到一条，
 > 且下行分流只在拉取状态机 `waiting` 时才把该 topic 的报文当配置包收，其余按普通指令解析。
 >
 > **例外：平台主动重推**。同一条 `config/get` topic 上，用户没点拉取时平台也能主动推
@@ -779,24 +765,25 @@ handle_downlink
 
 #### conack 时的订阅清单（`iot.build_subs()`）
 
-**按 `manual_on` 分两套，订阅条数直接反映档位**：
+**除 idle 外三档同一份，固定 4 条**（文档"下行 topic 三路同"）：
 
 | 档位 | 订几条 | 清单 |
 |---|---|---|
-| 自动档 | 4 条 | 4 条 gw 平台前缀（`sub_topic` 默认模板与 `config/get` 同形，去重后不额外占位） |
-| 手动档 | **1 条** | 只有用户填的 `sub_topic`，4 条 gw 平台前缀**一条都不订** |
+| idle | 0 条 | 什么都不订 |
+| poll / pollpull / sniff | **4 条** | `config/get` + `function/get` + `property/set` + `property/get` |
 
 平台下发恒用 **gw 前缀**（`node` 前缀是子设备上行专用，不能混），末段是目标裸 SN：
 
 | topic | 用途 |
 |---|---|
-| `/sys/thing/gw/config/get/{SN}` | **无条件订阅**（仅自动档）。业务 `sub_topic` 被用户改到别处时，这条仍要订，否则拉取链路断了 |
-| `{sub}` | 用户自配的业务订阅（改过 sub_topic 时才会与上一条不同） |
+| `/sys/thing/gw/config/get/{SN}` | **无条件订阅**。拉取链路 + 普通指令都走它 |
 | `/sys/thing/gw/function/get/{SN}` | 服务调用，固定平台常量（`cfg.PLATFORM_FUNC_TOPIC`） |
 | `/sys/thing/gw/property/set/{SN}` | 属性设置，固定平台常量（`cfg.PLATFORM_PSET_TOPIC`） |
 | `/sys/thing/gw/property/get/{SN}` | 属性查询，固定平台常量（`cfg.PLATFORM_PGET_TOPIC`） |
 
-后三条**读固定常量而不是配置**：这三条模型侧也改不了，没必要给它留配置项。
+四条**全是固定常量**，不读任何配置。曾按 `manual_on` 分流（手动档只订用户填的
+`sub_topic`），导致 sniff 沿用切入前那份清单：从 idle 进 sniff 会是空的，从手动配置
+进 sniff 又少订 4 条平台 topic，平台下发到设备全丢。三档统一后这条歧路没有了。
 去重逻辑不变（与 `config/get` 同形时仍只订一次）。
 
 **手动档为什么一条 gw 都不订**：手动档接的是用户自己的 broker 和自己的 topic

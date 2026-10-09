@@ -1,48 +1,45 @@
-# onboardingMode = "manual" 已实现
+# 平台文档（2026-10-09 用户贴图确认）：三档的 topic / 链路差异
 
-## 结论（2026-10-09 与平台确认）
+## 原文要点
 
-| 档位 | 上报的 onboardingMode | 平台行为 |
+| 维度 | sniff | platform | manual |
+|---|---|---|---|
+| onboarding 链路 | 照走，上电即报到；嗅探设备被互斥跳过，不被平台覆盖 | 必走，按快照建/改设备 | **不走**（用户界面手配，档案来源=用户） |
+| 设备档案来源 | 本地自建（嗅探来源，锁定） | 平台配置下发快照应用 | 用户 Web 界面 |
+| 谁先知道档案 | 网关先知道（嗅探得出）→ 上报让平台也自动建 | 平台先知道（预配+快照源）→ 下发网关落库 | 网关先知道（本地手配）；平台不预知，靠上报 auto-provision 补建 |
+| 拓扑上报 | 接受后指纹变化自动发 | 应用后指纹变化自动发 | 设备上线后自动发 |
+| 数据上报 topic | \| \| \| **三路同**：`/sys/thing/gw/property/post/{sn}` + `/sys/thing/node/property/post/{gwSn}-{n}` \| \| \| |
+| 下行 topic | \| \| \| **三路同**：`/sys/thing/gw/function/get/{target}` 等 4 条 \| \| \| |
+| ack 回执 | \| \| \| **三路同**：`/sys/thing/gw/function/post/{target}` \| \| \| |
+| 平台鉴权 | onboard 下发（或出厂预烧录）：clientId 兼容 4/5/6 段 + `gw_<sn>` + 密码 | 同左（同一条控制连接） | 用户手填 broker + clientId 兼容 4/5/6 段 + 账密；同样受白名单三条件约束 |
+| 平台侧门槛 | 网关产品已发布 + 凭证 + devcom_gateway 三条件 | 同左 + 子设备产品/映射表 | 同左；username 非 `gw_` 老形态可跳过认证白名单，但 auto-provision 门禁仍查表 |
+| 数据通道 | \| \| \| **三路同**：复用同一条 MQTT 控制连接，同 broker 不建第二条 \| \| \| |
+
+## 核心结论
+
+**三档在 topic 层面完全统一**，差别只在「档案从哪来」和「要不要走 onboarding 握手」。
+所以 topic 全部收敛成 `core/config.lua` 的 `PLATFORM_*_TOPIC` 固定常量，
+`mqttcfg.pub_topic` / `sub_topic` 两个配置项已删除。
+
+## 本次按这张表改了什么
+
+| # | 改动 | 文件 |
 |---|---|---|
-| `sniff`（旁听档） | `sniff` | 跳过"对本地自建设备无效的配置快照推送" |
-| `pollpull`（平台拉取档） | `platform` | 照常推 ConfigSnapshot |
-| `poll`（手工配置档） | `manual` | **等待人工在平台上配置，不推任何东西** |
+| 1 | 回退手动档 hello（文档：manual 不走 onboarding 链路，平台靠上报 auto-provision 补建，不是靠 hello）。`onboardingMode` 回到 sniff/platform 两态，`M.hello()` 导出和 `ctrl` 里的调用删掉，`task_main` 的连接后补发分支和 conack 的 `hello_at=0` 也一并回退 | `iot.lua` `ctrl.lua` |
+| 2 | `build_subs()` 除 idle 外三档同一份 4 条 gw 平台前缀（原来 poll 手动档只订用户填的那条） | `iot.lua` |
+| 3 | U4 数据上报改走 `cfg.PLATFORM_PUB_TOPIC` + `-{n}`，不再吃 `S.pub` | `iot.lua` |
+| 4 | 删 `pub_topic`/`sub_topic` 配置项 + 前端两个输入框 + 「生效发布/生效订阅」两个状态栏 + `.auto-only` CSS | `mqttcfg.lua` `app.js` `index.html` |
 
-关键事实（平台确认）：
-- `manual` 模式下平台**不推任何东西** —— 不是"跳过快照"，是根本不发
-- 手动档连的是**同一个平台 broker**（`dz.voltkun.com`），所以 hello 发过去有人收
+## 踩过的坑：topic 可配 = 数据发去文档外
 
-## 实现要点
+曾把发布/订阅两条做成 `mqttcfg.pub_topic` / `sub_topic` 可配。用户按自己的命名
+（`/10/<sn>/property/post` 这类）填了一份，设备就老老实实发去那儿，而平台按
+`/sys/thing/...` 收 —— **两边谁都不知道，没有任何报错**，症状只是"平台收不到数据"。
+MQTTX 订阅用户填的那个 topic 也看不到，因为 `publish()` 还会拼 `-{n}` 后缀
+（`base .. "-" .. it.idx`），实际发的是 `/10/<sn>/property/post-1`。
 
-`send_hello()` 的判据用 `poll_slot()` 而不是 `get_mode()`：
-
-```lua
-local onboard = get_mode() == "sniff" and "sniff"
-    or (poll_slot() == "poll" and "manual" or "platform")
-```
-
-`get_mode()` 对 `poll` 和 `pollpull` **都返回 `"poll"`**，区分不了手配和拉取；
-`poll_slot()` 返回 `"poll"`/`"pull"`，正是"当前在采哪份配置"，与 `manual`/`platform`
-一一对应。
-
-手动档的触发链路（`pollpull`/`sniff` 原本就有，不用改）：
-1. `ctrl.switch_mode` 进 `poll` 档 → `iot.hello()`（新增导出，只发一次不等应答）
-2. `task_main` 已连接分支的"连接后补发"：`hello_at == 0` 时发，覆盖所有非 idle 档。
-   这一条是必须的 —— 进模式那一刻 `set_manual` 刚触发断开重连，步骤 1 那次 hello
-   往往是静默失败的
-3. `on_mqtt` 的 conack 分支把 `hello_at` 清零。`reset_state()` 只在 `start()` 时跑，
-   不断线重连不清的话，重连后步骤 2 的分支永远不成立
-
-周期重发**仍然只有 pollpull 档**做（`HELLO_RE_S`=30min）：sniff 档没有"未拿到配置"
-这个状态，手动档平台不推东西，发了只会无意义地刷新档案。
-
-## 曾经为什么不实现
-
-文档原文只定义了 `sniff` 的行为，`manual` 收到会怎样没有写。当时担心三种可能：
-和 `sniff` 一样跳过推送（报了没坏处）/ 跳过 hello 建档（永久失联）/ 拒 hello。
-借 `platform` 也不会造成实际问题（`poll` 档不订 `config/get`，推了也收不到）。
-向平台确认后上述担忧都不成立，才补上。
+教训：**平台文档说"三路同"的字段，不要给它留配置项**。可配只会让三个档画出
+不同的清单，平台那头对不上，而这种故障没有任何一侧会报错。
 
 ## 相关
-- `lua/README.md` 的 hello 小节有完整的两时机说明
-- `lua/core/config.lua` 的 `HELLO_RE_S` / `HELLO_BACKOFF_S` 是 hello 重发参数
+- `lua/README.md` 的「topic」与「conack 时的订阅清单」两节已按本表重写

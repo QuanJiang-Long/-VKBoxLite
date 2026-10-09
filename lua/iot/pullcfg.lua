@@ -1,7 +1,6 @@
 local corelib = require "core/corelib"
 local cfg = require "core/config"
 local cfgstore = require "cfg"
-local mqttcfg = require "iot/mqttcfg"
 local log = corelib.log()
 local json = corelib.try("json")
 
@@ -182,18 +181,6 @@ local function props_to_regs(props, limit)
     end
     return regs, skipped, renamed
 end
-
--- 拉取成功后回给前端展示的两个 topic 成品，取当前档次实际生效的那两条
--- （手动档 = 前端填的模板，自动档 = 默认模板），不是写死的平台常量。
--- hello 与另外 3 条下行订阅都是设备端固定常量，不随配置变，前端也没有
--- 对应输入框，所以都不回显。
-local function topics(sn)
-    if not sn or sn == "" then return nil end
-    local prof = mqttcfg.profile(sn)
-    if not prof then return nil end
-    return { pub = prof.pub, sub = prof.sub }
-end
-M.topics = topics
 
 -- 解析平台下发的整包 JSON。
 -- 只提取 commInterfaces / devices.addr / tsl.properties; 不写 fskv, 不重启轮询。

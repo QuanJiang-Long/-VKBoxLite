@@ -34,18 +34,23 @@ M.MQTT_ALLOW_NO_SN = false
 M.PLATFORM_VENDOR = "VKBoxLite"
 M.PLATFORM_MODEL = "VKBox-Lite"
 M.PLATFORM_GET_TOPIC = "/sys/thing/gw/config/get/%s"
--- ⚠️ 没有 PLATFORM_POST_TOPIC：上报 topic 只有一个来源 —— mqttcfg.default
--- .pub_topic。曾在这里重复定义过一份带 "-1" 后缀的，全仓库零引用，留错的那个
--- 迟早有人照它改代码。发布 topic 要改就改 mqttcfg.default.pub_topic
+-- ⚠️ 没有 PLATFORM_POST_TOPIC：上报 topic 只有一个来源 —— 发布/订阅的成品
+-- topic 全在 iot.lua 里由下面这几个常量拼。曾在这里重复定义过一份带 "-1"
+-- 后缀的，全仓库零引用，留错的那个迟早有人照它改代码
 -- U6 应用回执：msgId 必须与 D1 下发包里的一致，平台据此核销待下发登记
 M.PLATFORM_REPLY_TOPIC = "/sys/thing/gw/config/reply/%s"
--- 另外 5 条固定 topic。原先存在 mqttcfg 里可配（前端 6 个 topic 输入框），
--- 按"代码精简"要求删除配置项后改为写死常量：这 5 条改动概率极低，每配一条
--- 就要在前端、mqttcfg.normalize、build_subs、effective 里各留一份逻辑。
--- 发布/订阅仍可配（mqttcfg.pub_topic / sub_topic），那两条业务上真会改。
+-- 另外几条固定 topic。原先存在 mqttcfg 里可配（前端 6 个 topic 输入框），
+-- 按"代码精简"要求删除配置项后改为写死常量：改动概率极低，每配一条就要在
+-- 前端、mqttcfg.normalize、build_subs、effective 里各留一份逻辑。
+-- 平台文档明确这些 topic 三路同（sniff/platform/manual 完全一样），可配只会
+-- 让三个档画出不同的清单，平台那头对不上。
+-- 发布/订阅两条（PUB_T/SUB_T）同理，已从配置项删除，见下面。
 -- hello 是拉配置时的自述通道；func/pset/pget 是平台三类下行的订阅通道，
 -- 少订一条平台那类下发就永远收不到且无报错。
 M.PLATFORM_HELLO_TOPIC = "/sys/thing/gw/config/hello/%s"
+-- U4 子设备数据上报: 带 -{n} 发到子设备名上。少了它, 平台认不出数据归属
+-- 哪个子设备, 上报等于白发。{sn} 段是【网关 SN】, -{n} 是从机序号
+M.PLATFORM_PUB_TOPIC = "/sys/thing/node/property/post/%s"
 -- U2 拓扑上报: 带 nodes[] 向平台登记子设备(建档+绑定+物模型)。少了它,
 -- U4 带 -{n} 的数据平台认不出归属哪个子设备, 上报等于白发
 M.PLATFORM_INFO_TOPIC = "/sys/thing/gw/info/post/%s"

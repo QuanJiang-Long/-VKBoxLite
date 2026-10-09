@@ -62,12 +62,6 @@ function M.switch_mode(mode)
             end
             return true, "OK pollpull, pulling"
         end
-        -- 手动档也向平台报到: hello 里报 onboardingMode=manual, 平台据此知道
-        -- 这台设备在线且在等人工配置(manual 模式下平台不推任何东西, 已确认),
-        -- 不会因为收不到 hello 判它离线。失败不回滚: 手动档的主职是采用户配的
-        -- 寄存器表, 平台那头看不到不影响采集。真没发出去时 task_main 连上后
-        -- 会补发(见 iot.lua 的 hello on connect 分支)
-        if iot then pcall(iot.hello) end
         return true, "OK poll started"
 
     elseif mode == "sniff" then

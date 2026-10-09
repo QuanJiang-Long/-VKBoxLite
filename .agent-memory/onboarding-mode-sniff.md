@@ -14,36 +14,26 @@
 
 ## 现在的实现（iot.lua send_hello，2026-10-09 更新）
 ```lua
-local onboard = get_mode() == "sniff" and "sniff"
-    or (poll_slot() == "poll" and "manual" or "platform")
+local onboard = get_mode() == "sniff" and "sniff" or "platform"
 ```
 - `sniff` 档 → `"sniff"`，发完 hello 直接 `pull_finish("done", ...)`，
   **不进 waiting**（等也等不到，干等只会显示"平台未下发配置(超时)"的假故障），
   也**不回 U6**（没收到 D1 就没有 msgId 可核销）
 - `pollpull` 档 → `"platform"`，照常等 D1
-- `poll` 手配档 → `"manual"`（平台确认：manual 模式下**不推任何东西**，
-  且手动档连的是同一个平台 broker，所以 hello 发过去有人收）
+- **`poll` 手动档根本不发 hello**（文档：manual 档**不走 onboarding 链路**，
+  档案来源是用户 Web 界面，平台侧不预知具体设备，靠上报 auto-provision 补建）。
+  曾给手动档加过 hello + `onboardingMode=manual`，与文档冲突，已回退。
 
-⚠️ **判据必须用 `poll_slot()` 不能用 `get_mode()`**：`get_mode()` 对 `poll` 和
-`pollpull` **都返回 `"poll"`**，区分不了手配和拉取。`poll_slot()` 返回
-`"poll"`/`"pull"`，正是"当前在采哪份配置"，与 `manual`/`platform` 一一对应。
-写错过一次，后果是拉取档报成 `manual`，平台不推配置，前端显示超时。
-
-## 手动档的 hello 触发链路（2026-10-09 新增）
-手动档以前完全不发 hello，平台看不到设备在线。现在三条：
-1. `ctrl.switch_mode` 进 `poll` 档 → `iot.hello()`（新导出，只发一次不等应答）。
-   `M.hello` 必须声明在 `send_hello` **之后** —— `local function` 是词法作用域，
-   写在前面会解析到全局 nil，运行时报 "attempt to call a nil value"。
-   `check_lua.py` 的前向引用检查会抓到这个
-2. `task_main` 已连接分支的"连接后补发"：`hello_at == 0` 时发，覆盖所有非 idle 档。
-   **这一条是必须的** —— 进模式那一刻 `set_manual` 刚触发断开重连，第 1 条那次
-   hello 往往是静默失败的
-3. `on_mqtt` 的 conack 分支把 `hello_at` 清零。`reset_state()` 只在 `start()` 时跑，
-   **不断线重连不清的话，重连后第 2 条的分支永远不成立** —— 平台看到的是设备
-   中途消失再回来而没有任何 hello，manual 档会被判离线
-
-周期重发**仍然只有 pollpull 档**做：sniff 档没有"未拿到配置"状态，手动档平台
-不推东西，发了只会无意义地刷新档案。
+⚠️ `get_mode()` **能**区分 poll / pollpull（靠 `poll.slot()`）：
+```lua
+function M.get_mode()
+    if poll.is_running() then
+        return poll.slot() == "pull" and "pollpull" or "poll"
+    end
+    ...
+```
+我曾在提交说明和 memory 里写过"get_mode 对 poll 和 pollpull 都返回 poll"，
+**那是错的**。用 `poll_slot()` 写 `send_hello` 结果虽然等价，但理由写错了。
 
 ## deviceId
 按文档：IMEI → 网卡 MAC → `"unknown"`。平台校验 `gateway_imei`，不一致**拒 hello**。
@@ -55,7 +45,7 @@ local onboard = get_mode() == "sniff" and "sniff"
 - 三个前提全满足才发：`S.hello_at > 0`（本连接发过 hello，否则开机白发一次）、
   `get_mode() == "pollpull"`、`not pulling()`（握手中不发）
 - 不走拉取状态机：平台响应由 `recv_push` 落盘，不影响前端正在显示的拉取结果
-- 只有 pollpull 档周期重发：sniff 档没有"未拿到配置"状态，手动档平台不推东西
+- 只有 pollpull 档周期重发：sniff 档没有"未拿到配置"状态，手动档不走 onboarding
 - hello 抽成了 `send_hello()`（pull_step 和周期重发共用，返回 `ok, onboardingMode, err`）
 - hello 发送失败按 `cfg.HELLO_BACKOFF_S = {1,3,9}` 退避重发，3 次都失败才报错
   （不无限重发，否则"平台连不上"被藏起来）

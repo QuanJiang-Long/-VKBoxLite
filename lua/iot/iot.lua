@@ -267,11 +267,20 @@ local function build_items()
     return items
 end
 
+-- U4 子设备数据上报。topic 是固定平台常量 PLATFORM_PUB_TOPIC 加 -{n} 后缀:
+--   文档"数据上报 topic"三路同(sniff/platform/manual 都是
+--   /sys/thing/node/property/post/{gwSn}-{n}), 所以不吃任何用户配置 ——
+--   曾把它做成 mqttcfg.pub_topic 可配, 用户按自己的命名填了一份, 数据就
+--   发去了文档外的 topic, 平台按 /sys/thing/... 收, 两边谁都不知道
+-- {gwSn} 是网关 SN(顶层网关自己的设备号), -{n} 是子设备序号。少了 -{n}
+-- 平台认不出数据归属哪个子设备, 上报等于白发
 local function publish()
     if not S.client or not S.connected then return false end
     local items = build_items()
     if #items == 0 then return false end
-    local base = S.pub or ""
+    local did = cur_did()
+    if not did then return false end
+    local base = string.format(cfg.PLATFORM_PUB_TOPIC, did)
     local any = false
     for _, it in ipairs(items) do
         local ok, err = pcall(function()
@@ -535,7 +544,9 @@ local function func_reply(rs)
     return true
 end
 
--- conack 时的订阅清单（文档"订阅关系"）。按运行模式分三档：
+-- conack 时的订阅清单。文档"订阅关系"明确下行 topic 三路同（sniff/platform/
+-- manual 都是 /sys/thing/gw/function/get/{target} 等 4 条），所以除 idle 外
+-- 所有档都订同一份，不再按模式分流：
 --
 -- idle：什么都不订。idle 是"未接任务"的原始态，此时 MQTT 连接可以是通的
 --   （凭证、broker 都与模式无关），但订阅意味着接收平台下行，而拉取配置
@@ -543,25 +554,15 @@ end
 --   下才有意义。idle 订着 = 设备还没开始采数就先挂在平台的接收侧，
 --   看着像已经接了任务，实际一个字节都不会用上。
 --
--- poll（手动配置）：只订 S.sub 一条。手动档接用户自己的 broker 和自己的
---   topic 命名，平台那套 /sys/thing/gw/{sn} 拼出来也没人往那儿发，订着
---   纯属噪音 —— 界面上"订阅Topic"列一堆自己没配过的东西，用户会以为
---   手动配置没生效。
---
--- pollpull / sniff：订 4 条 gw 平台前缀 + S.sub。要点：
---   ① D1(/gw/config/get/{sn}) 必须无条件订上：它是"拉取配置"链路唯一的
---      入口。业务 sub_topic 虽默认同形，但用户改到别处时不能跟着丢，
---      否则 handle_downlink 永远等不到 configSnapshot。
+-- 其余三档：4 条 gw 平台前缀，一条都不能少：
+--   ① D1(/gw/config/get/{sn}) 是"拉取配置"链路唯一的入口
 --   ② function/get + property/set + property/get 是平台侧另外三类下行，
---      也走 gw 前缀，不订就收不到服务调用/属性设置/全量查询。
---      这三条已按"代码精简"写死成 core/config.lua 的平台常量，不再可配。
---   ③ 与 S.sub 同形的先去重再订，同一个 topic 订两遍纯属浪费。
+--      不订就收不到服务调用/属性设置/全量查询，且无报错
+--   这 4 条已按"代码精简"写死成 core/config.lua 的平台常量，不再可配 ——
+--   文档明确三路同，可配只会让三档画出不同的清单，平台那头对不上
 --
--- ⚠️ sniff 必须显式覆盖：它和 poll 共用"自动档"凭证，但早期只按 manual_on
---    分流，导致 sniff 沿用切入前那份清单 —— 从 idle 进 sniff 会是空的，
---    从手动配置进 sniff 又少订 4 条平台 topic，平台下发到设备全丢。
--- ⚠️ 代价：拉取配置在 poll 手动档必然超时，它的应答走 config/get，而该
---    档不订这条。前端已在手动档把「拉取配置」按钮置灰。
+-- ⚠️ 曾按 manual_on 分流过，导致 sniff 沿用切入前那份清单：从 idle 进 sniff
+--    会是空的，从手动配置进 sniff 又少订 4 条平台 topic，平台下发到设备全丢。
 local function build_subs()
     local subs = {}
     local function add(t)
@@ -571,21 +572,13 @@ local function build_subs()
         end
         subs[#subs + 1] = t
     end
-    local mode = get_mode()
-    if mode == "pollpull" or mode == "sniff" then
-        local did = S.device_id
-        if did and did ~= "" then
-            add(string.format(cfg.PLATFORM_GET_TOPIC, did))
-            -- 另外 3 条 gw 下行订阅，固定平台常量。少订一条 = 平台那类
-            -- 下发永远收不到且无报错，所以这三行一条都不能删
-            add(string.format(cfg.PLATFORM_FUNC_TOPIC, did))
-            add(string.format(cfg.PLATFORM_PSET_TOPIC, did))
-            add(string.format(cfg.PLATFORM_PGET_TOPIC, did))
-        end
-    end
-    if mode ~= "idle" then
-        add(S.sub)
-    end
+    if get_mode() == "idle" then return subs end
+    local did = S.device_id
+    if not did or did == "" then return subs end
+    add(string.format(cfg.PLATFORM_GET_TOPIC, did))
+    add(string.format(cfg.PLATFORM_FUNC_TOPIC, did))
+    add(string.format(cfg.PLATFORM_PSET_TOPIC, did))
+    add(string.format(cfg.PLATFORM_PGET_TOPIC, did))
     return subs
 end
 
@@ -609,11 +602,6 @@ local function on_mqtt(cli, event, data, payload)
         S.connected = true
         S.backoff = 1
         S.reject_reason = nil
-        -- 每个新连接都要重新报到。reset_state 只在 start() 时跑, 不断线重连
-        -- 不会清 hello_at —— 不清的话重连后 task_main 的"连接后补发"分支
-        -- (判 hello_at == 0)永远不成立, 平台那头看到的是设备中途消失再回来,
-        -- 而没有任何 hello, manual 档会被判离线
-        S.hello_at = 0
         local subs = build_subs()
         S.subs = subs
         S.subscribed = false
@@ -683,13 +671,11 @@ local function try_connect()
         did = "unknown"
     end
     S.device_id = did
-    -- 无 SN 时把 "unknown" 视作无 id: topic 含 {id} 会被拒, 不会把字面
-    -- unknown 拼进 topic(与原工程一致)
-    -- 凭证和 topic 按 manual_on 取: 手动档用前端填的, 自动档用 SN 用户名
-    -- + 首页那份 MQTT凭证密码 + 默认模板(见 mqttcfg.profile)
-    local prof, terr = mqttcfg.profile(did == "unknown" and nil or did)
+    -- 凭证按 manual_on 取: 手动档用前端填的, 自动档用户名留空(iot 兜底填 SN)
+    -- + 首页那份 MQTT凭证密码(见 mqttcfg.profile)。topic 不在这条链上,
+    -- 三路同全是固定常量, 由各发送函数自己拼
+    local prof, terr = mqttcfg.profile()
     if not prof then return false, terr end
-    S.pub, S.sub = prof.pub, prof.sub
     -- B 模型: clientId = "SN_"(见 default_client_id), username = 裸 SN,
     -- 密码是平台签发的凭证密码。
     -- 填了 client_id/user 才用手填值, 否则一律按平台格式兜底
@@ -1154,12 +1140,6 @@ function M.pull_status()
         r.poll = p.result.poll
         r.skipped = p.result.skipped
         r.renamed = p.result.renamed
-        -- 只带发布/订阅两个 topic 成品给前端回显（自动模式填输入框）。
-        -- hello/func/pset/pget 4 条已不可配，前端也没有对应输入框
-        local t2 = pullcfg.topics(device_id())
-        r.mqtt = {
-            pub = t2 and t2.pub, sub = t2 and t2.sub,
-        }
     end
     -- 回执状态单独给：前端据此提示"已回执"还是"平台还在重推"
     r.msg_id = p.msg_id
@@ -1184,10 +1164,9 @@ local function send_hello()
     if not S.client or not S.connected then return false, "未连接" end
     local did = device_id()
     if not did or did == "" then return false, "无 SN" end
-    -- hello topic 走固定平台常量(不再可配); 无 SN 时 resolve_hello 返回 nil，
-    -- 这时候发出去就是把不带 SN 的 topic 发给平台
-    local topic = mqttcfg.resolve_hello(did)
-    if not topic then return false, "hello topic 解析失败(无 SN)" end
+    -- hello topic 走固定平台常量(不再可配)。上面已经判过无 SN, 这里
+    -- did 一定是非空串, format 拼出来就是带 SN 的完整 topic
+    local topic = string.format(cfg.PLATFORM_HELLO_TOPIC, did)
     -- topicFormat 固定 v3：自述 topic 形状，消除"平台硬编码旧版 / 固件烧新版"
     -- 漂移导致下行 topic 错位（指令全丢且无报错）。
     --
@@ -1196,16 +1175,11 @@ local function send_hello()
     --               sniff 档的寄存器表来自本地旁听推断, 平台推过来的只会是 193B
     --               空壳(devices/properties/commInterfaces 全空), 收了还得回执,
     --               不回执平台每 1s 重推一次
-    --   manual    → 平台等待人工在平台上配置, 不推快照(已与平台确认: manual
-    --               模式下平台不推任何东西)。手动档也连的是同一个平台 broker,
-    --               所以报 manual 是有意义的 —— 平台据此知道这台设备在线且在等
-    --               人工介入, 不会判它离线
     --   platform  → 平台照常推 ConfigSnapshot(pollpull 档要的就是这个)
-    -- 判据用 poll_slot() 而不是 get_mode(): get_mode() 对 poll 和 pollpull 都
-    -- 返回 "poll", 区分不了手配和拉取; poll_slot() 返回 "poll"/"pull" 正是
-    -- "当前在采哪份配置", 与 manual/platform 的语义一一对应
-    local onboard = get_mode() == "sniff" and "sniff"
-        or (poll_slot() == "poll" and "manual" or "platform")
+    -- manual 不报: 文档明确 manual 档【不走 onboarding 链路】, 档案来源是用户
+    -- Web 界面, 平台侧不预知具体设备, 靠上报 auto-provision 补建。手动档发 hello
+    -- 是多余的, 平台收到了也没有对应的建档流程
+    local onboard = get_mode() == "sniff" and "sniff" or "platform"
     -- deviceId 按文档取 IMEI，取不到报 "unknown"（不报空串：平台校验
     -- gateway_imei，空串和缺字段是两回事）。不一致会被拒 hello
     local dv = imei()
@@ -1224,16 +1198,6 @@ local function send_hello()
     -- 的 30min 重发。reset_state 里置 0 表示这个连接还没发过, 计时不起跑
     S.hello_at = os.time()
     return true, onboard
-end
-
--- 向平台报到一次 hello, 不进拉取状态机(不等 configSnapshot)。
--- 给手动档用: ctrl 进 poll 档时调, 让平台知道这台设备在线且在等人工配置
--- (hello 里报 onboardingMode=manual, 平台不推任何东西)。
--- 失败不回滚切模式 —— 进模式那一刻 MQTT 可能还没连上(set_manual 刚触发
--- 断开重连), 补发由 task_main 的"连接后补发"分支负责
-function M.hello()
-    if not S.client or not S.connected then return false, "未连接" end
-    return send_hello()
 end
 
 local function pull_finish(state, msg, result)
@@ -1461,28 +1425,22 @@ local function task_main()
                 end
             end
             if sys then sys.wait(1000) end
-            -- hello 的两个时机: 连接后补发一次 + pollpull 档 30min 周期重发。
-            -- 放在 sys.wait 之后，保证每轮循环只判一次、且不和本轮的上报挤在一起
+            -- 周期重发 hello。放在 sys.wait 之后，保证每轮循环只判一次、且不和
+            -- 本轮的上报挤在一起
             --
-            -- ① 连接后补发。进模式那一刻 MQTT 往往还没连上(set_manual 刚触发
-            --    断开重连), ctrl 里那次 hello 是静默失败的。这里保证每个连接
-            --    至少发一次, 且【所有非 idle 档都要】: 手动档也连的是同一个平台
-            --    broker, 平台靠 hello 知道设备在等人工配置(onboardingMode=
-            --    manual), 收不到会判设备离线。
-            --    hello_at == 0 是 reset_state 里"这个连接还没发过"的语义, 正好复用
-            -- ② 只对 pollpull 档周期重发：那是唯一"在等平台下发配置"的档。sniff 档
-            --    的 hello 发完就判完成，没有"未拿到配置"这个状态；手动档平台不推
-            --    东西(manual 模式已确认)，重发只会无意义地刷新档案。
+            -- 只对 pollpull 档：那是唯一"在等平台下发配置"的档。sniff 档的 hello
+            -- 发完就判完成，没有"未拿到配置"这个状态；manual 档不走 onboarding
+            -- 链路(档案来源是用户 Web 界面，平台靠上报 auto-provision 补建)，
+            -- 发 hello 没有对应的建档流程，重发只会无意义地刷新档案。
             --
             -- 平台收到 hello 会重推 ConfigSnapshot，由 recv_push 自动落盘 ——
             -- 不走拉取状态机，所以不影响前端正在显示的拉取结果，也不需要用户
             -- 再点一次「拉取配置」。这正是文档"未拿到配置前每 30min 重发"的用途：
             -- 平台侧档案被重置/白名单到期时，设备侧无从得知，只靠上电那一次 hello
             -- 会永久失联且没有任何报错
-            if S.hello_at == 0 and get_mode() ~= "idle" and not pulling() then
-                log.info("iot", "hello on connect, mode=" .. get_mode())
-                pcall(send_hello)
-            elseif S.hello_at and S.hello_at > 0 and get_mode() == "pollpull"
+            --
+            -- hello_at == 0(这个连接还没发过 hello) 时不起跑，否则开机就白发一次
+            if S.hello_at and S.hello_at > 0 and get_mode() == "pollpull"
                 and not pulling()
                 and (os.time() - S.hello_at) >= cfg.HELLO_RE_S then
                 log.info("iot", "hello re-send (30min), mode=pollpull")
@@ -1532,9 +1490,9 @@ end
 
 function M.status()
     local c = mqttcfg.load()
-    -- 未建连时按当前档次兜底算一份, 与 try_connect 同源, 否则这两行在
-    -- 建连前是空的, 而 CONACK 0x05 时现场最需要看的正是这两个值
-    local prof = mqttcfg.profile(device_id())
+    -- 未建连时按当前档次兜底算一份, 与 try_connect 同源, 否则这个值在
+    -- 建连前是空的, 而 CONACK 0x05 时现场最需要看的正是它
+    local prof = mqttcfg.profile()
     return {
         want_run = S.want_run,
         connected = S.connected,
@@ -1544,8 +1502,6 @@ function M.status()
         user = S.user or ((prof and prof.user ~= "" and prof.user) or device_id()),
         keep_session = c.keep_session,
         manual_on = c.manual_on,
-        pub = S.pub or (prof and prof.pub),
-        sub = S.sub or (prof and prof.sub),
         host = c.host,
         port = c.port,
         interval_s = c.interval_s,
