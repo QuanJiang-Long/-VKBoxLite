@@ -55,7 +55,8 @@ end
 
 function M.push_raw_rx(hex)
     stat.raw = stat.raw + 1
-    ring_add("rx " .. hex)
+    -- 发布版不写 ring: hex dump 纯开发调试, B 类指令 R:FRAMES 已禁用
+    if not _G.BUILD_RELEASE then ring_add("rx " .. hex) end
 end
 
 function M.get_all_latest()
