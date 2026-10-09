@@ -1,41 +1,48 @@
-# 待办：onboardingMode = "manual" 尚未实现
+# onboardingMode = "manual" 已实现
 
-## 现状
-`lua/iot/iot.lua` 的 `send_hello()` 只报两个值：
+## 结论（2026-10-09 与平台确认）
+
+| 档位 | 上报的 onboardingMode | 平台行为 |
+|---|---|---|
+| `sniff`（旁听档） | `sniff` | 跳过"对本地自建设备无效的配置快照推送" |
+| `pollpull`（平台拉取档） | `platform` | 照常推 ConfigSnapshot |
+| `poll`（手工配置档） | `manual` | **等待人工在平台上配置，不推任何东西** |
+
+关键事实（平台确认）：
+- `manual` 模式下平台**不推任何东西** —— 不是"跳过快照"，是根本不发
+- 手动档连的是**同一个平台 broker**（`dz.voltkun.com`），所以 hello 发过去有人收
+
+## 实现要点
+
+`send_hello()` 的判据用 `poll_slot()` 而不是 `get_mode()`：
 
 ```lua
-local onboard = get_mode() == "sniff" and "sniff" or "platform"
+local onboard = get_mode() == "sniff" and "sniff"
+    or (poll_slot() == "poll" and "manual" or "platform")
 ```
 
-| 我们的模式 | 上报的 onboardingMode |
-|---|---|
-| `sniff`（旁听档） | `sniff` |
-| `pollpull`（平台拉取档） | `platform` |
-| `poll`（手工配置档） | **`platform`（借用的，不是 manual）** |
+`get_mode()` 对 `poll` 和 `pollpull` **都返回 `"poll"`**，区分不了手配和拉取；
+`poll_slot()` 返回 `"poll"`/`"pull"`，正是"当前在采哪份配置"，与 `manual`/`platform`
+一一对应。
 
-## 为什么不现在做
-文档原文只定义了 `sniff` 的行为：
+手动档的触发链路（`pollpull`/`sniff` 原本就有，不用改）：
+1. `ctrl.switch_mode` 进 `poll` 档 → `iot.hello()`（新增导出，只发一次不等应答）
+2. `task_main` 已连接分支的"连接后补发"：`hello_at == 0` 时发，覆盖所有非 idle 档。
+   这一条是必须的 —— 进模式那一刻 `set_manual` 刚触发断开重连，步骤 1 那次 hello
+   往往是静默失败的
+3. `on_mqtt` 的 conack 分支把 `hello_at` 清零。`reset_state()` 只在 `start()` 时跑，
+   不断线重连不清的话，重连后步骤 2 的分支永远不成立
 
-> onboardingMode sniff/platform/manual；平台见 sniff 跳过对本地自建设备无效的配置快照推送
+周期重发**仍然只有 pollpull 档**做（`HELLO_RE_S`=30min）：sniff 档没有"未拿到配置"
+这个状态，手动档平台不推东西，发了只会无意义地刷新档案。
 
-`manual` 收到之后平台会怎么处理，**文档没有写**。可能的行为包括：
-- 和 `sniff` 一样跳过配置推送（那我们报了没坏处）
-- 跳过 hello 建档（那我们会永久失联）
-- 拒 hello
+## 曾经为什么不实现
 
-报一个行为未知的风险大于收益。当前借 `platform` 也没造成实际问题：`poll` 档本来就不订
-`config/get`（`build_subs` 只在 `pollpull`/`sniff` 下订平台 topic），平台推了也收不到。
-
-## 要做的时候
-1. 找平台确认 `manual` 的确切行为，**重点是会不会拒 hello / 跳过建档**
-2. 确认后把 `send_hello()` 改成三路：
-   ```lua
-   local ONBOARD = { sniff = "sniff", pollpull = "platform", poll = "manual" }
-   local onboard = ONBOARD[get_mode()] or "platform"
-   ```
-3. 真机验证：`poll` 档进模式后， hello 仍被接受（有 `pullcfg hello ... mode=manual`
-   日志且平台不报错），且 `pollpull`/`sniff` 两档行为不回退
+文档原文只定义了 `sniff` 的行为，`manual` 收到会怎样没有写。当时担心三种可能：
+和 `sniff` 一样跳过推送（报了没坏处）/ 跳过 hello 建档（永久失联）/ 拒 hello。
+借 `platform` 也不会造成实际问题（`poll` 档不订 `config/get`，推了也收不到）。
+向平台确认后上述担忧都不成立，才补上。
 
 ## 相关
-- `lua/README.md` 的 hello 小节有同样的映射表
+- `lua/README.md` 的 hello 小节有完整的两时机说明
 - `lua/core/config.lua` 的 `HELLO_RE_S` / `HELLO_BACKOFF_S` 是 hello 重发参数

@@ -609,6 +609,11 @@ local function on_mqtt(cli, event, data, payload)
         S.connected = true
         S.backoff = 1
         S.reject_reason = nil
+        -- 每个新连接都要重新报到。reset_state 只在 start() 时跑, 不断线重连
+        -- 不会清 hello_at —— 不清的话重连后 task_main 的"连接后补发"分支
+        -- (判 hello_at == 0)永远不成立, 平台那头看到的是设备中途消失再回来,
+        -- 而没有任何 hello, manual 档会被判离线
+        S.hello_at = 0
         local subs = build_subs()
         S.subs = subs
         S.subscribed = false
@@ -1186,15 +1191,21 @@ local function send_hello()
     -- topicFormat 固定 v3：自述 topic 形状，消除"平台硬编码旧版 / 固件烧新版"
     -- 漂移导致下行 topic 错位（指令全丢且无报错）。
     --
-    -- onboardingMode 按当前 485 模式如实报（文档：sniff/platform/manual）：
-    --   sniff     → 平台跳过"对本地自建设备无效的配置快照推送"。这正是我们要的：
-    --               sniff 档的寄存器表来自本地旁听推断，平台推过来的只会是 193B
-    --               空壳（devices/properties/commInterfaces 全空），收了还得回执，
+    -- onboardingMode 按当前 485 档位如实报(文档: sniff/platform/manual):
+    --   sniff     → 平台跳过"对本地自建设备无效的配置快照推送"。这正是我们要的:
+    --               sniff 档的寄存器表来自本地旁听推断, 平台推过来的只会是 193B
+    --               空壳(devices/properties/commInterfaces 全空), 收了还得回执,
     --               不回执平台每 1s 重推一次
-    --   platform  → 平台照常推 ConfigSnapshot（pollpull 档要的就是这个）
-    -- manual 不报：文档没定义平台收到 manual 会怎么处理，只有 sniff 的行为写明
-    -- 了。报一个行为未知的值，风险大于收益
-    local onboard = get_mode() == "sniff" and "sniff" or "platform"
+    --   manual    → 平台等待人工在平台上配置, 不推快照(已与平台确认: manual
+    --               模式下平台不推任何东西)。手动档也连的是同一个平台 broker,
+    --               所以报 manual 是有意义的 —— 平台据此知道这台设备在线且在等
+    --               人工介入, 不会判它离线
+    --   platform  → 平台照常推 ConfigSnapshot(pollpull 档要的就是这个)
+    -- 判据用 poll_slot() 而不是 get_mode(): get_mode() 对 poll 和 pollpull 都
+    -- 返回 "poll", 区分不了手配和拉取; poll_slot() 返回 "poll"/"pull" 正是
+    -- "当前在采哪份配置", 与 manual/platform 的语义一一对应
+    local onboard = get_mode() == "sniff" and "sniff"
+        or (poll_slot() == "poll" and "manual" or "platform")
     -- deviceId 按文档取 IMEI，取不到报 "unknown"（不报空串：平台校验
     -- gateway_imei，空串和缺字段是两回事）。不一致会被拒 hello
     local dv = imei()
@@ -1213,6 +1224,16 @@ local function send_hello()
     -- 的 30min 重发。reset_state 里置 0 表示这个连接还没发过, 计时不起跑
     S.hello_at = os.time()
     return true, onboard
+end
+
+-- 向平台报到一次 hello, 不进拉取状态机(不等 configSnapshot)。
+-- 给手动档用: ctrl 进 poll 档时调, 让平台知道这台设备在线且在等人工配置
+-- (hello 里报 onboardingMode=manual, 平台不推任何东西)。
+-- 失败不回滚切模式 —— 进模式那一刻 MQTT 可能还没连上(set_manual 刚触发
+-- 断开重连), 补发由 task_main 的"连接后补发"分支负责
+function M.hello()
+    if not S.client or not S.connected then return false, "未连接" end
+    return send_hello()
 end
 
 local function pull_finish(state, msg, result)
@@ -1440,21 +1461,28 @@ local function task_main()
                 end
             end
             if sys then sys.wait(1000) end
-            -- 周期重发 hello。放在 sys.wait 之后，保证每轮循环只判一次、且不和
-            -- 本轮的上报挤在一起
+            -- hello 的两个时机: 连接后补发一次 + pollpull 档 30min 周期重发。
+            -- 放在 sys.wait 之后，保证每轮循环只判一次、且不和本轮的上报挤在一起
             --
-            -- 只对 pollpull 档：那是唯一"在等平台下发配置"的档。sniff 档的 hello
-            -- 发完就判完成，没有"未拿到配置"这个状态，重发只会让平台侧无意义地
-            -- 刷新档案。手配档(poll)不订 config/get，推了也收不到。
+            -- ① 连接后补发。进模式那一刻 MQTT 往往还没连上(set_manual 刚触发
+            --    断开重连), ctrl 里那次 hello 是静默失败的。这里保证每个连接
+            --    至少发一次, 且【所有非 idle 档都要】: 手动档也连的是同一个平台
+            --    broker, 平台靠 hello 知道设备在等人工配置(onboardingMode=
+            --    manual), 收不到会判设备离线。
+            --    hello_at == 0 是 reset_state 里"这个连接还没发过"的语义, 正好复用
+            -- ② 只对 pollpull 档周期重发：那是唯一"在等平台下发配置"的档。sniff 档
+            --    的 hello 发完就判完成，没有"未拿到配置"这个状态；手动档平台不推
+            --    东西(manual 模式已确认)，重发只会无意义地刷新档案。
             --
             -- 平台收到 hello 会重推 ConfigSnapshot，由 recv_push 自动落盘 ——
             -- 不走拉取状态机，所以不影响前端正在显示的拉取结果，也不需要用户
             -- 再点一次「拉取配置」。这正是文档"未拿到配置前每 30min 重发"的用途：
             -- 平台侧档案被重置/白名单到期时，设备侧无从得知，只靠上电那一次 hello
             -- 会永久失联且没有任何报错
-            --
-            -- hello_at == 0(这个连接还没发过 hello) 时不起跑，否则开机就白发一次
-            if S.hello_at and S.hello_at > 0 and get_mode() == "pollpull"
+            if S.hello_at == 0 and get_mode() ~= "idle" and not pulling() then
+                log.info("iot", "hello on connect, mode=" .. get_mode())
+                pcall(send_hello)
+            elseif S.hello_at and S.hello_at > 0 and get_mode() == "pollpull"
                 and not pulling()
                 and (os.time() - S.hello_at) >= cfg.HELLO_RE_S then
                 log.info("iot", "hello re-send (30min), mode=pollpull")

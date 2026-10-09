@@ -189,8 +189,8 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 
 | 运行模式 | `W:MODE=` | MQTT 档位 | 配置槽 | 行为 |
 |---|---|---|---|---|
-| poll（手动配置） | `poll` | `manual_on=true` | `ds_poll` | 用手配的寄存器表和 MQTT |
-| poll（拉取配置） | `pollpull` | `manual_on=false` | `ds_pull` | 进入即自动 hello 拉平台配置 |
+| poll（手动配置） | `poll` | `manual_on=true` | `ds_poll` | 用手配的寄存器表和 MQTT，**也向平台发 hello**（`onboardingMode=manual`） |
+| poll（拉取配置） | `pollpull` | `manual_on=false` | `ds_pull` | 进入即自动 hello 拉平台配置（`onboardingMode=platform`） |
 | 旁听 sniff | `sniff` | 无所谓 | 不用 | 只收不发 |
 | 空闲 idle | `idle` | 不变 | 不用 | 不动总线 |
 
@@ -618,21 +618,29 @@ U4（数据上报）见上面 topic 表。这三条与订阅无关，都是 `pub
 > 加 **`topicFormat:"v3"`** 与 **`onboardingMode`** 两个自述字段。
 > 缺 `topicFormat` 平台可能按旧版格式猜下行 topic，导致指令全丢且无报错。
 >
-> **`onboardingMode` 按当前 485 模式如实报**（文档：`sniff`/`platform`/`manual`）：
+> **`onboardingMode` 按当前 485 档位如实报**（文档：`sniff`/`platform`/`manual`）：
 >
-> | 模式 | 上报值 | 平台行为 |
+> | 档位 | 上报值 | 平台行为 |
 > |---|---|---|
 > | `sniff` | `sniff` | 跳过"对本地自建设备无效的配置快照推送" |
 > | `pollpull` | `platform` | 照常推 ConfigSnapshot（拉取档要的就是这个） |
-> | `poll`（手配） | `platform` | 该档不订 `config/get`，推了也收不到 |
+> | `poll`（手配） | `manual` | 等待人工在平台上配置，**不推任何东西**（已与平台确认） |
 >
-> `manual` **不报**：文档只写明了 `sniff` 的行为，`manual` 收到会怎样没有定义，
-> 报一个行为未知的值风险大于收益。待确认后补，见 `NOTES-onboarding-manual.md`。
+> 判据用 `poll_slot()` 而不是 `get_mode()`：后者对 `poll` 和 `pollpull` 都返回
+> `"poll"`，区分不了手配和拉取；`poll_slot()` 返回 `"poll"`/`"pull"` 正是"当前在采
+> 哪份配置"，与 `manual`/`platform` 的语义一一对应。
 >
-> ⚠️ 这里改过一次。早期固定报 `platform`，理由是"报 sniff 平台会直接不搭理"。
+> **手动档也向平台报到**（`ctrl` 进 `poll` 档时调 `iot.hello`）：手动档连的是
+> 同一个平台 broker，平台靠 hello 知道这台设备在线且在等人工配置。收不到 hello
+> 会判设备离线。失败不回滚切模式 —— 手动档的主职是采用户配的寄存器表，平台那头
+> 看不到不影响采集；真没发出去时由 `task_main` 的"连接后补发"分支兜住。
+>
+> ⚠️ 这里改过两次。早期固定报 `platform`，理由是"报 sniff 平台会直接不搭理"；
 > 拿到更精确的说明后确认：平台见 `sniff` 只是**跳过配置快照推送**，hello 本身照常
 > 处理（建/更新网关设备、回写 fw/hw/ip）。固定 `platform` 的真实代价是 sniff 档
 > 每次 hello/拓扑后都收到一份 193B 空壳快照，还要为它回执，否则平台每 1s 重推。
+> 第二次是把 `poll` 档从 `platform` 改成 `manual` —— 平台 manual 模式下不推东西，
+> 手动档不需要为一份永远不来的快照订 `config/get`。
 >
 > `deviceId` 取 IMEI，取不到报 `"unknown"`（不报空串）。平台校验 `gateway_imei`，
 > 不一致会拒 hello。
@@ -641,15 +649,22 @@ U4（数据上报）见上面 topic 表。这三条与订阅无关，都是 `pub
 > `PULL_TIMEOUT_MS` 只会让前端显示"平台未下发配置(超时)"这种假故障。也不回 U6 ——
 > 没收到 D1 就没有 msgId 可核销。
 >
-> **pollpull 档每 30min 重发一次**（`HELLO_RE_S`，在 `task_main` 已连接分支里判）：
-> 平台侧网关档案可能被重置/白名单到期，设备侧无从得知，只靠上电那一次 hello 会
-> **永久失联且没有任何报错**。重发不走拉取状态机 —— 平台响应由 `recv_push` 直接
-> 落盘，不影响前端正在显示的拉取结果，也不需要用户再点一次「拉取配置」。
-> `hello_at` 记的是**本连接内最后一次 hello 成功发送**的时间，`reset_state` 置 0，
-> 所以开机不会白发；新一轮拉取/重连后重新起跑。
-> 三个前提都满足才发：`hello_at > 0`、当前是 pollpull 档、`pulling()` 为假
-> （握手中不发，避免和正在等的应答打架）。
-> sniff / poll 两档**不发**：前者没有"未拿到配置"这个状态，后者不订 `config/get`。
+> **hello 的两个时机**（都在 `task_main` 已连接分支里判）：
+>
+> ① **连接后补发一次**（所有非 idle 档）。进模式那一刻 MQTT 往往还没连上
+> （`set_manual` 刚触发断开重连），`ctrl` 里那次 hello 是静默失败的。判据是
+> `hello_at == 0`（`reset_state` 里"这个连接还没发过"的语义）。`on_mqtt` 的
+> conack 分支会把 `hello_at` 清零 —— `reset_state` 只在 `start()` 时跑，不断线
+> 重连不清的话，重连后这个分支永远不成立，平台看到的是设备中途消失再回来而
+> 没有任何 hello。
+> ② **pollpull 档每 30min 重发**（`HELLO_RE_S`）。平台侧网关档案可能被重置/
+> 白名单到期，设备侧无从得知，只靠上电那一次 hello 会**永久失联且没有任何报错**。
+> 重发不走拉取状态机 —— 平台响应由 `recv_push` 直接落盘，不影响前端正在显示的
+> 拉取结果，也不需要用户再点一次「拉取配置」。
+>
+> 时机②的三个前提都满足才发：`hello_at > 0`、当前是 pollpull 档、`pulling()` 为假
+> （握手中不发，避免和正在等的应答打架）。sniff 档没有"未拿到配置"这个状态、
+> 手动档平台不推东西，两档都**不做周期重发** —— 发了只会无意义地刷新档案。
 >
 > hello 发送失败按 **1s/3s/9s** 退避重发（`HELLO_BACKOFF_S`），3 次都不成才报
 > `hello 发送失败`。不立即判死是因为失败多半是 `refresh_subs` 刚把 client 抽走，
