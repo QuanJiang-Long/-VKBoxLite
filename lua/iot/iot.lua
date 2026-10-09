@@ -602,6 +602,11 @@ local function on_mqtt(cli, event, data, payload)
         S.connected = true
         S.backoff = 1
         S.reject_reason = nil
+        -- 每个新连接都要重新报到。reset_state 只在 start() 时跑, 不断线重连
+        -- 不会清 hello_at —— 不清的话重连后 task_main 的"连接后补发"分支
+        -- (判 hello_at == 0)永远不成立, 平台那头看到的是设备中途消失再回来,
+        -- 而没有任何 hello
+        S.hello_at = 0
         local subs = build_subs()
         S.subs = subs
         S.subscribed = false
@@ -1176,9 +1181,10 @@ local function send_hello()
     --               空壳(devices/properties/commInterfaces 全空), 收了还得回执,
     --               不回执平台每 1s 重推一次
     --   platform  → 平台照常推 ConfigSnapshot(pollpull 档要的就是这个)
-    -- manual 不报: 文档明确 manual 档【不走 onboarding 链路】, 档案来源是用户
-    -- Web 界面, 平台侧不预知具体设备, 靠上报 auto-provision 补建。手动档发 hello
-    -- 是多余的, 平台收到了也没有对应的建档流程
+    -- manual 档也发 hello, 但报 platform 而不是 manual: 文档只定义了 sniff
+    -- 的行为(跳过快照推送), manual 的行为没写。报一个未定义的值风险大于
+    -- 收益; 手动档本来就不等 configSnapshot(不发 pull_start), 平台推了也
+    -- 由 recv_push 直接落盘, 不会卡住任何流程
     local onboard = get_mode() == "sniff" and "sniff" or "platform"
     -- deviceId 按文档取 IMEI，取不到报 "unknown"（不报空串：平台校验
     -- gateway_imei，空串和缺字段是两回事）。不一致会被拒 hello
@@ -1198,6 +1204,16 @@ local function send_hello()
     -- 的 30min 重发。reset_state 里置 0 表示这个连接还没发过, 计时不起跑
     S.hello_at = os.time()
     return true, onboard
+end
+
+-- 向平台报到一次 hello, 不进拉取状态机(不等 configSnapshot)。
+-- 给手动档用: ctrl 进 poll 档时调, 让平台知道这台网关上线了。平台侧不预知
+-- 具体配置, 靠上报 auto-provision 补建设备档案。
+-- 失败不回滚切模式 —— 进模式那一刻 MQTT 可能还没连上(set_manual 刚触发
+-- 断开重连), 补发由 task_main 的"连接后补发"分支负责
+function M.hello()
+    if not S.client or not S.connected then return false, "未连接" end
+    return send_hello()
 end
 
 local function pull_finish(state, msg, result)
@@ -1425,22 +1441,28 @@ local function task_main()
                 end
             end
             if sys then sys.wait(1000) end
-            -- 周期重发 hello。放在 sys.wait 之后，保证每轮循环只判一次、且不和
-            -- 本轮的上报挤在一起
+            -- hello 的两个时机: 连接后补发一次 + pollpull 档 30min 周期重发。
+            -- 放在 sys.wait 之后，保证每轮循环只判一次、且不和本轮的上报挤在一起
             --
-            -- 只对 pollpull 档：那是唯一"在等平台下发配置"的档。sniff 档的 hello
-            -- 发完就判完成，没有"未拿到配置"这个状态；manual 档不走 onboarding
-            -- 链路(档案来源是用户 Web 界面，平台靠上报 auto-provision 补建)，
-            -- 发 hello 没有对应的建档流程，重发只会无意义地刷新档案。
+            -- ① 连接后补发。进模式那一刻 MQTT 往往还没连上(set_manual 刚触发
+            --    断开重连)，ctrl 里那次 hello 是静默失败的。这里保证每个连接
+            --    至少发一次，且【所有非 idle 档都要】—— 包括手动档：平台侧不
+            --    预知这台设备，靠 hello + 后续的拓扑/数据帧 auto-provision
+            --    补建档案，收不到 hello 平台那头完全看不到设备上线。
+            --    hello_at == 0 是 reset_state 里"这个连接还没发过"的语义, 正好复用
+            -- ② 只对 pollpull 档周期重发：那是唯一"在等平台下发配置"的档。sniff 档
+            --    的 hello 发完就判完成，没有"未拿到配置"这个状态；手动档不等
+            --    configSnapshot，重发只会无意义地刷新档案。
             --
             -- 平台收到 hello 会重推 ConfigSnapshot，由 recv_push 自动落盘 ——
             -- 不走拉取状态机，所以不影响前端正在显示的拉取结果，也不需要用户
             -- 再点一次「拉取配置」。这正是文档"未拿到配置前每 30min 重发"的用途：
             -- 平台侧档案被重置/白名单到期时，设备侧无从得知，只靠上电那一次 hello
             -- 会永久失联且没有任何报错
-            --
-            -- hello_at == 0(这个连接还没发过 hello) 时不起跑，否则开机就白发一次
-            if S.hello_at and S.hello_at > 0 and get_mode() == "pollpull"
+            if S.hello_at == 0 and get_mode() ~= "idle" and not pulling() then
+                log.info("iot", "hello on connect, mode=" .. get_mode())
+                pcall(send_hello)
+            elseif S.hello_at and S.hello_at > 0 and get_mode() == "pollpull"
                 and not pulling()
                 and (os.time() - S.hello_at) >= cfg.HELLO_RE_S then
                 log.info("iot", "hello re-send (30min), mode=pollpull")

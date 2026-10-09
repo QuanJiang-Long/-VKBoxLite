@@ -62,6 +62,12 @@ function M.switch_mode(mode)
             end
             return true, "OK pollpull, pulling"
         end
+        -- 手动档也向平台报到(hello)。平台侧不预知这台设备的具体配置, 靠
+        -- 上报 auto-provision 补建 —— hello 是让平台知道"这台网关上线了"
+        -- 的入口, 不发的话平台那头看不到设备。失败不回滚切模式: 手动档的
+        -- 主职是采用户配的寄存器表, 平台那头看不到不影响采集。真没发出去
+        -- 时 task_main 连上后会补发(见 iot.lua 的 hello on connect 分支)
+        if iot then pcall(iot.hello) end
         return true, "OK poll started"
 
     elseif mode == "sniff" then
