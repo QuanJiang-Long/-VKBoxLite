@@ -267,21 +267,24 @@ local function build_items()
     return items
 end
 
--- U4 子设备数据上报。topic = profile 出的 base 加 -{n} 后缀:
---   手动档 = 用户填的 pub_topic(连自己的 broker, 用自己的命名)
---   自动档 = PLATFORM_PUB_TOPIC 固定常量
--- {gwSn} 是网关 SN(顶层网关自己的设备号), -{n} 是子设备序号。少了 -{n}
--- 平台认不出数据归属哪个子设备, 上报等于白发
+-- U4 子设备数据上报。topic = profile 出的 base, 是否加 -{n} 后缀看档位:
+--   自动档 = PLATFORM_PUB_TOPIC 固定常量, 按 V3 契约拼 -{n}
+--   手动档 = 用户填的 pub_topic, 原样用不加后缀
+-- -{n} 是平台认子设备用的: 少了平台认不出数据归属哪个子设备, 上报等于白发。
+-- 但手动档连的是用户自己的 broker、用用户自己的命名, 用户也按原样订阅 ——
+-- 加个 -1 之后平台那头什么都收不到(实测踩过), 所以手动档不加
 local function publish()
     if not S.client or not S.connected then return false end
     local items = build_items()
     if #items == 0 then return false end
     local base = S.pub or ""
     if base == "" then return false end
+    local manual = mqttcfg.load().manual_on
     local any = false
     for _, it in ipairs(items) do
+        local topic = manual and base or (base .. "-" .. it.idx)
         local ok, err = pcall(function()
-            S.client:publish(base .. "-" .. it.idx, it.body, mqttcfg.load().qos)
+            S.client:publish(topic, it.body, mqttcfg.load().qos)
         end)
         if ok then
             S.published = S.published + 1
