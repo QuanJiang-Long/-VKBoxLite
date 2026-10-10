@@ -451,6 +451,10 @@ local function send_meta()
     local csq = mcall("csq")
     if type(csq) ~= "number" then csq = nil end
     local p = {}
+    -- V3 平台要求顶层 vendor/model/fwVersion (元数据帧和拓扑帧都要带)
+    p[#p + 1] = string.format('"vendor":%s', jstr("VKBox"))
+    p[#p + 1] = string.format('"model":%s', jstr(cfg.PLATFORM_MODEL))
+    p[#p + 1] = string.format('"fwVersion":%s', jstr(_G.VERSION or "0.0.0"))
     p[#p + 1] = string.format('"sn":%s', jstr(did))
     p[#p + 1] = string.format('"deviceSn":%s', jstr(did))
     p[#p + 1] = string.format('"imei":%s', jstr(imei()))
@@ -466,26 +470,26 @@ local function send_meta()
     p[#p + 1] = string.format('"networkAddress":%s', jstr(mqttcfg.load().host))
     p[#p + 1] = string.format('"isShadow":0')
     p[#p + 1] = string.format('"summary":%s', jstr("VKBox Bootstrap"))
-    -- deviceType 固定 3(产品定义: 网关). locationWay 0=未定位/2=LBS 成功.
-    -- longitude/latitude 暂不发(LBS 未集成), 等拿到 iot.openluat.com
-    -- 的 project_id 调 lbsLoc2.request, 成功时同时上报经纬度 + locationWay=2.
+    -- deviceType 固定 3 (产品定义: 网关). locationWay 0=未定位/2=LBS 成功
     p[#p + 1] = '"deviceType":3'
     p[#p + 1] = '"locationWay":0'
-    -- ts 用秒: 文档示例 1721884800 是 10 位。毫秒会让平台按 1970 年解析
-    p[#p + 1] = string.format('"ts":%d', os.time())
+    -- V3 平台 ts 毫秒 (13 位)
+    p[#p + 1] = string.format('"ts":%d', os.time() * 1000)
     return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did), "{" .. table.concat(p, ",") .. "}", 1)
 end
 
--- 带 nodes[] 的那帧: 子设备拓补建档。只带网关标识 + 拓扑, 自述性字段
--- (fw/firmwareVersion/imei/...) 归 send_meta, 不在这儿重复发一遍
+-- 带 nodes[] 的那帧: 子设备拓补建档。
+-- V3 平台要求顶层 vendor/model/fwVersion/ts(ms), 走'建子设备'路径
+-- 自述字段(imei/iccid/位置等)归 send_meta, 不重复
 local function send_topo()
     local did = cur_did()
     if not did then return false, "无 SN" end
     local nodes, err = build_nodes()
     if not nodes then return false, err end
     return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did),
-        string.format('{"sn":%s,"deviceSn":%s,"ts":%d,"nodes":[%s]}',
-            jstr(did), jstr(did), os.time(), nodes), 1)
+        string.format('{"vendor":%s,"model":%s,"fwVersion":%s,"sn":%s,"deviceSn":%s,"ts":%d,"nodes":[%s]}',
+            jstr("VKBox"), jstr(cfg.PLATFORM_MODEL), jstr(_G.VERSION or "0.0.0"),
+            jstr(did), jstr(did), os.time() * 1000, nodes), 1)
 end
 
 -- 元数据指纹: 只挑会变的字段(imei/iccid/csq/主机名), 版本和型号是常量不必算。
