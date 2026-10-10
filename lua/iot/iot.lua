@@ -338,16 +338,6 @@ end
 --          的名字会是地址而不是中文别名, 想看得顺眼得让用户配一份轮询表
 -- ⚠️ nodeIndex 必须和 U4 的 -{n} 同一套序号(都按从机地址升序), 否则平台把
 --    建档的子设备和上报的数据对不上, 症状是"拓扑发成功了但数据不进去"
--- Modbus 1-based 地址: 平台 V3 用 40001+ 形式(保持寄存器 0 = 40001),
--- 设备层 0-based 协议地址要 +40001 转 PLC 地址; 没 fc 字段按保持寄存器算
-local function modbus_address(r)
-    local addr = r.addr or 0
-    if r.fc == 0x04 then return 30001 + addr end
-    if r.fc == 0x01 or r.fc == 0x05 or r.fc == 0x0F then return 1 + addr end
-    if r.fc == 0x02 then return 10001 + addr end
-    return 40001 + addr
-end
-
 local function node_json(idx, slave, c, regs)
     local props = {}
     for _, r in ipairs(regs) do
@@ -358,9 +348,11 @@ local function node_json(idx, slave, c, regs)
             id = "reg_" .. r.addr
         end
         local name = r.alias or id
+        -- address 是嗅探到的 Modbus 寄存器地址, 嗅探到什么发什么
+        -- V3 例子是 40001 是 PLC 1-based, 但嗅探帧是协议 0-based (即 100)
         props[#props + 1] = string.format(
-            '{"id":%s,"name":%s,"dataType":%s,"modbus":{"slave":%d,"address":%d,"quantity":%d,"dataType":%s}}',
-            jstr(id), jstr(name), jstr(dt), slave, modbus_address(r), r.count or 1, jstr(dt))
+            '{"id":%s,"name":%s,"dataType":%s,"unit":"","modbus":{"slave":%d,"address":%d,"quantity":%d,"dataType":%s}}',
+            jstr(id), jstr(name), jstr(dt), slave, r.addr, r.count or 1, jstr(dt))
     end
     return string.format(
         '{"nodeIndex":%d,"slaveId":%d,"kind":"RTU","serial":%s,"model":{"tslName":%s,"properties":[%s]}}',
