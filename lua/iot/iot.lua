@@ -14,9 +14,7 @@ local collector = require "data/collector"
 local cfgstore = require "cfg"
 local pullcfg = require "iot/pullcfg"
 local mon = require "bus/mon"
--- 轮询引擎：拉取成功后自动落盘要能就地重启/热更轮询任务。
--- 惰性 require（用时才取）而不是顶层，避免 main.lua 的初始化顺序
--- 把 uart 还没 setup 的 poll 提前拖起来
+-- 惰性 require, 避免 main.lua 初始化时把 uart 未 setup 的 poll 提前拖起来
 local poll
 local function get_poll()
     if not poll then
@@ -26,10 +24,7 @@ local function get_poll()
     return poll or nil
 end
 
--- 当前运行模式(idle/poll/pollpoll/sniff)。问 ctrl 要, 和 poll_slot() 一样
--- 走惰性 require: 依赖图已确认无环(全工程没有任何文件 require "iot/iot"),
--- 但顶层 require 会把 iot 的加载时机提前到 main.lua 初始化序列里, 保持
--- 惰性最稳。拿不到就当 idle -- 宁可少订也不能给未接任务的状态乱订
+-- 问 ctrl, 拿不到当 idle (宁可少订也不能给未接任务乱订)
 local ctrl_mod
 local function get_mode()
     if ctrl_mod == nil then
@@ -39,22 +34,14 @@ local function get_mode()
     return (ctrl_mod and ctrl_mod.get_mode()) or "idle"
 end
 
--- 当前轮询引擎用的是哪个配置槽("poll"=手动 / "pull"=拉取)。
--- 平台推送落地时据此决定要不要立即生效: 跑手动档就只存 ds_pull 备着，
--- 不许把手配的寄存器表顶掉。问 poll 而不是问 ctrl 是为了不引入
--- ctrl -> mon/poll -> iot 这条环
 local function poll_slot()
     local p = get_poll()
     return (p and p.slot()) or "poll"
 end
 
--- 当前在用的那份轮询配置: 拉取档读 ds_pull, 其余读 ds_poll。
--- ⚠️ 不能写死 load_poll: 平台是按 ds_pull 里的寄存器表下发的(报文里的 id
---    就是那边的 name/alias), 拿 ds_poll 去解析必然找不到地址 —— 而 ds_poll
---    在拉取档下通常是空的(从没手配过), 于是每条按名字下发的写指令都静默失败,
---    只有一行 write item unresolvable 日志, 平台那头看不出任何异常。
---    alias_map 同理: 上报的 name 字段也要按在用的那份映射, 否则平台上看到的
---    名称和用户配的不是一套
+-- ⚠️ 不能写死 load_poll: 平台按 ds_pull 里的寄存器表下发 id, 拿 ds_poll
+--    解析会全部静默失败 (只有一行 write item unresolvable 日志)。
+--    alias_map 同理: 上报 name 也要按在用的那份映射
 local function active_cfg()
     local f = (poll_slot() == "pull") and cfgstore.load_pull or cfgstore.load_poll
     local ok, c = pcall(f)
