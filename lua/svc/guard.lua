@@ -1,10 +1,10 @@
-local corelib = require "core/corelib"
+local util = require "util"
 local cfg = require "core/config"
-local log = corelib.log()
+local log = util.log()
 
-local sys = corelib.get("sys")
-local rtos = corelib.try("rtos")
-local wdt = corelib.try("wdt")
+local sys = util.get("sys")
+local rtos = util.try("rtos")
+local wdt = util.try("wdt")
 
 local M = {}
 

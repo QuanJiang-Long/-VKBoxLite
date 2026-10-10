@@ -1,11 +1,11 @@
-local corelib = require "core/corelib"
+local util = require "util"
 local cfg = require "core/config"
-local log = corelib.log()
+local log = util.log()
 
-local uart = corelib.get("uart")
-local json = corelib.try("json")
-local rtos = corelib.try("rtos")
-local mobile = corelib.try("mobile")
+local uart = util.get("uart")
+local json = util.try("json")
+local rtos = util.try("rtos")
+local mobile = util.try("mobile")
 
 local sn = require "sn/sn"
 local ctrl = require "bus/ctrl"
@@ -14,8 +14,8 @@ local mon = require "bus/mon"
 local collector = require "data/collector"
 local cfgstore = require "cfg"
 local mqtt_cfg = require "iot/mqttcfg"
-local iot = corelib.try("iot/iot")
-local guard = corelib.try("svc/guard")
+local iot = util.try("iot/iot")
+local guard = util.try("svc/guard")
 
 local M = {}
 

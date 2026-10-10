@@ -1,9 +1,9 @@
-local corelib = require "core/corelib"
+local util = require "util"
 local cfg = require "core/config"
-local log = corelib.log()
+local log = util.log()
 
-local fskv = corelib.get("fskv")
-local sys = corelib.try("sys")
+local fskv = util.get("fskv")
+local sys = util.try("sys")
 
 local M = {}
 
@@ -161,8 +161,8 @@ end
 local imei_cache, uid_cache = nil, nil
 
 local function try_identity()
-    local mobile = corelib.try("mobile")
-    local mcu = corelib.try("mcu")
+    local mobile = util.try("mobile")
+    local mcu = util.try("mcu")
     if not imei_cache then imei_cache = grab(mobile, "imei") end
     if not uid_cache then uid_cache = grab(mcu, "unique_id") end
     return imei_cache and uid_cache

@@ -1,13 +1,13 @@
-local corelib = require "core/corelib"
+local util = require "util"
 local cfg = require "core/config"
-local log = corelib.log()
+local log = util.log()
 
-local sys = corelib.get("sys")
-local json = corelib.try("json")
-local mqtt = corelib.try("mqtt")
-local rtos = corelib.try("rtos")
-local mobile = corelib.try("mobile")
-local socket = corelib.try("socket")
+local sys = util.get("sys")
+local json = util.try("json")
+local mqtt = util.try("mqtt")
+local rtos = util.try("rtos")
+local mobile = util.try("mobile")
+local socket = util.try("socket")
 
 local mqttcfg = require "iot/mqttcfg"
 local collector = require "data/collector"
@@ -150,46 +150,13 @@ local function alias_map()
     return m
 end
 
-local function pad(v, n)
-    local s = tostring(v)
-    while #s < n do s = "0" .. s end
-    return s
-end
-
-local function int_str(v)
-    v = math.floor(v)
-    if v < 1e9 then return tostring(v) end
-    local high = math.floor(v / 1000000000)
-    local low = v - high * 1000000000
-    return tostring(high) .. pad(low, 9)
-end
-
-local function ms_of(ts)
-    if type(ts) ~= "number" or ts ~= ts or ts < 0 then return "0" end
-    local sec = math.floor(ts)
-    local ksec = math.floor(sec / 1000)
-    local rsec = sec - ksec * 1000
-    local tail = rsec * 1000
-    if ksec <= 0 then return tostring(tail) end
-    return tostring(ksec) .. pad(tail, 6)
-end
-
-local function jstr(s)
-    s = tostring(s)
-    return '"' .. (s:gsub('[%c"\\]', function(c)
-        local b = c:byte()
-        if c == '"' then return '\\"'
-        elseif c == "\\" then return "\\\\"
-        else return string.format("\\u%04x", b) end
-    end)) .. '"'
-end
-
-local function jnum(v)
-    if type(v) ~= "number" then return nil end
-    if v ~= v or v == math.huge or v == -math.huge then return nil end
-    if v == math.floor(v) and math.abs(v) < 1e15 then return int_str(v) end
-    return tostring(v)
-end
+-- 这 5 个 helper 已搬到 util.lua, 这里只留 alias 减少 diff
+-- (各起一行: check_lua 的 local 收集只处理 2 元批量赋值)
+local pad = util.pad
+local int_str = util.int_str
+local ms_of = util.ms_of
+local jstr = util.jstr
+local jnum = util.jnum
 
 -- ===== 收拢重复样板的 helper =====
 -- 上行帧的 7 个发送点(send_meta/send_topo/send_gw_res/func_reply/reply_config/

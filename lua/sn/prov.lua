@@ -1,9 +1,9 @@
-local corelib = require "core/corelib"
-local log = corelib.log()
+local util = require "util"
+local log = util.log()
 
-local uart = corelib.get("uart")
-local sys = corelib.try("sys")
-local fskv = corelib.try("fskv")
+local uart = util.get("uart")
+local sys = util.try("sys")
+local fskv = util.try("fskv")
 
 local M = {}
 

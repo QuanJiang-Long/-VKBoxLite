@@ -1,9 +1,9 @@
-local corelib = require "core/corelib"
+local util = require "util"
 local cfg = require "core/config"
-local log = corelib.log()
+local log = util.log()
 
-local fskv = corelib.try("fskv")
-local json = corelib.try("json")
+local fskv = util.try("fskv")
+local json = util.try("json")
 
 local M = {}
 

@@ -1,10 +1,10 @@
-local corelib = require "core/corelib"
+local util = require "util"
 local cfg = require "core/config"
-local log = corelib.log()
+local log = util.log()
 
-local uart = corelib.get("uart")
-local gpio = corelib.try("gpio")
-local sys = corelib.try("sys")
+local uart = util.get("uart")
+local gpio = util.try("gpio")
+local sys = util.try("sys")
 
 local mbus = require "bus/mbus"
 local collector = require "data/collector"

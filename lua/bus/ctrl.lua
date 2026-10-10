@@ -1,12 +1,12 @@
-local corelib = require "core/corelib"
-local log = corelib.log()
-local sys = corelib.try("sys")
+local util = require "util"
+local log = util.log()
+local sys = util.try("sys")
 
 local poll = require "bus/poll"
 local mon = require "bus/mon"
 local cfgstore = require "cfg"
 local mqttcfg = require "iot/mqttcfg"
-local iot = corelib.try("iot/iot")
+local iot = util.try("iot/iot")
 
 local M = {}
 

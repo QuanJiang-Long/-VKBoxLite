@@ -35,9 +35,9 @@ require = function(name)
     error(string.format("module %q not found", name), 2)
 end
 
-local corelib = require "core/corelib"
-local sys = corelib.get("sys")
-local log = corelib.log()
+local util = require "util"
+local sys = util.get("sys")
+local log = util.log()
 local mbus = require "bus/mbus"
 
 local function mod(name, ok, m)
@@ -90,7 +90,7 @@ log.info("main", "[4/6] 485")
 local pollmod = mod("bus/poll", pcall(require, "bus/poll"))
 local monmod = mod("bus/mon", pcall(require, "bus/mon"))
 local ctrl = mod("bus/ctrl", pcall(require, "bus/ctrl"))
-local gpio = corelib.try("gpio")
+local gpio = util.try("gpio")
 if gpio then
     pcall(gpio.setup, mbus.DE_PIN, 0)
     pcall(gpio.set, mbus.DE_PIN, 0)

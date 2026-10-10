@@ -1,5 +1,5 @@
-local corelib = require "core/corelib"
-local uart = corelib.try("uart")
+local util = require "util"
+local uart = util.try("uart")
 
 local M = {}
 
