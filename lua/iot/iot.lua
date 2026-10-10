@@ -342,10 +342,15 @@ local function node_json(idx, slave, c, regs)
     local props = {}
     for _, r in ipairs(regs) do
         local dt = r.dtype or "uint16"
-        -- id 是英文 property key, sniff 时 r.name="r{addr}" 匹配 ^r%d+$ 不合法
-        local id = r.name
-        if not id or id == "" or id:match("^r%d+$") then
-            id = "reg_" .. r.addr
+        -- 嗅探时 r.name 通常 nil (put 不传), 兜底走 s{slave}_r{addr} 跟 U4 key 对齐
+        -- 轮询时 r.name 是用户配的真名, 走 r.name 路径
+        local id
+        if r.name and r.name ~= "" and not r.name:match("^r%d+$") then
+            id = r.alias or r.name
+        else
+            -- 嗅探模式: 跟 U4 上报 collector key (s{slave}_r{addr}) 对齐
+            -- 平台按 id 匹配 property, 嗅探的 id 跟 U4 key 一致才能归属
+            id = "s" .. slave .. "_r" .. r.addr
         end
         local name = r.alias or id
         -- address 是嗅探到的 Modbus 寄存器地址, 嗅探到什么发什么
