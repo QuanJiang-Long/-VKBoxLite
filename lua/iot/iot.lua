@@ -263,53 +263,68 @@ end
 -- ⚠️ sniff 的 serial 必须用 mon.status().detected 而不是 active_cfg():
 --    实测识别出 2400 却发了 9600, 平台照错的波特率建配置,
 --    拿这份配置去轮询一帧都收不到
-local function build_nodes()
-    local mode = get_mode()
-    local nodes, err = {}, nil
-    if mode == "sniff" then
-        local at, by = {}, {}
-        local function put(slave, r)
-            local k = slave .. ":" .. r.addr
-            local p = at[k]
-            if p then
-                p.count, p.name, p.alias, p.dtype = r.count, r.name, r.alias, r.dtype or "uint16"
-                return
-            end
-            p = { addr = r.addr, count = r.count, name = r.name, alias = r.alias, dtype = r.dtype or "uint16" }
-            at[k] = p
-            by[slave] = by[slave] or {}
-            by[slave][#by[slave] + 1] = p
-        end
-        for _, r in ipairs(mon.infer().regs or {}) do
-            put(r.slave, { addr = r.addr, count = r.count, fc = r.fc, dtype = "uint16" })
-        end
-        local pc = cfgstore.load_pull()
-        for _, r in ipairs((pc and pc.regs) or {}) do
-            put(pc.slave, r)
-        end
-        local st = mon.status()
-        local d = st.detected
-        local ser = {
-            baud = (d and d.baud) or st.baud,
-            databits = (d and d.databits) or 8,
-            stopbits = (d and d.stopbits) or 1,
-            parity = (d and d.parity) or 0,
-        }
-        local sl = {}
-        for s in pairs(by) do sl[#sl + 1] = s end
-        table.sort(sl)
-        for i, s in ipairs(sl) do
-            nodes[#nodes + 1] = node_json(i, s, ser, by[s])
-        end
-        err = "还没识别到在线的从机"
-    else
-        local c = active_cfg()
-        if c and c.regs and #c.regs > 0 then
-            nodes[#nodes + 1] = node_json(1, c.slave, c, c.regs)
-        end
-        err = "没有可用的寄存器表"
+local function poll_regs()
+    local c = active_cfg()
+    if c and c.regs and #c.regs > 0 then
+        return { [c.slave] = c.regs }
     end
-    if #nodes == 0 then return nil, err end
+    return nil
+end
+local function poll_serial() return active_cfg() end
+
+local MODE = {
+    sniff = {
+        regs = function()
+            local at, by = {}, {}
+            local function put(slave, r)
+                local k = slave .. ":" .. r.addr
+                local p = at[k]
+                if p then
+                    p.count, p.name, p.alias, p.dtype = r.count, r.name, r.alias, r.dtype or "uint16"
+                    return
+                end
+                p = { addr = r.addr, count = r.count, name = r.name, alias = r.alias, dtype = r.dtype or "uint16" }
+                at[k] = p
+                by[slave] = by[slave] or {}
+                by[slave][#by[slave] + 1] = p
+            end
+            for _, r in ipairs(mon.infer().regs or {}) do
+                put(r.slave, { addr = r.addr, count = r.count, fc = r.fc, dtype = "uint16" })
+            end
+            local pc = cfgstore.load_pull()
+            for _, r in ipairs((pc and pc.regs) or {}) do
+                put(pc.slave, r)
+            end
+            return by
+        end,
+        serial = function()
+            local st = mon.status()
+            local d = st.detected
+            return {
+                baud = (d and d.baud) or st.baud,
+                databits = (d and d.databits) or 8,
+                stopbits = (d and d.stopbits) or 1,
+                parity = (d and d.parity) or 0,
+            }
+        end,
+        err = "还没识别到在线的从机",
+    },
+    poll = { regs = poll_regs, serial = poll_serial, err = "没有可用的寄存器表" },
+    manual = { regs = poll_regs, serial = poll_serial, err = "没有可用的寄存器表" },
+}
+
+local function build_nodes()
+    local m = MODE[get_mode()] or MODE.poll
+    local by = m.regs()
+    if not by or not next(by) then return nil, m.err end
+    local ser = m.serial()
+    local sl = {}
+    for s in pairs(by) do sl[#sl + 1] = s end
+    table.sort(sl)
+    local nodes = {}
+    for i, s in ipairs(sl) do
+        nodes[#nodes + 1] = node_json(i, s, ser, by[s])
+    end
     return table.concat(nodes, ",")
 end
 
