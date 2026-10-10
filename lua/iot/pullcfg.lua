@@ -1,6 +1,5 @@
 local util = require "util"
-local cfg = require "core/config"
-local cfgstore = require "cfg"
+local cfg = require "cfg"
 local log = util.log()
 local json = util.try("json")
 
@@ -242,7 +241,7 @@ function M.parse_snap(t, snap)
     local regs, skipped, renamed = props_to_regs(props, cfg.MAX_REGS)
     if #regs == 0 then return nil, "没有可用的寄存器条目" end
 
-    local base = cfgstore.load_poll()
+    local base = cfg.load_poll()
     local poll = comm_to_poll(pick_comm(snap), slave)
     poll.interval_ms = base.interval_ms
     poll.timeout_ms = base.timeout_ms

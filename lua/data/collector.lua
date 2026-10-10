@@ -1,4 +1,4 @@
-local cfg = require "core/config"
+local cfg = require "cfg"
 
 local M = {}
 

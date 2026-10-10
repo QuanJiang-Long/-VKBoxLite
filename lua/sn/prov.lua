@@ -62,7 +62,7 @@ local function reply(s)
     pcall(uart.write, UART_ID, s .. "\r\n")
 end
 
-local function sn() return require "sn/sn" end
+local function sn() return require "cfg" end
 
 local CMDS = {}
 

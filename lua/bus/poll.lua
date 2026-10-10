@@ -1,5 +1,5 @@
 local util = require "util"
-local cfg = require "core/config"
+local cfg = require "cfg"
 local log = util.log()
 
 local uart = util.get("uart")

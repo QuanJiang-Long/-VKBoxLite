@@ -1,5 +1,5 @@
 local util = require "util"
-local cfg = require "core/config"
+local cfg = require "cfg"
 local log = util.log()
 
 local uart = util.get("uart")
@@ -7,13 +7,10 @@ local json = util.try("json")
 local rtos = util.try("rtos")
 local mobile = util.try("mobile")
 
-local sn = require "sn/sn"
 local ctrl = require "bus/ctrl"
 local poll = require "bus/poll"
 local mon = require "bus/mon"
 local collector = require "data/collector"
-local cfgstore = require "cfg"
-local mqtt_cfg = require "iot/mqttcfg"
 local iot = util.try("iot/iot")
 local guard = util.try("svc/guard")
 
@@ -41,11 +38,7 @@ local function blocked_while_detecting(cmd)
 end
 
 local function device_id_str()
-    local ok, snc = pcall(require, "sn/sn")
-    if ok and snc and snc.state() == "ready" then
-        return _G.get_device_sn and _G.get_device_sn()
-    end
-    return nil
+    return _G.get_device_sn and _G.get_device_sn()
 end
 
 function M.reg(cmd, fn) g_cmds[cmd] = fn end
@@ -78,17 +71,17 @@ local function reg_cmds()
             end
             return v
         end
-        local okc, c = pcall(cfgstore.load_poll)
+        local okc, c = pcall(cfg.load_poll)
         local pc = okc and c or nil
-        local okm, mc = pcall(mqtt_cfg.load)
+        local okm, mc = pcall(cfg.mqtt_load)
         local mq = okm and mc or nil
         M.reply("RET:INFO=" .. jencode({
             project = _G.PROJECT,
             version = _G.VERSION,
             sn = _G.get_device_sn and _G.get_device_sn(),
-            sn_state = sn.state(),
-            lock = sn.locked() and 1 or 0,
-            imei = sn.imei(),
+            sn_state = cfg.sn_get_state(),
+            lock = cfg.sn_locked() and 1 or 0,
+            imei = cfg.sn_imei(),
             iccid = mval("iccid"),
             csq = mval("csq"),
             rsrp = mval("rsrp"),
@@ -121,20 +114,20 @@ local function reg_cmds()
     M.reg("R:CFG", function()
         -- 按当前运行模式取对应的配置槽
         local slot = (ctrl.get_mode() == "pollpull") and MODE_PULL or MODE_POLL
-        local cfg = (slot == MODE_PULL) and cfgstore.load_pull() or cfgstore.load_poll()
-        M.reply("RET:CFG=" .. jencode({ cfg = cfg, slot = slot, src = cfgstore.poll_src() }))
+        local slotcfg = (slot == MODE_PULL) and cfg.load_pull() or cfg.load_poll()
+        M.reply("RET:CFG=" .. jencode({ cfg = slotcfg, slot = slot, src = cfg.poll_src() }))
     end)
 
     M.reg("W:CFG", function(arg)
         if blocked_while_detecting("CFG") then return end
         local t = jdecode(arg)
         if not t then return M.reply("RET:FAIL:CFG:bad json") end
-        local n, err = cfgstore.normalize_poll(t)
+        local n, err = cfg.normalize_poll(t)
         if not n then return M.reply("RET:FAIL:CFG:" .. tostring(err)) end
         local slot = (ctrl.get_mode() == "pollpull") and MODE_PULL or MODE_POLL
         local ok, serr
-        if slot == MODE_PULL then ok, serr = cfgstore.save_pull(t)
-        else ok, serr = cfgstore.save_poll(t) end
+        if slot == MODE_PULL then ok, serr = cfg.save_pull(t)
+        else ok, serr = cfg.save_poll(t) end
         if not ok then return M.reply("RET:FAIL:CFG:" .. tostring(serr)) end
         if poll.needs_restart(n) then
             if poll.is_running() then
@@ -189,15 +182,17 @@ local function reg_cmds()
 
     -- R:MQTT: 前端读 cfg / auto_pass / manual_on / pub / sub
     M.reg("R:MQTT", function()
-        local e = mqtt_cfg.effective(device_id_str())
+        local did = device_id_str()
+        local c = cfg.mqtt_load()
+        local p = cfg.mqtt_profile(did)
         M.reply("RET:MQTT=" .. jencode({
-            cfg = e.cfg,
-            auto_pass = e.cfg.auto and e.cfg.auto.pass or "",
-            manual_on = e.cfg.manual_on,
-            pub = e.pub,
-            sub = e.sub,
-            ready = e.ready,
-            err = e.err,
+            cfg = c,
+            auto_pass = c.auto and c.auto.pass or "",
+            manual_on = c.manual_on,
+            pub = p.pub,
+            sub = p.sub,
+            ready = true,
+            err = nil,
             stat = iot and iot.status() or nil,
         }))
     end)
@@ -225,7 +220,7 @@ local function reg_cmds()
 
     M.reg("W:BOOTMODE", function(arg)
         local m = trim(arg)
-        local ok, err = cfgstore.save_sys({ boot_mode = m })
+        local ok, err = cfg.save_sys({ boot_mode = m })
         if not ok then return M.reply("RET:FAIL:BOOTMODE:" .. tostring(err)) end
         M.reply("RET:BOOTMODE=OK")
     end)

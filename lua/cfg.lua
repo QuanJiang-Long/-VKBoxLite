@@ -1,45 +1,102 @@
-local util = require "util"
-local cfg = require "core/config"
-local log = util.log()
+-- cfg: 全部配置 + 全局常量 + SN + MQTT 凭证
+-- 合并: 原 cfg.lua + core/config.lua + iot/mqttcfg.lua + sn/sn.lua
+-- 命名: cfg.xxx (常量/工具), cfg.mqtt_xxx (凭证), cfg.sn_xxx (SN)
 
+local util = require "util"
+local log = util.log()
 local fskv = util.try("fskv")
 local json = util.try("json")
 
 local M = {}
 
--- 4 种工作模式提到模块顶部(各文件独立常量是 Lua 闭包隔离的代价)
-local MODE_POLL, MODE_PULL, MODE_IDLE, MODE_SNIFF = "poll", "pull", "idle", "sniff"
+-- ===== 全局常量 (from core/config.lua) =====
 
+M.BAUD = 9600
+M.DATABITS = 8
+M.STOPBITS = 1
+M.PARITY = 0
+
+M.SLAVE_ADDR = 1
+M.POLL_INTERVAL_MS = 5000
+M.TIMEOUT_MS = 500
+M.REG_DEFAULT = {}
+M.MAX_REGS = 128
+
+M.WDT_TIMEOUT = 9000
+M.WDT_FEED_MS = 3000
+M.MONITOR_MS = 10000
+M.STALL_LIMIT_S = 120
+M.AUTO_REBOOT = false
+
+M.SN_MIN_LEN = 17
+M.SN_MAX_LEN = 32
+M.SN_WARN_PERIOD_S = 600
+
+M.MQTT_INTERVAL_S = 60
+M.MQTT_QOS = 1
+M.MQTT_ALLOW_NO_SN = false
+
+M.PLATFORM_VENDOR = "VKBoxLite"
+M.PLATFORM_MODEL = "VKBox-Lite"
+M.PLATFORM_GET_TOPIC = "/sys/thing/gw/config/get/%s"
+M.PLATFORM_REPLY_TOPIC = "/sys/thing/gw/config/reply/%s"
+M.PLATFORM_HELLO_TOPIC = "/sys/thing/gw/config/hello/%s"
+M.PLATFORM_PUB_TOPIC = "/sys/thing/node/property/post/%s"
+M.PLATFORM_INFO_TOPIC = "/sys/thing/gw/info/post/%s"
+M.PLATFORM_RES_TOPIC = "/sys/thing/gw/property/post/%s"
+M.PLATFORM_FPOST_TOPIC = "/sys/thing/gw/function/post/%s"
+M.PLATFORM_FUNC_TOPIC = "/sys/thing/gw/function/get/%s"
+M.PLATFORM_PSET_TOPIC = "/sys/thing/gw/property/set/%s"
+M.PLATFORM_PGET_TOPIC = "/sys/thing/gw/property/get/%s"
+M.PULL_TIMEOUT_MS = 15000
+M.PULL_CONNECT_MS = 20000
+M.HELLO_RE_S = 1800
+M.HELLO_BACKOFF_S = { 1, 3, 9 }
+M.PULL_DTYPE = {
+    ushort = "uint16", uint16 = "uint16",
+    short = "int16", int16 = "int16",
+    ulong = "uint32", uint32 = "uint32",
+    long = "int32", int32 = "int32",
+    float = "float32", float32 = "float32",
+    double = "float64", float64 = "float64",
+}
+M.PULL_ORDER_OK = { abcd = true }
+M.PULL_PARITY = { none = 0, even = 1, odd = 2 }
+
+M.FRAME_CACHE = 10
+M.RING_SIZE = 12
+M.WRITEQ_MAX = 8
+
+M.DETECT_BAUDS = { 9600, 4800, 2400, 1200 }
+M.DETECT_WIN_MS = 1000
+M.DETECT_HITS = 2
+
+-- ===== 模式常量 (from cfg.lua) =====
+local MODE_POLL, MODE_PULL, MODE_IDLE, MODE_SNIFF = "poll", "pull", "idle", "sniff"
 local K_POLL, K_SYS = "ds_poll", "ds_sys"
--- ds_pull: 平台拉取的独立槽, 复用 normalize_poll/default_poll, 不新增校验。
--- 必须分开: 原本共用一槽, 拉一次平台配置就覆盖手配的寄存器表(见 lua/README.md 配置来源隔离)。
--- 没有 sniff 槽: auto_detect 结果只存本次会话(mon.bootCfg), 不落 fskv, 从结构上堵住误存
 local K_PULL = "ds_pull"
 
+-- ===== 工具 (from cfg.lua) =====
 local function num(v, d)
     if v == nil then return d end
     return tonumber(v) or d
 end
-
 local function str(v, d)
     if type(v) ~= "string" or v == "" then return d end
     return v
 end
-
 local function kv_get(k)
     if not fskv then return nil end
     local ok, v = pcall(fskv.get, k)
     if ok and type(v) == "string" and v ~= "" then return v end
     return nil
 end
-
 local function kv_set(k, s)
     if not fskv then return false end
     fskv.set(k, s)
     if fskv.save then pcall(fskv.save) end
     return true
 end
-
 local function load_json(k, default)
     local s = kv_get(k)
     if not s or not json then return default end
@@ -48,46 +105,32 @@ local function load_json(k, default)
     log.warn("cfg", "decode fail", k)
     return default
 end
-
 local function save_json(k, t)
     if not json then return false, "no json lib" end
     local ok, s = pcall(json.encode, t)
     if not ok or not s then return false, "encode fail" end
-    -- 上限必须和 prov.lua 的 MAX_BUF 对齐: W:CFG 是【一整行】下发,
-    -- 行超过 MAX_BUF 会被整缓冲丢弃, 存得下也传不过来。
-    -- 128 条寄存器最坏约 12.7KB, 两侧都取 16KB。
-    -- 曾设 512, 结果 5 个寄存器就超限, W:CFG 一直回 too large,
-    -- 前端只看到"保存失败"却查不出原因
     if #s > 16384 then return false, "too large" end
     return kv_set(k, s)
 end
 
+-- ===== poll/pull/sys 三套配置 (from cfg.lua) =====
 M.default_poll = {
-    baud = cfg.BAUD,
-    databits = cfg.DATABITS,
-    stopbits = cfg.STOPBITS,
-    parity = cfg.PARITY,
-    slave = cfg.SLAVE_ADDR,
-    interval_ms = cfg.POLL_INTERVAL_MS,
-    timeout_ms = cfg.TIMEOUT_MS,
-    regs = cfg.REG_DEFAULT,
+    baud = M.BAUD, databits = M.DATABITS, stopbits = M.STOPBITS, parity = M.PARITY,
+    slave = M.SLAVE_ADDR, interval_ms = M.POLL_INTERVAL_MS, timeout_ms = M.TIMEOUT_MS,
+    regs = M.REG_DEFAULT,
 }
-
 M.default_sys = { boot_mode = MODE_IDLE }
 
 local function normalize_reg(r)
     if type(r) ~= "table" then return nil, "not table" end
-    -- 范围/格式校验委托给 util.validate_reg(抽离后 ds_poll/ds_pull 共享)
     local ok, why = util.validate_reg(r)
     if not ok then return nil, why end
     return {
         addr = num(r.addr), count = num(r.count, 1),
         dtype = str(r.dtype, "uint16"),
-        name = r.name,
-        alias = str(r.alias, r.name),
+        name = r.name, alias = str(r.alias, r.name),
     }
 end
-
 local function normalize_common(c, d)
     c = c or {}
     return {
@@ -97,15 +140,12 @@ local function normalize_common(c, d)
         parity = math.floor(num(c.parity, d.parity)),
     }
 end
-
 function M.normalize_poll(c)
     local out = normalize_common(c, M.default_poll)
     out.slave = math.floor(num(c.slave, M.default_poll.slave))
     if out.slave < 1 or out.slave > 247 then return nil, "bad slave" end
     out.interval_ms = math.floor(num(c.interval_ms, M.default_poll.interval_ms))
     if out.interval_ms < 100 then return nil, "bad interval" end
-    -- timeout_ms 允许留空(null)= 早返回模式: 收到响应立刻走下一事务,
-    -- 不等满超时。字段名与前端一致(前端 collectCfg 下发 timeout_ms)
     if c.timeout_ms == nil then
         out.timeout_ms = nil
     else
@@ -120,10 +160,7 @@ function M.normalize_poll(c)
         for _, r in ipairs(regs) do
             local nr, err = normalize_reg(r)
             if not nr then return nil, err end
-            if #out.regs >= cfg.MAX_REGS then return nil, "too many regs" end
-            -- 同 addr 只留首条。平台的 properties 实测会把同一属性发两遍
-            -- (2026-10-08 日志: skipped 里 reg_100/reg_250 各出现两次),
-            -- 原样存进重复项, 切 pollpull 后同一帧重复读, 白占总线时间
+            if #out.regs >= M.MAX_REGS then return nil, "too many regs" end
             if not seen[nr.addr] then
                 seen[nr.addr] = true
                 out.regs[#out.regs + 1] = nr
@@ -132,27 +169,19 @@ function M.normalize_poll(c)
     end
     return out
 end
-
 function M.normalize_sys(c)
     c = c or {}
     local mode = str(c.boot_mode, MODE_IDLE):lower():gsub("^%s+", ""):gsub("%s+$", "")
-    -- pollpull = 拉取配置档: 用 ds_pull 轮询, 且开机后自动 hello 拉一次平台配置。
-    -- 和 poll 共用同一套 normalize_poll, 只是配置来源不同
     if mode ~= MODE_IDLE and mode ~= MODE_POLL and mode ~= "pollpull" and mode ~= MODE_SNIFF then
         return nil, "bad boot_mode"
     end
     return { boot_mode = mode }
 end
-
--- 三套配置(poll/pull/sys)的读写除键/归一化/默认值外完全同构,
--- 表驱动避免两处要同步改。load 失败静默退回(启动路径崩设备起不来),
--- save 失败必须把原因带回去给 W:CFG 显示
 local SECTIONS = {
     poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll },
     pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll },
     sys = { key = K_SYS, norm = M.normalize_sys, default = M.default_sys },
 }
-
 for name, sec in pairs(SECTIONS) do
     M["load_" .. name] = function()
         local raw = load_json(sec.key, {})
@@ -170,16 +199,12 @@ for name, sec in pairs(SECTIONS) do
     end
 end
 
--- 配置来源: fskv 里从未写过就是 default(前端据此提示"尚未保存过配置")
 function M.poll_src()
     if not fskv then return "default" end
     local v = fskv.get(K_POLL)
     if v == nil or v == "" then return "default" end
     return "fskv"
 end
-
--- ds_pull 是否拉过平台配置。前端据此判断"拉取配置"档能不能直接起轮询
--- (没拉过就必须先走 hello 拉一次, 否则拿 default 去轮询等于凭空造一套寄存器表)
 function M.pull_src()
     if not fskv then return "default" end
     local v = fskv.get(K_PULL)
@@ -187,29 +212,12 @@ function M.pull_src()
     return "fskv"
 end
 
--- 切回 idle 时的 485 复位: 擦掉用户改过的痕迹, 回到"从没存过配置"的状态。
--- 返回真正清掉的槽名(没写过的槽不出现), 由调用方拼进 W:MODE 应答给前端看。
---
--- 为什么用 fskv.set(k,"") 而不是 fskv.del: kv_get / poll_src / pull_src 都把
--- "" 当"没写过", 语义完全够; 而 del 在某些 LuatOS 版本上不存在, 为一行复位
--- 引入兼容性风险不划算。
---
--- ⚠️ ds_pull 必须一起清, 不清有功能危害: ctrl.switch_mode 的 pollpull 分支靠
---    pull_src()=="default" 决定进模式时要不要先 hello 拉一次平台配置。留着旧的
---    ds_pull 会让它跳过拉取、直接拿旧配置起轮询 —— 用户以为平台的新配置已经
---    生效, 其实采的还是上一轮那份。
---
--- ⚠️ 刻意不碰 ds_sys: boot_mode 是"开机该进什么模式"的意愿, 不是配置内容。
---    清了它下次开机又不 idle, 和设备已经 idle 的事实矛盾。
 local RESET_SLOTS = { { MODE_POLL, K_POLL }, { MODE_PULL, K_PULL } }
-
 function M.reset_user()
     local cleared = {}
     if not fskv then return cleared end
     for _, s in ipairs(RESET_SLOTS) do
         local name, k = s[1], s[2]
-        -- 只清"写过"的槽: 没写过的槽也清一遍等于白写 fskv + 多一次 save,
-        -- 而 flash 擦写次数是有限的
         local ok, v = pcall(fskv.get, k)
         if ok and v ~= nil and v ~= "" then
             fskv.set(k, "")
@@ -218,6 +226,294 @@ function M.reset_user()
     end
     if #cleared > 0 and fskv.save then pcall(fskv.save) end
     return cleared
+end
+
+-- ===== MQTT 凭证 (from iot/mqttcfg.lua) =====
+local K_MQTT = "mqtt_cfg"
+M.mqtt_default = {
+    host = "dz.voltkun.com",
+    port = 1883,
+    user = "",
+    pass = "",
+    pub_topic = "/sys/thing/node/property/post/{sn}",
+    sub_topic = "/sys/thing/gw/config/get/{sn}",
+    ssl = false,
+    client_id = "",
+    interval_s = M.MQTT_INTERVAL_S,
+    qos = M.MQTT_QOS,
+    allow_no_sn = M.MQTT_ALLOW_NO_SN,
+    keep_session = false,
+    auto = { pass = "VKBOXGW2026KEY" },
+    manual_on = false,
+}
+local function norm_topic(v, d)
+    if type(v) ~= "string" then return d end
+    v = v:gsub("^%s*(.-)%s*$", "%1")
+    if v == "" then return d end
+    return v:sub(1, 128)
+end
+local function norm_auto(c, d)
+    local p
+    if type(c.auto) == "table" and type(c.auto.pass) == "string" then p = c.auto.pass end
+    if type(c.auto_pass) == "string" then p = c.auto_pass end
+    if type(p) ~= "string" then p = "" end
+    p = p:sub(1, 64)
+    if p == "" then p = d.auto.pass end
+    return { pass = p }
+end
+function M.mqtt_normalize(c)
+    c = c or {}
+    local d = M.mqtt_default
+    local host = c.host
+    if type(host) ~= "string" then host = "" end
+    host = host:gsub("^%s*(.-)%s*$", "%1")
+    if host == "" then host = d.host end
+    if host == "" or #host > 128 then return nil, "bad host" end
+    local port = math.floor(num(c.port, d.port))
+    if port < 1 or port > 65535 then return nil, "bad port" end
+    local user = c.user
+    if type(user) ~= "string" then user = "" end
+    user = user:sub(1, 64)
+    local pass = c.pass
+    if type(pass) ~= "string" then pass = "" end
+    pass = pass:sub(1, 64)
+    local cid = ""
+    if type(c.client_id) == "string" then cid = c.client_id:gsub("^%s*(.-)%s*$", "%1"):sub(1, 128) end
+    local out = {
+        host = host, port = port, user = user, pass = pass,
+        pub_topic = norm_topic(c.pub_topic, d.pub_topic),
+        sub_topic = norm_topic(c.sub_topic, d.sub_topic),
+        ssl = c.ssl and true or false,
+        client_id = cid,
+        interval_s = math.floor(num(c.interval_s, d.interval_s)),
+        qos = math.floor(num(c.qos, d.qos)),
+        allow_no_sn = c.allow_no_sn and true or false,
+        keep_session = c.keep_session and true or false,
+        auto = norm_auto(c, d),
+        manual_on = c.manual_on and true or false,
+    }
+    if out.interval_s < 0 or out.interval_s > 86400 then return nil, "bad interval_s" end
+    if out.qos < 0 or out.qos > 2 then return nil, "bad qos" end
+    if not out.manual_on then
+        out.user, out.pass = "", ""
+    end
+    return out
+end
+local function kv_flush()
+    if fskv and fskv.save then pcall(fskv.save) end
+end
+function M.mqtt_load()
+    local d = M.mqtt_normalize({})
+    if not fskv or not json then return d, "default" end
+    local ok, s = pcall(fskv.get, K_MQTT)
+    if not ok or type(s) ~= "string" or s == "" then return d, "default" end
+    local okd, t = pcall(json.decode, s)
+    if not okd or type(t) ~= "table" then
+        log.warn("mqtt_cfg", "decode fail, use default")
+        return d, "default"
+    end
+    local n, err = M.mqtt_normalize(t)
+    if not n then
+        log.warn("mqtt_cfg", "normalize fail:", tostring(err))
+        return d, "default"
+    end
+    return n, "fskv"
+end
+function M.mqtt_save(c)
+    local n, err = M.mqtt_normalize(c)
+    if not n then return false, err end
+    if not json then return false, "no json lib" end
+    local oke, s = pcall(json.encode, n)
+    if not oke or not s then return false, "encode fail" end
+    if #s > 2048 then return false, "too large" end
+    if not fskv then return false, "no fskv" end
+    fskv.set(K_MQTT, s)
+    kv_flush()
+    return true
+end
+function M.mqtt_clear_manual()
+    local c = M.mqtt_load()
+    if not c.manual_on then return true, nil, false end
+    c.manual_on = false
+    c.user, c.pass = "", ""
+    c.pub_topic, c.sub_topic = "", ""
+    local ok, err = M.mqtt_save(c)
+    return ok, err, ok
+end
+
+-- {sn} 占位符在这里代, 调用方拿到的是成品 topic
+local function resolve_topic(tpl, did)
+    if not did or did == "" then return nil end
+    return (tpl:gsub("{sn}", did))
+end
+
+-- 设备实际建连要用的那套凭证, 由 manual_on 决定
+function M.mqtt_profile(did)
+    local c = M.mqtt_load()
+    if c.manual_on then
+        return {
+            user = c.user, pass = c.pass,
+            pub = resolve_topic(c.pub_topic, did),
+            sub = resolve_topic(c.sub_topic, did),
+        }
+    end
+    return {
+        user = "", pass = c.auto.pass,
+        pub = string.format(M.PLATFORM_PUB_TOPIC, did),
+        sub = string.format(M.PLATFORM_GET_TOPIC, did),
+    }
+end
+
+-- ===== SN 管理 (from sn/sn.lua, 不含 init) =====
+local K_SN, K_LOCK, K_BURN, K_BTIME = "dev_sn", "dev_sn_lock", "dev_sn_burn", "dev_sn_btime"
+M.SN_STATE = { EMPTY = "empty", INVALID = "invalid", READY = "ready" }
+local sn_state, sn_cache = M.SN_STATE.EMPTY, nil
+local changeCbs = {}
+function M.sn_locked()
+    local ok, v = pcall(fskv.get, K_LOCK)
+    if ok then return v == "1" end
+    return false
+end
+function M.sn_meta()
+    local function g(k) local ok, v = pcall(fskv.get, k); return ok and v or nil end
+    return { burn = tonumber(g(K_BURN)) or 0, btime = tonumber(g(K_BTIME)) or 0 }
+end
+function M.sn_load()
+    local ok, v = pcall(fskv.get, K_SN)
+    if ok and v ~= nil and v ~= "" then return v end
+    return nil
+end
+function M.sn_save(sn)
+    fskv.set(K_SN, sn)
+    local m = M.sn_meta()
+    fskv.set(K_BURN, m.burn + 1)
+    if m.btime == 0 then fskv.set(K_BTIME, os.time()) end
+    kv_flush()
+end
+function M.sn_set_lock()
+    fskv.set(K_LOCK, "1")
+    kv_flush()
+end
+function M.sn_clear_lock()
+    pcall(fskv.del, K_LOCK)
+    kv_flush()
+end
+local function notify(sn, st)
+    for _, cb in ipairs(changeCbs) do pcall(cb, sn, st) end
+end
+function M.sn_clear()
+    if M.sn_locked() and sn_state ~= M.SN_STATE.INVALID then return false, "locked" end
+    pcall(fskv.del, K_SN)
+    kv_flush()
+    sn_cache, sn_state = nil, M.SN_STATE.EMPTY
+    notify(nil, sn_state)
+    return true
+end
+local function luhn_verify(s)
+    if #s < 2 then return false end
+    local sum, dbl = 0, false
+    for i = #s, 1, -1 do
+        local c = s:sub(i, i)
+        if c < "0" or c > "9" then return false end
+        local d = c:byte() - 48
+        if dbl then
+            d = d * 2
+            if d > 9 then d = d - 9 end
+        end
+        sum = sum + d
+        dbl = not dbl
+    end
+    return sum % 10 == 0
+end
+function M.sn_validate(sn)
+    if type(sn) ~= "string" then return false, "not string" end
+    if #sn < M.SN_MIN_LEN or #sn > M.SN_MAX_LEN then return false, "bad length" end
+    if not sn:match("^%w+$") then return false, "bad char" end
+    if sn:match("^%d+$") and not luhn_verify(sn) then return false, "luhn fail" end
+    return true
+end
+function M.sn_on_change(cb) changeCbs[#changeCbs + 1] = cb end
+function M.sn_get_state() return sn_state end
+function M.sn_write(new_sn, opts)
+    opts = opts or {}
+    if M.sn_locked() and sn_state ~= M.SN_STATE.INVALID then return false, "locked" end
+    local ok, err = M.sn_validate(new_sn)
+    if not ok then return false, err end
+    if sn_state == M.SN_STATE.READY then
+        if new_sn == sn_cache then return true, "same" end
+        if not opts.force then return false, "sn exists" end
+    end
+    M.sn_save(new_sn)
+    if M.sn_load() ~= new_sn then return false, "verify fail" end
+    sn_cache, sn_state = new_sn, M.SN_STATE.READY
+    log.info("sn", "burned, burn=" .. M.sn_meta().burn)
+    notify(new_sn, sn_state)
+    return true
+end
+function M.sn_init()
+    if fskv.init then pcall(fskv.init) end
+    local sn = M.sn_load()
+    if not sn or sn == "" then
+        sn_state = M.SN_STATE.EMPTY
+        log.warn("sn", "empty, burn via W:SN=")
+    else
+        local ok, err = M.sn_validate(sn)
+        if ok then
+            sn_cache, sn_state = sn, M.SN_STATE.READY
+        else
+            sn_state = M.SN_STATE.INVALID
+            log.error("sn", "invalid:", sn, tostring(err))
+        end
+    end
+    _G.get_device_sn = function() return sn_cache end
+    return true
+end
+
+local imei_cache, uid_cache = nil, nil
+local function grab(lib, key)
+    if not lib then return nil end
+    local v = lib[key]
+    if type(v) == "function" then
+        local ok, r = pcall(v)
+        if ok and r and r ~= "" then return r end
+        return nil
+    end
+    if type(v) == "string" and v ~= "" then return v end
+    return nil
+end
+function M.sn_imei_init()
+    local mobile = util.try("mobile")
+    local mcu = util.try("mcu")
+    if not imei_cache then imei_cache = grab(mobile, "imei") end
+    if not uid_cache then uid_cache = grab(mcu, "unique_id") end
+    return imei_cache and uid_cache
+end
+function M.sn_imei() return imei_cache end
+function M.sn_imei_wait()
+    local sys = util.try("sys")
+    M.sn_imei_init()
+    if not sys then return end
+    sys.taskInit(function()
+        for _ = 1, 60 do
+            if M.sn_imei_init() then return end
+            sys.wait(500)
+        end
+        log.warn("sn", "identity timeout, imei/uid may be empty")
+    end)
+end
+function M.sn_info_line()
+    return string.format("imei:%s;uid:%s;sn:%s;state:%s;lock:%d",
+        imei_cache or "", uid_cache or "",
+        sn_cache or "", sn_state, M.sn_locked() and 1 or 0)
+end
+function M.sn_warn_monitor(period)
+    local sys = util.try("sys")
+    if not sys then return end
+    sys.timerLoopStart(function()
+        if sn_state ~= M.SN_STATE.READY then
+            log.warn("sn", "no sn! burn via W:SN=xxx")
+        end
+    end, (period or M.SN_WARN_PERIOD_S) * 1000)
 end
 
 return M

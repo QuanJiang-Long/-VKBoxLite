@@ -58,14 +58,14 @@ if guard then pcall(guard.init) end
 
 -- stage 2: SN(产线优先)
 log.info("main", "[2/6] sn")
-local snc = mod("sn/sn", pcall(require, "sn/sn"))
-if snc then
-    pcall(snc.init)
-    pcall(snc.identity_init)
-    log.info("main", string.format("  sn state=%s sn=%s", snc.state(),
+local cfg = mod("cfg", pcall(require, "cfg"))
+if cfg then
+    pcall(cfg.sn_init)
+    pcall(cfg.sn_imei_init)
+    log.info("main", string.format("  sn state=%s sn=%s", cfg.sn_get_state(),
         tostring(_G.get_device_sn and _G.get_device_sn())))
-    if type(snc.on_change) == "function" then
-        pcall(snc.on_change, function(sn, state)
+    if type(cfg.sn_on_change) == "function" then
+        pcall(cfg.sn_on_change, function(sn, state)
             if state ~= "ready" or sn == nil then return end
             local okm, mgr = pcall(require, "iot/iot")
             if not okm or not mgr then return end
@@ -83,7 +83,6 @@ end
 -- stage 3: 协议/数据/配置
 log.info("main", "[3/6] bus/data/cfg")
 local collector = mod("data/collector", pcall(require, "data/collector"))
-local cfgstore = mod("cfg", pcall(require, "cfg"))
 
 -- stage 4: 485 子系统(默认 idle)
 log.info("main", "[4/6] 485")
@@ -96,7 +95,7 @@ if gpio then
     pcall(gpio.set, mbus.DE_PIN, 0)
 end
 if ctrl then
-    local sysc = cfgstore and cfgstore.load_sys()
+    local sysc = cfg and cfg.load_sys()
     local boot = sysc and sysc.boot_mode or "idle"
     -- 三种主动模式都能开机自启。漏一个的症状很隐蔽: 开机模式选了它,
     -- 日志打"485 idle"但设备其实没起来, 用户只会以为"开机启动坏了"
@@ -120,8 +119,8 @@ if iot then
         log.warn("main", "  未烧 SN, MQTT 不建连")
     end
 end
-if snc and type(snc.start_warn_monitor) == "function" then
-    pcall(snc.start_warn_monitor, 600)
+if cfg and type(cfg.sn_warn_monitor) == "function" then
+    pcall(cfg.sn_warn_monitor, 600)
 end
 
 -- stage 6: 前端指令层 + 产线通道

@@ -1,5 +1,5 @@
 local util = require "util"
-local cfg = require "core/config"
+local cfg = require "cfg"
 local log = util.log()
 
 local sys = util.get("sys")
@@ -9,9 +9,7 @@ local rtos = util.try("rtos")
 local mobile = util.try("mobile")
 local socket = util.try("socket")
 
-local mqttcfg = require "iot/mqttcfg"
 local collector = require "data/collector"
-local cfgstore = require "cfg"
 local pullcfg = require "iot/pullcfg"
 local mon = require "bus/mon"
 -- 惰性 require, 避免 main.lua 初始化时把 uart 未 setup 的 poll 提前拖起来
@@ -43,7 +41,7 @@ end
 --    解析会全部静默失败 (只有一行 write item unresolvable 日志)。
 --    alias_map 同理: 上报 name 也要按在用的那份映射
 local function active_cfg()
-    local f = (poll_slot() == "pull") and cfgstore.load_pull or cfgstore.load_poll
+    local f = (poll_slot() == "pull") and cfg.load_pull or cfg.load_poll
     local ok, c = pcall(f)
     return (ok and c) or nil
 end
@@ -79,11 +77,7 @@ local function reset_state()
 end
 
 local function device_id()
-    local ok, snc = pcall(require, "sn/sn")
-    if ok and snc and snc.state() == "ready" then
-        return _G.get_device_sn and _G.get_device_sn()
-    end
-    return nil
+    return _G.get_device_sn and _G.get_device_sn()
 end
 
 -- 平台签发凭证是 "SN_" (下划线后空), 不带 ProductId, 写死对不上
@@ -195,12 +189,12 @@ local function publish()
     if #items == 0 then return false end
     local base = S.pub or ""
     if base == "" then return false end
-    local manual = mqttcfg.load().manual_on
+    local manual = cfg.mqtt_load().manual_on
     local any = false
     for _, it in ipairs(items) do
         local topic = manual and base or (base .. "-" .. it.idx)
         local ok, err = pcall(function()
-            S.client:publish(topic, it.body, mqttcfg.load().qos)
+            S.client:publish(topic, it.body, cfg.mqtt_load().qos)
         end)
         if ok then
             S.published = S.published + 1
@@ -291,7 +285,7 @@ local MODE = {
             for _, r in ipairs(mon.infer().regs or {}) do
                 put(r.slave, { addr = r.addr, count = r.count, fc = r.fc, dtype = "uint16" })
             end
-            local pc = cfgstore.load_pull()
+            local pc = cfg.load_pull()
             for _, r in ipairs((pc and pc.regs) or {}) do
                 put(pc.slave, r)
             end
@@ -368,7 +362,7 @@ local function send_meta()
     }
     if csq then p[#p + 1] = {"csq", csq, false} end
     p[#p + 1] = {"netRegister", tostring(net_registered(csq)), false}
-    p[#p + 1] = {"networkAddress", mqttcfg.load().host, true}
+    p[#p + 1] = {"networkAddress", cfg.mqtt_load().host, true}
     p[#p + 1] = {"isShadow", 0, false}
     p[#p + 1] = {"summary", "VKBox Bootstrap", true}
     p[#p + 1] = {"deviceType", 3, false}
@@ -397,7 +391,7 @@ local function meta_sig()
     local csq = mcall("csq")
     return string.format("%s|%s|%s|%s", imei(),
         tostring(mcall("iccid") or ""), tostring(type(csq) == "number" and csq or ""),
-        tostring(mqttcfg.load().host or ""))
+        tostring(cfg.mqtt_load().host or ""))
 end
 
 -- U3 口径: ram_percent = rtos.meminfo 已用/总量, 真实系统内存
@@ -489,7 +483,7 @@ local function on_mqtt(cli, event, data, payload)
         local subs = build_subs()
         S.subs = subs
         S.subscribed = false
-        local qos = mqttcfg.load().qos
+        local qos = cfg.mqtt_load().qos
         for _, t in ipairs(subs) do
             local sok, serr = pcall(function() cli:subscribe(t, qos) end)
             if not sok then log.warn("iot", "subscribe fail:", t, tostring(serr)) end
@@ -530,14 +524,14 @@ end
 local function try_connect()
     if not mqtt then return false, "mqtt 库不可用(需 sysplus/mqtt 组件)" end
     if type(mqtt.create) ~= "function" then return false, "mqtt.create 不可用" end
-    local c = mqttcfg.load()
+    local c = cfg.mqtt_load()
     local did = device_id()
     if not did or did == "" then
         if not c.allow_no_sn then return false, "no sn" end
         did = "unknown"
     end
     S.device_id = did
-    local prof, terr = mqttcfg.profile(did)
+    local prof, terr = cfg.mqtt_profile(did)
     if not prof then return false, terr end
     S.pub, S.sub = prof.pub, prof.sub
     -- B 模型: clientId = "SN_", username = 裸 SN, 密码 = 平台签发凭证
@@ -694,17 +688,17 @@ end
 -- 三道安全边界: ① normalize_poll 不过不落盘 ② interval/timeout 取设备当前值 ③ 前后对比日志
 local function auto_apply(r)
     if not r or not r.poll then return false, "无可应用的配置" end
-    local n, nerr = cfgstore.normalize_poll(r.poll)
+    local n, nerr = cfg.normalize_poll(r.poll)
     if not n then return false, "配置不合法: " .. tostring(nerr) end
     -- 平台不给轮询节奏：保留设备自己的 interval/timeout。base 取 ds_pull
     -- 而不是 ds_poll —— 平台配置落自己的槽，手动配的那份寄存器表不许被
     -- 覆盖掉(两个模式各用各的，见 lua/README.md 配置来源隔离)
-    local base = cfgstore.load_pull()
+    local base = cfg.load_pull()
     n.interval_ms = base.interval_ms
     n.timeout_ms = base.timeout_ms
 
     local before = { slave = base.slave, baud = base.baud, regs = #(base.regs or {}) }
-    local ok, serr = cfgstore.save_pull(n)
+    local ok, serr = cfg.save_pull(n)
     if not ok then return false, "落盘失败: " .. tostring(serr) end
 
     local pe = get_poll()
@@ -871,18 +865,18 @@ function M.pulling() return pulling() end
 -- 切档后还订旧清单会像"手动配置没生效"
 function M.set_manual(on)
     on = on and true or false
-    local c = mqttcfg.load()
+    local c = cfg.mqtt_load()
     -- 档位没变就不必断开重连 (白丢心跳, 还可能撞上正在进行的拉取握手)
     if not not c.manual_on == on then return false end
     c.manual_on = on
     if on then
         -- 手动<-自动: 不用动 broker. host/port 是两档共用
-        local ok, err = mqttcfg.save(c)
+        local ok, err = cfg.mqtt_save(c)
         if not ok then return false, err end
     else
         -- 自动<-手动: 平台地址必须归位. auto.pass 要带过去 (用户设的平台凭证)
-        local d = mqttcfg.default
-        local ok, err = mqttcfg.save({
+        local d = cfg.mqtt_default
+        local ok, err = cfg.mqtt_save({
             host = d.host, port = d.port, ssl = d.ssl,
             manual_on = false,
             auto = { pass = c.auto and c.auto.pass or "" },
@@ -899,7 +893,7 @@ function M.pull_start()
     -- 已在拉取中直接当成功 (ctrl.switch_mode 不该因重复请求判失败)
     if pull_active() then return true end
     if not get_topic() then return false, "无 SN" end
-    local c = mqttcfg.load()
+    local c = cfg.mqtt_load()
     if not c.host or c.host == "" then return false, "请先配置 MQTT 服务器地址" end
     if not c.port or c.port < 1 or c.port > 65535 then return false, "请先配置 MQTT 端口" end
     S.pull = {
@@ -922,7 +916,7 @@ function M.pull_status()
         r.skipped = p.result.skipped
         r.renamed = p.result.renamed
         -- 只带 pub/sub 给前端回显 (3 条 gw 订阅是设备端固定常量, 前端没输入框)
-        local prof = mqttcfg.profile(device_id())
+        local prof = cfg.mqtt_profile(device_id())
         r.mqtt = {
             pub = prof and prof.pub, sub = prof and prof.sub,
         }
@@ -1126,7 +1120,7 @@ local function task_main()
                 pcall(handle_downlink, rp.topic, rp.payload)
             end
             refresh_subs()
-            local c = mqttcfg.load()
+            local c = cfg.mqtt_load()
             local due = false
             if c.interval_s > 0 then
                 due = (os.time() - S.last_pub) >= c.interval_s
@@ -1214,16 +1208,16 @@ function M.kick()
 end
 
 function M.apply_cfg(c)
-    local ok, err = mqttcfg.save(c)
+    local ok, err = cfg.mqtt_save(c)
     if not ok then return false, err end
     M.kick()
     return true
 end
 
 function M.status()
-    local c = mqttcfg.load()
+    local c = cfg.mqtt_load()
     -- 未建连时按当前档次兜底算一份 (与 try_connect 同源, 建连前 status 不空)
-    local prof = mqttcfg.profile(device_id())
+    local prof = cfg.mqtt_profile(device_id())
     return {
         want_run = S.want_run,
         connected = S.connected,

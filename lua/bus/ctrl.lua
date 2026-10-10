@@ -5,7 +5,6 @@ local sys = util.try("sys")
 local poll = require "bus/poll"
 local mon = require "bus/mon"
 local cfgstore = require "cfg"
-local mqttcfg = require "iot/mqttcfg"
 local iot = util.try("iot/iot")
 
 local M = {}
@@ -112,7 +111,7 @@ end
 function M.reset_user_cfg()
     local cleared = cfgstore.reset_user()
     -- wrote=false = 手动档本来就是干净的(从没配过), 不能报"已清空"骗用户
-    local ok, err, wrote = mqttcfg.clear_manual()
+    local ok, err, wrote = cfgstore.mqtt_clear_manual()
     if ok then
         if wrote then cleared[#cleared + 1] = "mqtt_manual" end
     else
