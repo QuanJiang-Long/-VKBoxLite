@@ -98,20 +98,17 @@ local function get_topic()
     return string.format(cfg.PLATFORM_GET_TOPIC, did)
 end
 
-local function imei()
-    if not mobile then return "" end
-    local f = mobile.imei
-    if type(f) ~= "function" then return "" end
-    local ok, v = pcall(f)
-    return ok and tostring(v) or ""
-end
-
 local function mcall(k)
     if not mobile then return nil end
     local f = mobile[k]
     if type(f) ~= "function" then return nil end
     local ok, v = pcall(f)
     return ok and v or nil
+end
+
+local function imei()
+    local v = mcall("imei")
+    return v and tostring(v) or ""
 end
 
 local function alias_map()
@@ -337,29 +334,37 @@ local function send_meta()
     if not did then return false, "无 SN" end
     local csq = mcall("csq")
     if type(csq) ~= "number" then csq = nil end
-    local p = {}
-    p[#p + 1] = string.format('"vendor":%s', jstr("VKBox"))
-    p[#p + 1] = string.format('"model":%s', jstr(cfg.PLATFORM_MODEL))
-    p[#p + 1] = string.format('"fwVersion":%s', jstr(_G.VERSION or "0.0.0"))
-    p[#p + 1] = string.format('"sn":%s', jstr(did))
-    p[#p + 1] = string.format('"deviceSn":%s', jstr(did))
-    p[#p + 1] = string.format('"imei":%s', jstr(imei()))
-    p[#p + 1] = string.format('"iccid":%s', jstr(tostring(mcall("iccid") or "")))
-    p[#p + 1] = string.format('"fw":%s', jstr("v" .. (_G.VERSION or "0.0.0")))
-    p[#p + 1] = string.format('"firmwareVersion":%d', fw_num())
-    p[#p + 1] = string.format('"hw":%s', jstr(cfg.PLATFORM_MODEL))
-    p[#p + 1] = string.format('"capabilities":[%s]', '"modbus","mqtt"')
-    p[#p + 1] = string.format('"deviceName":%s', jstr("VKBOX-" .. did))
-    p[#p + 1] = string.format('"serialNumber":%s', jstr(did))
-    if csq then p[#p + 1] = string.format('"csq":%d', csq) end
-    p[#p + 1] = string.format('"netRegister":%s', tostring(net_registered(csq)))
-    p[#p + 1] = string.format('"networkAddress":%s', jstr(mqttcfg.load().host))
-    p[#p + 1] = string.format('"isShadow":0')
-    p[#p + 1] = string.format('"summary":%s', jstr("VKBox Bootstrap"))
-    p[#p + 1] = '"deviceType":3'
-    p[#p + 1] = '"locationWay":0'
-    p[#p + 1] = string.format('"ts":%d', os.time() * 1000)
-    return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did), "{" .. table.concat(p, ",") .. "}", 1)
+    local v = _G.VERSION or "0.0.0"
+    -- [name, value, is_str] 数组. is_str=true 用 jstr, false 直接拼 (数字)
+    local p = {
+        {"vendor", "VKBox", true},
+        {"model", cfg.PLATFORM_MODEL, true},
+        {"fwVersion", v, true},
+        {"sn", did, true},
+        {"deviceSn", did, true},
+        {"imei", imei(), true},
+        {"iccid", tostring(mcall("iccid") or ""), true},
+        {"fw", "v" .. v, true},
+        {"firmwareVersion", fw_num(), false},
+        {"hw", cfg.PLATFORM_MODEL, true},
+        {"capabilities", '["modbus","mqtt"]', false},  -- 已是 JSON 数组, 不加引号
+        {"deviceName", "VKBOX-" .. did, true},
+        {"serialNumber", did, true},
+    }
+    if csq then p[#p + 1] = {"csq", csq, false} end
+    p[#p + 1] = {"netRegister", tostring(net_registered(csq)), false}
+    p[#p + 1] = {"networkAddress", mqttcfg.load().host, true}
+    p[#p + 1] = {"isShadow", 0, false}
+    p[#p + 1] = {"summary", "VKBox Bootstrap", true}
+    p[#p + 1] = {"deviceType", 3, false}
+    p[#p + 1] = {"locationWay", 0, false}
+    p[#p + 1] = {"ts", os.time() * 1000, false}
+    local parts = {}
+    for i, x in ipairs(p) do
+        parts[i] = x[3] and string.format('"%s":%s', x[1], jstr(x[2]))
+                              or string.format('"%s":%s', x[1], tostring(x[2]))
+    end
+    return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did), "{" .. table.concat(parts, ",") .. "}", 1)
 end
 
 local function send_topo()
