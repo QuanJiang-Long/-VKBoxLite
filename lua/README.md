@@ -6,7 +6,7 @@
 
 | 功能 | 模块 | 说明 |
 |---|---|---|
-| Q1 SN 烧录 | `sn/` | 三态状态机 + Luhn 校验 + fskv 持久化 + 产线指令通道 |
+| Q1 SN 烧录 | `sn/` | 三态状态机 + VL 前缀格式校验 + fskv 持久化 + 产线指令通道 |
 | Q2 Modbus 轮询 | `bus/poll.lua` | 主机轮询（fc03）+ 写事务注入（fc06/fc16） |
 | Q3 Modbus 旁听 | `bus/mon.lua` | 纯被动监听，CRC 试探切帧，REQ/RSP 配对 |
 | Q4 MQTT 上报 | `iot/` | deviceId=SN，值变化驱动上报，下行 REPORT/WRITE |
@@ -20,7 +20,7 @@ lua/
 │   ├── corelib.lua     库安全获取 + log 降级
 │   └── config.lua      全部默认参数
 ├── sn/
-│   ├── sn.lua          SN 状态机 + Luhn + fskv 存储 + 身份
+│   ├── sn.lua          SN 状态机 + VL 前缀格式校验 + fskv 存储 + 身份
 │   └── prov.lua        产线/前端串口指令通道（VUART_0）
 ├── bus/
 │   ├── mbus.lua        Modbus 协议层（CRC/组帧/解析/解码/DE 精算）
@@ -62,7 +62,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 下行: 平台 WRITE → recv 挂起 → handle_downlink → resolve_addr → poll.enqueue_write
       （idle 时一次性 worker 排空，sniff 占线则中止）
 
-烧号: W:SN=xxx → prov → sn.write(锁检查/validate/Luhn) → fskv save + 回读
+烧号: W:SN=xxx → prov → sn.write(锁检查/validate/VL前缀+长度) → fskv save + 回读
        → on_change → MQTT 自动启动
 ```
 

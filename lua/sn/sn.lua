@@ -72,28 +72,24 @@ function M.clear_lock()
     flush()
 end
 
-local function luhn_verify(s)
-    if #s < 2 then return false end
-    local sum, dbl = 0, false
-    for i = #s, 1, -1 do
-        local c = s:sub(i, i)
-        if c < "0" or c > "9" then return false end
-        local d = c:byte() - 48
-        if dbl then
-            d = d * 2
-            if d > 9 then d = d - 9 end
-        end
-        sum = sum + d
-        dbl = not dbl
-    end
-    return sum % 10 == 0
-end
-
+-- 格式 VL+YYYYMMDD+NNN。日期范围 2000-2099, 月 01-12, 日 01-31。
+-- 13 位时日期 8 位 + 流水 3 位; 14-32 位留给扩展(流水超 999 / 字母段)。
+-- 日期段超出位置(月份/日 非数字 或 范围非法)直接拒, 省得产线烧个
+-- "VL2026A009010" 设备读起来静默用错日期
 function M.validate(sn)
     if type(sn) ~= "string" then return false, "not string" end
     if #sn < cfg.SN_MIN_LEN or #sn > cfg.SN_MAX_LEN then return false, "bad length" end
+    if sn:sub(1, #cfg.SN_PREFIX) ~= cfg.SN_PREFIX then return false, "bad prefix" end
+    -- 日期段: VL 之后 8 位必须全数字, 年 2000-2099, 月 01-12, 日 01-31
+    local d = sn:sub(#cfg.SN_PREFIX + 1, #cfg.SN_PREFIX + 8)
+    if not d:match("^%d+$") then return false, "bad date" end
+    local yr = tonumber(d:sub(1, 4))
+    local mo = tonumber(d:sub(5, 6))
+    local dy = tonumber(d:sub(7, 8))
+    if yr < 2000 or yr > 2099 then return false, "bad year" end
+    if mo < 1 or mo > 12 then return false, "bad month" end
+    if dy < 1 or dy > 31 then return false, "bad day" end
     if not sn:match("^%w+$") then return false, "bad char" end
-    if sn:match("^%d+$") and not luhn_verify(sn) then return false, "luhn fail" end
     return true
 end
 
