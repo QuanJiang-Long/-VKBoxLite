@@ -338,17 +338,33 @@ end
 --          的名字会是地址而不是中文别名, 想看得顺眼得让用户配一份轮询表
 -- ⚠️ nodeIndex 必须和 U4 的 -{n} 同一套序号(都按从机地址升序), 否则平台把
 --    建档的子设备和上报的数据对不上, 症状是"拓扑发成功了但数据不进去"
+-- Modbus 1-based 地址: 平台 V3 用 40001+ 形式(保持寄存器 0 = 40001),
+-- 设备层 0-based 协议地址要 +40001 转 PLC 地址; 没 fc 字段按保持寄存器算
+local function modbus_address(r)
+    local addr = r.addr or 0
+    if r.fc == 0x04 then return 30001 + addr end
+    if r.fc == 0x01 or r.fc == 0x05 or r.fc == 0x0F then return 1 + addr end
+    if r.fc == 0x02 then return 10001 + addr end
+    return 40001 + addr
+end
+
 local function node_json(idx, slave, c, regs)
     local props = {}
     for _, r in ipairs(regs) do
         local dt = r.dtype or "uint16"
+        -- id 是英文 property key, sniff 时 r.name="r{addr}" 匹配 ^r%d+$ 不合法
+        local id = r.name
+        if not id or id == "" or id:match("^r%d+$") then
+            id = "reg_" .. r.addr
+        end
+        local name = r.alias or id
         props[#props + 1] = string.format(
             '{"id":%s,"name":%s,"dataType":%s,"modbus":{"slave":%d,"address":%d,"quantity":%d,"dataType":%s}}',
-            jstr(r.name), jstr(r.alias or r.name), jstr(dt), slave, r.addr, r.count or 1, jstr(dt))
+            jstr(id), jstr(name), jstr(dt), slave, modbus_address(r), r.count or 1, jstr(dt))
     end
     return string.format(
         '{"nodeIndex":%d,"slaveId":%d,"kind":"RTU","serial":%s,"model":{"tslName":%s,"properties":[%s]}}',
-        idx, slave, serial_json(c), jstr("node_" .. idx), table.concat(props, ","))
+        idx, slave, serial_json(c), jstr("sniff_s" .. slave), table.concat(props, ","))
 end
 
 -- U2 的 nodes[]。返回 nil+原因表示拓扑还没成形(从机没识别出来/没配寄存器表)
@@ -371,18 +387,18 @@ local function build_nodes()
             local k = slave .. ":" .. r.addr
             local p = at[k]
             if p then
-                p.count, p.name, p.alias, p.dtype = r.count, r.name, r.alias or r.name, r.dtype or "uint16"
+                p.count, p.name, p.alias, p.dtype = r.count, r.name, r.alias, r.dtype or "uint16"
                 return
             end
             -- 不记 slave: 分组已经由 by[] 的键承载, node_json 拿的是循环
             -- 变量 s, 再存一份是只写不读
-            p = { addr = r.addr, count = r.count, name = r.name, alias = r.alias or r.name, dtype = r.dtype or "uint16" }
+            p = { addr = r.addr, count = r.count, name = r.name, alias = r.alias, dtype = r.dtype or "uint16" }
             at[k] = p
             by[slave] = by[slave] or {}
             by[slave][#by[slave] + 1] = p
         end
         for _, r in ipairs(mon.infer().regs or {}) do
-            put(r.slave, { addr = r.addr, count = r.count, name = "r" .. r.addr, dtype = "uint16" })
+            put(r.slave, { addr = r.addr, count = r.count, fc = r.fc, dtype = "uint16" })
         end
         local pc = cfgstore.load_pull()
         for _, r in ipairs((pc and pc.regs) or {}) do
@@ -487,9 +503,9 @@ local function send_topo()
     local nodes, err = build_nodes()
     if not nodes then return false, err end
     return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did),
-        string.format('{"vendor":%s,"model":%s,"fwVersion":%s,"sn":%s,"deviceSn":%s,"ts":%d,"nodes":[%s]}',
+        string.format('{"vendor":%s,"model":%s,"fwVersion":%s,"ts":%d,"nodes":[%s]}',
             jstr("VKBox"), jstr(cfg.PLATFORM_MODEL), jstr(_G.VERSION or "0.0.0"),
-            jstr(did), jstr(did), os.time() * 1000, nodes), 1)
+            os.time() * 1000, nodes), 1)
 end
 
 -- 元数据指纹: 只挑会变的字段(imei/iccid/csq/主机名), 版本和型号是常量不必算。
