@@ -40,8 +40,7 @@ local function num(v, d)
     return tonumber(v) or d
 end
 
--- topic 模板校验: 截断到 128, 去掉首尾空格。{sn} 是占位符, 由
--- profile() 代。空串 = 用默认模板
+-- topic 模板: 截断 128, 去首尾空格, {sn} 由 profile() 代, 空串用默认
 local function norm_topic(v, d)
     if type(v) ~= "string" then return d end
     v = v:gsub("^%s*(.-)%s*$", "%1")
@@ -67,7 +66,7 @@ function M.normalize(c)
     local host = c.host
     if type(host) ~= "string" then host = "" end
     host = host:gsub("^%s*(.-)%s*$", "%1")
-    -- 缺字段回退默认值: W:MQTT 只改 host/port 时不应因缺字段而失败
+    -- W:MQTT 只改 host/port 时不应因缺字段而失败
     if host == "" then host = d.host end
     if host == "" or #host > 128 then return nil, "bad host" end
     local port = math.floor(num(c.port, d.port))
@@ -118,9 +117,8 @@ local function kv_flush()
 end
 
 function M.load()
-    -- 每条 early-exit 都过一遍 normalize: 一是给调用方一份干净拷贝(否则
-    -- 拿到的是 M.default 本体, 谁改一下 auto 子表就把默认值污染了),
-    -- 二是保证 auto/manual_on 这几个新键在"从没存过配置"时也存在
+    -- early-exit 都过 normalize: 一是给调用方干净拷贝(否则拿到 M.default
+    -- 本体, 谁改 auto 子表就污染默认值), 二是保证新键在"从没存过"时也存在
     local d = M.normalize({})
     if not fskv or not json then return d, "default" end
     local ok, s = pcall(fskv.get, K_CFG)
@@ -218,9 +216,8 @@ end
 -- 每切一次空闲都回一句"已清空 MQTT 手动档"是谎报
 function M.clear_manual()
     local c = M.load()
-    -- 已经是干净态就别写: 每次切空闲都白写一次 fskv + save, 而 flash
-    -- 擦写次数是有限的。判据只看 manual_on —— normalize 在它为 false 时
-    -- 已强制把 user/pass/pub/sub 清空, 所以这几项不可能"单独脏"
+    -- 已干净就别写: 切空闲都白写 fskv + save, flash 擦写有限。
+    -- 判据只看 manual_on —— normalize=false 已强制清空 user/pass/pub/sub
     if not c.manual_on then return true, nil, false end
     c.manual_on = false
     c.user, c.pass = "", ""

@@ -15,14 +15,12 @@ local running, gen = false, 0
 local rxbuf = ""
 local pendingReqs, lastReqs = {}, {}
 local lastRx, lastBaud = 0, nil
--- 识别中标记: true = 正在扫 21 个候选, 业务(collector 推送/配对)视为未就绪。
--- M.stop() 会清掉它, 所以外部靠 mon.is_detecting() 判断要不要屏蔽写操作
+-- 识别中标记: true = 正在扫 21 个候选, 业务视为未就绪; M.stop() 会清
 local detecting, detectGen = false, 0
--- 进 sniff 时用的那套配置参数(可能和现场不符)。识别失败时要把串口还原成它,
--- 否则扫空一轮后串口停在最后一个候选(1200 8O1)上, 真流量全成乱码
+-- 进 sniff 时的配置参数(可能和现场不符)。识别失败要把串口还原成它,
+-- 否则扫空后串口停在最后候选(1200 8O1), 真流量全成乱码
 local bootCfg = nil
--- 两轮识别之间的间隔。静默总线下没必要高频重扫(白耗电+刷日志),
--- 3s 足够等到稀疏主机冒出流量
+-- 两轮识别间隔。3s 足够等到稀疏主机冒流量, 高频重扫白耗电
 local DETECT_RETRY_MS = 3000
 -- 每 fc 最多留 4 条待配对请求。能进 push_req 的 fc 只有 3/5/15 三个
 -- (parse_frame 是白名单 + 强制 CRC, 其余 fc 到不了这里), 所以
@@ -45,8 +43,8 @@ local function push_req(f)
     q[#q + 1] = { fc = f.fc, slave = f.slave, addr = f.addr, qty = f.qty, ts = os.clock() }
     while #q > MAX_PENDING_PER_FC do table.remove(q, 1) end
     lastReqs[key(f.slave, f.qty)] = { fc = f.fc, slave = f.slave, addr = f.addr, qty = f.qty, ts = os.clock() }
-    -- 封顶, 理由见 MAX_LAST_REQ。走一遍 pairs 数键数而不再养一个计数器:
-    -- 表最多 65 项, 每帧多走几十次迭代, 换来少一个要和 stop() 同步的状态
+    -- 封顶, 理由见 MAX_LAST_REQ。pairs 数键数不再养计数器: 65 项
+    -- 表每帧多走几十次迭代, 换来少一个要跟 stop() 同步的状态
     local n = 0
     for _ in pairs(lastReqs) do n = n + 1 end
     if n > MAX_LAST_REQ then lastReqs = {} end
@@ -139,14 +137,12 @@ local function on_receive(id, len)
         if type(data) ~= "string" or #data == 0 then break end
         rxbuf = rxbuf .. data
         lastRx = os.time()
-        if #rxbuf > 512 then rxbuf = rxbuf:sub(-256) end
+        if #rxbuf > 256 then rxbuf = rxbuf:sub(-128) end
     end
 end
 
--- CRC 试探法切帧: 逐个偏移找第一个 CRC 合法且长度自洽的帧,
--- 与 poll 同一套策略; 找不到才丢 1 字节继续找。
--- fc3/4 的 8 字节读请求形态由 mbus.decode_frame 认(process_frame 走的是它),
--- 这里不做重复判定
+-- CRC 试探法切帧: 逐偏移找第一个 CRC 合法且长度自洽的帧;
+-- 找不到丢 1 字节继续找。fc3/4 8 字节请求由 mbus.decode_frame 认
 local function next_frame()
     for off = 1, #rxbuf do
         local s = rxbuf:sub(off)
@@ -182,10 +178,8 @@ local function task()
     end
 end
 
--- 静默侦听总线 ms 毫秒, 返回期间解译出的帧数(前端 R:SNIFF 用)
--- 若嗅探任务已在跑, 直接统计窗口期内的增量; 否则临时起一个窗口
--- 从旁听到的 REQ 帧反推轮询表(前端 R:INFER)
--- 按 slave+addr+qty+fc 聚合命中次数
+-- 静默侦听总线 ms 毫秒, 返回期间解译出的帧数(R:SNIFF 用)
+-- 从旁听 REQ 反推轮询表(R:INFER), 按 slave+addr+qty+fc 聚合命中次数
 function M.infer()
     local fs = collector.get_frames()
     -- 健康度: 见到 RSP 的从机才算在线。主机轮询一个没接线的从机时只见请求不见
@@ -226,10 +220,8 @@ function M.infer()
     return {
         regs = regs,
         slaves = sl,
-        -- 被健康度过滤掉的请求条数。不是 0 就说明总线上有"主机在轮询但没人应答"
-        -- 的地址, 前端据此提示用户排查
+        -- 健康度过滤掉的请求条数, 前端据此提示"轮询没人应答"的地址
         ignored = ignored,
-        -- 统计段原样带出, 前端据此判断"旁听到的帧够不够多、配出来可不可信"
         stat = stat,
     }
 end
@@ -253,9 +245,8 @@ end
 
 function M.start(c)
     if running then return true end
-    -- 没有 sniff 持久槽: 参数由 auto_detect() 现场试出来, 只存本次会话。
-    -- 调用方不传 c 时用编译期默认(core/config 的 9600 8N1), 与原来读那个
-    -- 空槽拿到的值逐字节相同
+    -- 没有 sniff 持久槽: 参数由 auto_detect() 试出来只存本次会话;
+    -- 调用方不传 c 时用编译期默认(原空槽的 9600 8N1)
     c = c or { baud = cfg.BAUD, databits = cfg.DATABITS, stopbits = cfg.STOPBITS, parity = cfg.PARITY }
     if gpio then
         pcall(gpio.setup, mbus.DE_PIN, 0)
@@ -281,9 +272,8 @@ end
 -- iot 的 OOM 兜底调它: collector.trim_cache() 清不到 mon 的局部表
 function M.trim_reqs() lastReqs = {} end
 
--- 扫空一轮后把串口还原成进 sniff 时那套参数。不还原的话, 失败后串口停在最后
--- 一个候选(1200 8O1), 接下来 3s 等待期里到的真流量全成乱码, 而下一轮又要从
--- 9600 重新开始 —— 中间那段窗口看着像"总线时好时坏", 查不出原因
+-- 扫空一轮后还原进 sniff 时的参数。不还原则串口停在最后候选(1200 8O1),
+-- 接下来 3s 真流量全成乱码, 下一轮又从 9600 重新开始, 看着像"时好时坏"
 local function restore_params()
     local c = bootCfg or { baud = cfg.BAUD, databits = cfg.DATABITS, stopbits = cfg.STOPBITS, parity = cfg.PARITY }
     pcall(uart.setup, mbus.UART_ID, c.baud or cfg.BAUD,
@@ -293,16 +283,14 @@ local function restore_params()
     lastBaud = c.baud or cfg.BAUD
 end
 
--- sniff 通讯参数自动识别。21 个候选 = 7 baud × 3 parity，parity 放外层：8N1 占
--- 现场绝大多数，先把 8N1 的 7 个 baud 扫完再碰 E/O，常见情况 1~7s 命中，全落空
--- 才走满 21s。databits/stopbits 固定 8/1 —— ModbusRTU 事实标准。
+-- 21 候选 = 7 baud × 3 parity, parity 外层: 8N1 占绝大多数,
+-- 先扫 7 个 8N1 baud 再碰 E/O, 常见 1~7s 命中, 全落空才走满 21s。
+-- databits/stopbits 固定 8/1 —— ModbusRTU 事实标准。
 --
--- 判定不新写校验，直接借 task() 现有的 CRC 试探切帧，只数 stat.frames 增量：
--- 参数错 → 字节乱 → CRC 不过 → 一帧都解不出。CRC 是 16 位校验，单帧误判
--- 率 ~1/65536，所以要 DETECT_HITS(2) 帧才算命中。
+-- 判定不新写校验, 借 task() 现有 CRC 试探切帧, 只数 stat.frames 增量:
+-- CRC 16 位单帧误判 ~1/65536, 所以要 DETECT_HITS(2) 帧才算命中。
 --
--- ⚠️ 结果只存本次会话，不写 fskv。poll/sniff 两套配置必须隔离，识别出的
--- 参数不该悄悄改掉任何一侧(见 lua/README.md「poll / sniff 配置隔离」)
+-- ⚠️ 结果只存本次会话不写 fskv, poll/sniff 两套配置必须隔离(见 README)
 function M.auto_detect()
     if not sys then return nil, "no sys" end
     if not running and not M.start() then return nil, "start fail" end
@@ -334,14 +322,10 @@ function M.auto_detect()
     return nil, "no hit"
 end
 
--- 识别循环: 扫一轮, 不中就还原参数、等 3s、再扫一轮, 直到命中或 mon.stop()。
--- 为什么不回 idle: 模式必须停在 sniff, 否则前端看到模式掉回 idle 会以为设备
--- 重启了; 而静默总线/主机间歇轮询时, 一直重试总能等到它有流量的那一刻。
--- 用户想放弃就 W:MODE=idle, 那会把 running 置假从而打断这个循环
---
--- mydgen 的作用和 task() 里的 mygen 一样: 「重新识别」会把 detectGen 加一,
--- 旧循环下次检查就悄悄退出, 不碰 detecting 也不认自己的结果 —— 否则两个循环
--- 会同时抢串口, 而先完成那个可能把后一个的结果覆盖掉
+-- 识别循环: 扫一轮, 不中就还原参数/等 3s/再扫一轮, 直到命中或 mon.stop()。
+-- 不回 idle: 模式必须停在 sniff, 否则前端看到掉回 idle 会以为设备重启了
+-- mydgen 和 task.mygen 一样: 「重新识别」加 detectGen, 旧循环悄悄退出,
+-- 否则两循环会同时抢串口, 先完成那个可能覆盖后一个的结果
 local function detect_loop()
     local mydgen = detectGen
     while running and detectGen == mydgen do
@@ -378,8 +362,8 @@ function M.detect_result() return _G.mon_detect_result end
 
 function M.stop()
     if not running then return true end
-    -- detecting 必须在这里清: W:MODE=idle 是用户在识别中途唯一的逃生口,
-    -- 少了这行 cmd 的 BUSY 闸门会一直把后续命令挡在外面, 设备像卡死
+    -- detecting 必须在这里清: W:MODE=idle 是识别中唯一逃生口,
+    -- 少了这行 cmd 的 BUSY 闸门会一直把后续命令挡在外面
     detecting = false
     running = false
     gen = gen + 1

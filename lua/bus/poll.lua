@@ -20,8 +20,7 @@ local writeTaskRun = false
 local respFlag, respData = false, nil
 local reqSlave, reqFc = nil, nil
 local lastCfg = nil
--- 配置槽: "poll" = 手配(ds_poll), "pull" = 平台拉取(ds_pull)。
--- 默认 poll 保证所有旧调用点(ensure_uart 等)行为不变
+-- 配置槽: "poll" = 手配, "pull" = 平台拉取。默认 poll 保持旧调用点行为
 local curSlot = "poll"
 local stat = { rounds = 0, ok = 0, timeout = 0, werr = 0, zero = 0 }
 local wstat = { queued = 0, done = 0, wfail = 0 }
@@ -94,11 +93,10 @@ local function try_resp()
 end
 
 local function do_transaction(frame, timeout_ms, exp_slave, exp_fc)
-    -- timeout_ms 为 nil = 早返回模式: 用默认上限兜底, 收到响应立即返回
-    -- (try_resp 命中就 return, 本来就不会等满)
+    -- timeout_ms=nil = 早返回模式: 默认上限兜底, 命中即返回(不会等满)
     if timeout_ms == nil then timeout_ms = cfg.TIMEOUT_MS end
-    -- 写队列的 worker 可能在轮询没启动时被拉起(MQTT 下行 / W:WRITE),
-    -- 那条路上 M.start() 从没跑过, 串口还是裸的。轮询在跑时这里是空操作
+    -- 写队列 worker 可能在轮询没起时被拉起(MQTT 下行/W:WRITE),
+    -- 串口是裸的; 轮询在跑时这里是空操作
     if not running then pcall(ensure_uart) end
     drain()                                  -- 先清残留, 避免杂字节顶掉真响应
     respFlag, respData = true, nil
@@ -189,13 +187,10 @@ local function mon_running()
     return false
 end
 
--- 排空写队列。mygen ~= gen 时立即返回(stop/切换模式会 bump gen)。
--- stop 一定会 bumps gen，所以 gen 变化即代表"本次任务已作废"。
--- sniff_yield = true 时旁听一旦接管总线就停手，不再发写帧
--- (两种模式共用同一条物理串口, 抢着发会让旁听帧里混进写请求)
---
--- ⚠️ 故意不判 running：这是 poll_task 专用的排空函数，worker 那道闸门
--- 千万别加在这里。详见 worker()
+-- 排空写队列。mygen ~= gen 立即返回(stop/切模式会 bump gen)。
+-- sniff_yield=true 时旁听接管总线就停手(两模式共用一条物理串口,
+-- 抢着发会让旁听帧里混进写请求)。
+-- ⚠️ 故意不判 running: poll_task 专用排空, worker 闸门别加这里
 local function drain_write_queue(mygen, sniff_yield)
     while #writeQ > 0 do
         if gen ~= mygen then return end
@@ -204,15 +199,12 @@ local function drain_write_queue(mygen, sniff_yield)
     end
 end
 
--- 写队列的独立执行体，与 poll_task 分开。
--- MQTT 下行来的写请求可能落在轮询没跑的时候(idle/sniff 档)，这时
--- enqueue_write 会拉起本任务。
--- 以前这里也判 running，而 idle 档 running 恒为 false，于是本任务刚启动
--- 就 return，写请求静静躺在队列里：enqueue_write 返回 true、iot.lua 记
--- "downlink write: ok=1"，总线上却一个字节都没发，直到某次切到 poll 模式
--- 才被 poll_task 顺带发出去(陈旧的写指令延后生效，比不生效更危险)。
--- running 只是 poll_task 的生命周期标志，管不到本任务，所以本任务用
--- 自己的 gen 守卫；sniff 接管总线时同样避让
+-- 写队列的独立执行体, 与 poll_task 分开。
+-- MQTT 下行写可能落在轮询没跑时(idle/sniff 档), enqueue_write 拉起本任务。
+-- 以前判 running, idle 档 running=false 任务刚启动就 return,
+-- 写请求静静躺队列(iot 记 ok=1 总线没发), 直到切 poll 才被顺带发出去
+-- (陈旧写指令延后生效, 比不生效更危险)。
+-- running 只是 poll_task 生命周期, 管不到本任务, 用自己 gen 守卫
 local function worker()
     writeTaskRun = true
     drain_write_queue(gen, true)
@@ -239,7 +231,7 @@ local function poll_task()
         end
         drain_write_queue(mygen)
         stat.rounds = stat.rounds + 1
-        -- 每轮都打一行汇总: 既证明轮询在周期跑, 又便于对比 ok/timeout
+        -- 每轮打一行汇总: 既证明轮询在周期跑, 又便于对比 ok/timeout
         if stat.ok == okBefore then
             stat.zero = stat.zero + 1
             log.warn("poll", string.format("round %d 无新增 ok=%d timeout=%d werr=%d (查从机地址/波特率/校验位/AB线/DE极性)",
@@ -271,11 +263,9 @@ local function raw_on_receive(id, len)
     end
 end
 
--- 裸发一帧、抓回原始字节。W:RAWTEST 与 W:TX 完全共用：
--- 两者只差"帧从哪来"(build_read 拼 / 前端 hex 解) 和回显里带不带
--- slave/addr/qty，DE 时序、DE 极性、收发窗口、恢复 on_receive 全都一样，
--- 抄两遍必然改一处漏一处。
--- 返回 {tx_ok, tx_err, tx_hex, rx_len, rx_hex, parsed, ...}；失败返回 nil, 原因
+-- 裸发一帧抓回原始字节。W:RAWTEST 与 W:TX 完全共用(DE 时序/极性/收发窗口/
+-- 恢复 on_receive 一样, 只差"帧从哪来"和回显字段)。返回 {tx_ok, tx_err,
+-- tx_hex, rx_len, rx_hex, parsed, ...}; 失败 nil, 原因
 local function raw_tx(frame, timeout_ms, extra)
     if not running then
         local ok, err = ensure_uart()
@@ -316,8 +306,7 @@ local function raw_tx(frame, timeout_ms, extra)
     return out
 end
 
--- 总线裸探针: 发一帧读请求, 抓回所有原始字节(不做 CRC 判定),
--- 用于现场区分"没发出去/从机没回"与"回了但参数不匹配"
+-- 总线裸探针: 发帧抓原始字节, 区分"没发出去/从机没回"与"回了但参数不匹配"
 function M.probe_raw(slave, addr, qty, timeout_ms)
     slave = slave or (lastCfg and lastCfg.slave) or cfg.SLAVE_ADDR
     addr = addr or 0
@@ -345,8 +334,7 @@ function M.tx_raw(hex, timeout_ms)
 end
 
 function M.reload_cfg(src)
-    -- src = "poll"(默认) 读手配的 ds_poll; "pull" 读平台的 ds_pull。
-    -- 两个槽同构, 只是来源不同, 所以这里只换一次 load 调用
+    -- src="pull" 读平台 ds_pull, 其他读手配 ds_poll。两槽同构, 只换 load
     local c = (src == "pull") and cfgstore.load_pull() or cfgstore.load_poll()
     if c then
         regs = c.regs or {}

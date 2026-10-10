@@ -949,13 +949,9 @@ local function reply_config()
 end
 M.reply_config = reply_config
 
--- 平台主动重新下发配置（前端没点拉取，设备也没在等）。
--- 判据就是 payload 里有 configSnapshot：这是 D1 快照的独有字段，
--- REPORT/WRITE/裸值都不带它，不可能误判。
--- 解析成功即自动落盘并生效，与前端拉取完全同一套语义。
--- 放在设备侧而不是前端侧，是为了让前端不在线时也生效——平台主动重推
--- 走的是同一条路径，靠前端的话没开串口就永远不落地。
--- 做法是把它塞进拉取结果槽位、以 done 态呈现，前端复用同一套回填渲染
+-- configSnapshot 判据/设备侧落地原因见 handle_push_payload 上头那段。
+-- REPORT/WRITE/裸值都不带它, 不可能误判。
+-- 塞进拉取结果槽位以 done 态呈现, 前端复用回填渲染
 local function recv_push(t, payload)
     local r, err = pullcfg.parse_snap(t, t.configSnapshot)
     if not r then

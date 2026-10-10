@@ -8,17 +8,13 @@ local util = require "util/collect_table_util"
 
 local M = {}
 
--- 4 种工作模式提到模块顶部(与 cmd.lua 共享语义, 不同文件独立常量是 Lua 闭包隔离的代价)
+-- 4 种工作模式提到模块顶部(各文件独立常量是 Lua 闭包隔离的代价)
 local MODE_POLL, MODE_PULL, MODE_IDLE, MODE_SNIFF = "poll", "pull", "idle", "sniff"
 
 local K_POLL, K_SYS = "ds_poll", "ds_sys"
--- ds_pull: 平台拉取配置的独立槽。和 ds_poll 同构(串口参数+slave+regs),
--- 复用同一份 normalize_poll/default_poll, 不新增校验代码。
--- 为什么必须分开: 手动配置和平台配置原本共用一个槽, 拉一次平台配置就把
--- 手配的寄存器表覆盖掉了, 用户没法两个都要(见 lua/README.md 配置来源隔离)
--- 没有 sniff 槽: sniff 的串口参数是 auto_detect() 现场试出来的, 结果只存本次
--- 会话(mon.lua 的 bootCfg), 从不落 fskv —— 识别出的参数悄悄写进持久槽会污染
--- 手配/拉取两档, 所以这里刻意不留可写的 sniff 槽, 从结构上堵住误存
+-- ds_pull: 平台拉取的独立槽, 复用 normalize_poll/default_poll, 不新增校验。
+-- 必须分开: 原本共用一槽, 拉一次平台配置就覆盖手配的寄存器表(见 lua/README.md 配置来源隔离)。
+-- 没有 sniff 槽: auto_detect 结果只存本次会话(mon.bootCfg), 不落 fskv, 从结构上堵住误存
 local K_PULL = "ds_pull"
 
 local function num(v, d)
@@ -149,10 +145,9 @@ function M.normalize_sys(c)
     return { boot_mode = mode }
 end
 
--- 三套配置(poll/pull/sys)的读写除了键、归一化函数、默认值以外完全同构，
--- 各写一遍就是两处要同步改。这里合成一张表驱动，函数名是它们唯一的差别。
--- 注意 load 失败时静默退回默认值(load 用在启动路径, 崩了整个设备起不来),
--- 而 save 失败必须把原因带回去给 W:CFG 显示
+-- 三套配置(poll/pull/sys)的读写除键/归一化/默认值外完全同构,
+-- 表驱动避免两处要同步改。load 失败静默退回(启动路径崩设备起不来),
+-- save 失败必须把原因带回去给 W:CFG 显示
 local SECTIONS = {
     poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll },
     pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll },

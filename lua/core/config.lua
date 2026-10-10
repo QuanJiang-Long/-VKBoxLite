@@ -98,7 +98,7 @@ M.PULL_PARITY = { none = 0, even = 1, odd = 2 }
 
 -- 缓冲
 M.FRAME_CACHE = 10
-M.RING_SIZE = 24
+M.RING_SIZE = 12
 M.WRITEQ_MAX = 8
 
 -- sniff 通讯参数自动识别(R:AUTODETECT)
