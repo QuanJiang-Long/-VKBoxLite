@@ -516,4 +516,24 @@ function M.sn_warn_monitor(period)
     end, (period or M.SN_WARN_PERIOD_S) * 1000)
 end
 
+-- 老 sn/sn.lua 接口兼容, 供 prov.lua / cmd.lua 用.
+-- sn.lua 删除后, 这些入口挪到 cfg.lua 用了 sn_ 前缀. 旧调用点
+-- (sn().state / .locked / .write 等) 不改代码, 走这里适配.
+-- 命名同老, 内部调新函数, 保证 SN 烧写流程逻辑零变化.
+M.state                = M.sn_get_state
+M.locked               = M.sn_locked
+M.meta                 = M.sn_meta
+M.load                 = M.sn_load
+M.save                 = M.sn_save
+M.set_lock             = M.sn_set_lock
+M.clear_lock           = M.sn_clear_lock
+M.clear                = M.sn_clear
+M.validate             = M.sn_validate
+M.on_change            = M.sn_on_change
+M.write                = M.sn_write
+M.imei                 = M.sn_imei
+M.identity_init        = M.sn_imei_init
+M.info_line            = M.sn_info_line
+M.start_warn_monitor   = M.sn_warn_monitor
+
 return M
