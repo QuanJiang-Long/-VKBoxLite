@@ -257,7 +257,7 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 
 | 前端动作 | 指令 | 应答 | 说明 |
 |---|---|---|---|
-| 读设备信息 | `R:INFO` | `RET:INFO={json}` | SN/IMEI/ICCID/CSQ/RSRP/版本/项目/服务器/波特率/从机/寄存器数/锁状态 |
+| 读设备信息 | `R:INFO` | `RET:INFO={json}` | SN/sn_state/lock/IMEI/**UID**/ICCID/CSQ/RSRP/版本/项目/服务器/波特率/从机/寄存器数 |
 | 读 poll 配置 | `R:CFG` | `RET:CFG={json}` | `{cfg:{baud,databits,parity,stopbits,slave,interval_ms,timeout_ms,regs},src,slot}`；`slot`=`poll`/`pull` 由当前运行模式决定 |
 | 保存 poll 配置 | `W:CFG={json}` | `RET:CFG=OK` / `RET:FAIL:CFG:原因` | 串口参数变化自动重启轮询任务；间隔/寄存器表热更新。**写哪个槽同样由运行模式决定**：`poll（拉取配置）` 档写 `ds_pull`，其余写 `ds_poll`。读写同槽才有"所见即所存" |
 | 读寄存器表 | `R:REG` | `RET:REG=[json]` | `[{addr,count,name,alias,dtype}]`。**只有读**：写寄存器表走 `W:CFG`（`regs` 并进 cfg 一起发），`W:REG` 已删 |
@@ -559,7 +559,9 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
 | `lua/core/corelib.lua` | 库安全获取 + log 降级（公共底座） |
 
 > `lua/sn/` 下的 `sn_core.lua` / `sn_prov_uart.lua` / `sn_store_fskv.lua` /
-> `identity.lua` / `sn_luhn.lua` / `report.lua` 为 SN 产线原有文件，**逻辑零改动**；
+> `identity.lua` / `report.lua` 为 SN 产线原有文件，**逻辑零改动**；
+> `sn.lua` 的 `validate()` 改为 VL+YYYYMMDD+NNN 格式校验（见 `lua/core/config.lua` 的
+> `SN_PREFIX`/`SN_MIN_LEN`），不再走 Luhn（产线烧号软件需同步换格式）。
 > 仅 `sn_prov_uart.lua` 有 `MAX_BUF` 64→2048（长配置行不被截断）和
 > 一行 `_G.vcom_handle` 未知指令钩子。
 >

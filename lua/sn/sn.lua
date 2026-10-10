@@ -165,6 +165,7 @@ local function try_identity()
 end
 
 function M.imei() return imei_cache end
+function M.uid() return uid_cache end
 
 function M.identity_init()
     try_identity()

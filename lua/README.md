@@ -83,7 +83,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 
 | 指令 | 用途 |
 |---|---|
-| R:INFO | 设备信息（SN/IMEI/ICCID/CSQ/RSRP/版本/项目/服务器/波特率/从机/寄存器数/锁状态） |
+| R:INFO | 设备信息（SN/sn_state/lock/IMEI/**UID**/ICCID/CSQ/RSRP/版本/项目/服务器/波特率/从机/寄存器数） |
 | R:MODE / W:MODE=idle\|poll\|pollpull\|sniff | 模式查询（返回 `{mode,busy,poll_src,pull_ready,pull,poll,mon,write}`）/ 切换。`pollpull` = 拉取配置档，进模式自动 hello 拉取 |
 | R:CFG / W:CFG={json} | 轮询配置读写，读返回 `{cfg, src}`，src=default 表示 fskv 里没写过。`W:CFG` 是**唯一**写寄存器表的入口（regs 并进 cfg 一起发） |
 | R:REG | 读寄存器表（= `R:CFG` 的 `cfg.regs`，因前端单独读它才留） |

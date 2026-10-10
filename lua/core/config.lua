@@ -20,9 +20,8 @@ M.MONITOR_MS = 10000
 M.STALL_LIMIT_S = 120
 M.AUTO_REBOOT = false
 
--- SN 长度范围。VL+YYYYMMDD+NNN = 2+8+3 = 13, 上限留 32 给扩展段(prefix
--- 改长 / 加日期戳变体)。改 SN_PREFIX 时同时改 SN_MIN_LEN: 2 + 8 + 3 = 13
--- 这里没自动算, 怕改一处忘改另一处
+-- VL+YYYYMMDD+NNN = 2+8+3 = 13, 上限 32 留扩展段(prefix 改长 / 加日期戳变体)
+-- 改 SN_PREFIX 时同步改 SN_MIN_LEN (前缀 2 + 日期 8 + 流水 3)
 M.SN_PREFIX = "VL"
 M.SN_MIN_LEN = 13
 M.SN_MAX_LEN = 32
