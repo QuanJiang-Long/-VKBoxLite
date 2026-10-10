@@ -63,27 +63,17 @@ local function reset_state()
         pull = {
             state = "idle", msg = "", result = nil, deadline = 0,
             msg_id = nil, replied = false,
-            -- src = "pull"/"push"：这份结果是谁给的。
-            -- "push" = 平台主动重新下发，前端没点过拉取。二者走同一套
-            -- done+回执链路，只是横幅提示语不同
+            -- src = "pull"/"push": 谁给的这份结果, 提示语不同
             src = nil,
-            seen = 0,              -- OS time，收到这份配置的时间
+            seen = 0,   -- OS time, 收到这份配置的时间
         },
         pull_payload = nil,
-        -- 平台主动下发、刚落地的配置（push_n/push_err/push_seen）。
-        -- 前端靠 R:STAT 5s 轮询发现它（R:PULLCFG 只在用户点拉取时才查），
-        -- 所以必须单独挂在 status 段。autosaved 系列告诉前端"这次改动已落盘"
         push_n = 0, push_err = nil,
         autosaved = false, autosave_at = 0, autosave_regs = 0,
-        -- U2/U3 的节流状态: meta_sig = 已发出去的网关元数据指纹(不带 nodes 那帧),
-        -- topo_sig = 已发出去的拓扑指纹(带 nodes 那帧)。res_at = 上次发 U3
-        -- 资源的时间(OS time)。cpu_percent 的两个累加量也在这里, reset 时归零,
-        -- 否则重连后会拿上一个生命周期的残留算占比
         meta_sig = nil, topo_sig = nil, res_at = 0,
         busy_s = 0, span_s = 0,
-        -- hello_at 是【连接生命周期内最后一次 hello 成功发送】的时间(OS time),
-        -- 不是上电时间 —— task_main 靠它算 pollpull 档 30min 重发。置 0 表示
-        -- 这个连接还没发过 hello, 重发计时不起跑(否则开机就白发一次)
+        -- ⚠️ hello_at = 连接内最后一次 hello 成功发送时间 (非上电时间)
+        --    置 0 表示还没发过 hello, 30min 重发计时不起跑
         hello_at = 0,
     }
 end
@@ -96,10 +86,7 @@ local function device_id()
     return nil
 end
 
--- clientId 留空时的默认值: 设备 SN 加一个下划线。
--- 平台签发的凭证就是 "SN_" 这个形状(下划线后面是空的), 不带 ProductId ——
--- 产品不同那段就不同, 写死必然对不上。username 则是裸 SN, 见 try_connect。
--- 填了 client_id 就用手填值, 这里只兜空值。
+-- 平台签发凭证是 "SN_" (下划线后空), 不带 ProductId, 写死对不上
 local function default_client_id(did)
     if not did or did == "" then return did end
     return did .. "_"
@@ -119,8 +106,6 @@ local function imei()
     return ok and tostring(v) or ""
 end
 
--- mobile.* 取号。全是无参函数, 塞引用不调用会让下游拿到函数体。
--- 取不到返回 nil, 让调用方决定"留空"还是"整个字段不发", 不编假值
 local function mcall(k)
     if not mobile then return nil end
     local f = mobile[k]
@@ -137,18 +122,14 @@ local function alias_map()
     return m
 end
 
--- 这 5 个 helper 已搬到 util.lua, 这里只留 alias 减少 diff
--- (各起一行: check_lua 的 local 收集只处理 2 元批量赋值)
+-- 5 个 helper alias (各起一行因 check_lua local 收集只处理 2 元)
 local pad = util.pad
 local int_str = util.int_str
 local ms_of = util.ms_of
 local jstr = util.jstr
 local jnum = util.jnum
 
--- ===== 收拢重复样板的 helper =====
--- 上行帧的 7 个发送点(send_meta/send_topo/send_gw_res/func_reply/reply_config/
--- send_hello/claim_ok 的 did 解析)原来各写一遍"判连接 + pcall + tostring(e)",
--- 抄 7 遍必然改一处漏一处。pub 同时是连接闸门: 未连接就返回 false, "未连接"
+-- 7 个发送点共用: 判连接 + pcall, 同时是连接闸门
 local function pub(topic, body, qos)
     if not S.client or not S.connected then return false, "未连接" end
     local ok, e = pcall(function() S.client:publish(topic, body, qos or 1) end)
@@ -156,15 +137,12 @@ local function pub(topic, body, qos)
     return true
 end
 
--- 当前网关 SN, 取不到返回 nil。7 个调用点都要它, 各自判空后报不同的错
 local function cur_did()
     local d = S.device_id or device_id()
     return (d and d ~= "") and d or nil
 end
 
--- U3/U7 共用的 [{id,value,ts}] 数组。ts 传 nil 则不带该字段(U7 不要 ts)
--- id 兜底 "unknown": downlink_write 已保证 rid 非空, 但这是平台核销指令的
--- 键, 缺了平台对不上是哪一条, 代价只是一行 or
+-- id 兜底 "unknown": 平台核销指令的键, 缺了平台对不上是哪一条
 local function items_json(list, ts)
     local out = {}
     for _, it in ipairs(list) do
@@ -176,20 +154,12 @@ local function items_json(list, ts)
     return "[" .. table.concat(out, ",") .. "]"
 end
 
--- csq 为 0 即未注册。全项目只此一处定义 —— send_meta 的 netRegister 字段和
--- net_ready 的建连判据原本是两套同形算法, 口径一旦漂移, 平台看到的注册状态
--- 和设备实际能否建连就对不上, 且两边都不报错
 local function net_registered(csq)
     return not (type(csq) == "number" and csq == 0)
 end
 
--- U4 按子设备逐条上报: /sys/thing/node/property/post/{gwSn}-{n}。
--- n = 子设备序号, 按从机地址升序排(同一份配置只有一个 slave, 所以轮询档
--- 恒为 1; sniff 档才可能有多个从机)。从机地址从 key 里取:
---   sniff 的 key 是 "s{slave}_r{addr}"(见 bus/mon.lua push_rsp_value), 带从机号
---   轮询的 key 是配置里的 name 或 "r{addr}"(见 bus/poll.lua), 不带从机号
---   —— 一份轮询配置只有一个 slave(cfg.normalize_poll), 直接取那份的
--- 少了 -{n} 这个后缀, 平台无法把数据归属到子设备, 上报等于白发
+-- sniff key "s{slave}_r{addr}" 带从机号, 轮询 key 不带 (一份配置 1 个 slave).
+-- 少了 -{n} 后缀, 平台无法把数据归属到子设备
 local function build_items()
     local amap = alias_map()
     local c = active_cfg()
@@ -221,12 +191,7 @@ local function build_items()
     return items
 end
 
--- U4 子设备数据上报。topic = profile 出的 base, 是否加 -{n} 后缀看档位:
---   自动档 = PLATFORM_PUB_TOPIC 固定常量, 按 V3 契约拼 -{n}
---   手动档 = 用户填的 pub_topic, 原样用不加后缀
--- -{n} 是平台认子设备用的: 少了平台认不出数据归属哪个子设备, 上报等于白发。
--- 但手动档连的是用户自己的 broker、用用户自己的命名, 用户也按原样订阅 ——
--- 加个 -1 之后平台那头什么都收不到(实测踩过), 所以手动档不加
+-- 自动档按 V3 拼 -{n} (平台认子设备用), 手动档原样用 (用户 broker 不认后缀)
 local function publish()
     if not S.client or not S.connected then return false end
     local items = build_items()
@@ -257,13 +222,7 @@ local function publish()
 end
 
 -- ===== U2 拓扑上报 / U3 网关资源 / U7 指令回执 =====
--- 三条都是"发布", 与订阅清单无关(broker 负责路由, 见 build_subs 上头那段)。
--- body 字段名/结构照平台文档 V3 的示例, 一个不多一个不少 —— 少字段平台解析
--- 不出, 多字段平台可能按未知字段整包拒收
 
--- Lua 堆/系统内存信息: 返回 total, used; 取不到返回 nil, nil
--- Air780EP 堆约 300KB, mqtt.create 需要连续块, 建连前打印便于定位 OOM。
--- 只依赖 rtos(第 8 行就 require 了), 所以放这么前: U3 要用它算 ram_percent
 local function heap_info()
     if not rtos or type(rtos.meminfo) ~= "function" then return nil, nil end
     local ok, a, b = pcall(rtos.meminfo, "sys")
@@ -271,13 +230,8 @@ local function heap_info()
     return a, b
 end
 
--- 内部 parity 0/1/2 -> 平台单字母。PULL_PARITY(core/config.lua)是正方向
--- "none/even/odd"->0/1/2, 这里是它的逆; 单独写死而不是反查 PULL_PARITY,
--- 免得为一次反查把整表遍历一遍
 local PARITY_LETTER = { [0] = "N", [1] = "E", [2] = "O" }
 
--- U2 的 serial 段。port 固定 /dev/ttyS1: 485 走 uart1(日志 Uart_ChangeBR
--- 一路都是 uart1), 平台侧也按这个名字认串口
 local function serial_json(c)
     c = c or {}
     return string.format('{"port":"/dev/ttyS1","baudRate":%d,"dataBits":%d,"stopBits":%d,"parity":%s}',
@@ -285,30 +239,21 @@ local function serial_json(c)
         c.stopbits or cfg.STOPBITS, jstr(PARITY_LETTER[c.parity or cfg.PARITY] or "N"))
 end
 
--- U2 的一个子设备。两个来源, 保真度差很远:
---   poll/pollpull: active_cfg() —— 平台下发的正经配置, id/name/dtype 全是真的
---   sniff: mon.infer() —— 旁听推断, 只有 slave/addr/count/fc, 没有名字和类型,
---          id/name 只能按地址现造("r"+addr), dtype 默认 uint16。平台上看到
---          的名字会是地址而不是中文别名, 想看得顺眼得让用户配一份轮询表
--- ⚠️ nodeIndex 必须和 U4 的 -{n} 同一套序号(都按从机地址升序), 否则平台把
---    建档的子设备和上报的数据对不上, 症状是"拓扑发成功了但数据不进去"
+-- ⚠️ nodeIndex 必须和 U4 的 -{n} 同一套序号, 否则建档的子设备和
+--    上报的数据对不上, 症状是"拓扑发成功了但数据不进去"
 local function node_json(idx, slave, c, regs)
     local props = {}
     for _, r in ipairs(regs) do
         local dt = r.dtype or "uint16"
-        -- 嗅探时 r.name 通常 nil (put 不传), 兜底走 s{slave}_r{addr} 跟 U4 key 对齐
-        -- 轮询时 r.name 是用户配的真名, 走 r.name 路径
         local id
         if r.name and r.name ~= "" and not r.name:match("^r%d+$") then
             id = r.alias or r.name
         else
             -- 嗅探模式: 跟 U4 上报 collector key (s{slave}_r{addr}) 对齐
-            -- 平台按 id 匹配 property, 嗅探的 id 跟 U4 key 一致才能归属
+            -- 平台按 id 匹配 property, id 跟 U4 key 一致才能归属
             id = "s" .. slave .. "_r" .. r.addr
         end
         local name = r.alias or id
-        -- address 是嗅探到的 Modbus 寄存器地址, 嗅探到什么发什么
-        -- V3 例子是 40001 是 PLC 1-based, 但嗅探帧是协议 0-based (即 100)
         props[#props + 1] = string.format(
             '{"id":%s,"name":%s,"dataType":%s,"unit":"","modbus":{"slave":%d,"address":%d,"quantity":%d,"dataType":%s}}',
             jstr(id), jstr(name), jstr(dt), slave, r.addr, r.count or 1, jstr(dt))
@@ -318,17 +263,9 @@ local function node_json(idx, slave, c, regs)
         idx, slave, serial_json(c), jstr("sniff_s" .. slave), table.concat(props, ","))
 end
 
--- U2 的 nodes[]。返回 nil+原因表示拓扑还没成形(从机没识别出来/没配寄存器表)
--- sniff 档的 RegisterData[] = 旁听推断 ∪ 平台下发配置, 同名同址以配置覆盖:
--- 平台是按我们上报的拓扑来建设备和生成配置的(用户确认), 只报推断那几条,
--- 平台就只认那几条; 配置落地后带真名(CT1/A相电流)的寄存器必须补进去才不缺项。
--- 因为 topo_sig 拿本函数产物当指纹, 配置一落地签名就变, 会自动补发一次 ——
--- 实测过的时序坑: 拓扑比配置落盘早 1 秒发(报的是推断出的 2 条裸名), 之后
--- 签名不变就再也不补发, 平台上建的物模型和数据面对不上
--- sniff 的 serial 参数必须用探测到的那几个值: active_cfg() 在 sniff 下返回的
--- 是 ds_poll 手工档的默认 9600, 而总线的波特率是自动识别出来的。拿错的
--- 波特率上报, 平台就照它建配置 —— 实测识别出 2400 却发了 9600, 平台回的
--- 建设配置 baud 就是 9600, 拿这份配置去轮询一帧都收不到
+-- ⚠️ sniff 的 serial 必须用 mon.status().detected 而不是 active_cfg():
+--    实测识别出 2400 却发了 9600, 平台照错的波特率建配置,
+--    拿这份配置去轮询一帧都收不到
 local function build_nodes()
     local mode = get_mode()
     local nodes, err = {}, nil
@@ -341,8 +278,6 @@ local function build_nodes()
                 p.count, p.name, p.alias, p.dtype = r.count, r.name, r.alias, r.dtype or "uint16"
                 return
             end
-            -- 不记 slave: 分组已经由 by[] 的键承载, node_json 拿的是循环
-            -- 变量 s, 再存一份是只写不读
             p = { addr = r.addr, count = r.count, name = r.name, alias = r.alias, dtype = r.dtype or "uint16" }
             at[k] = p
             by[slave] = by[slave] or {}
@@ -371,7 +306,6 @@ local function build_nodes()
         end
         err = "还没识别到在线的从机"
     else
-        -- 一份轮询配置只有一个 slave(cfg.normalize_poll), 所以轮询档恒一个节点
         local c = active_cfg()
         if c and c.regs and #c.regs > 0 then
             nodes[#nodes + 1] = node_json(1, c.slave, c, c.regs)
@@ -382,26 +316,15 @@ local function build_nodes()
     return table.concat(nodes, ",")
 end
 
--- 拓扑签名: 拿 build_nodes 的产物本身做指纹。不另造一套字段遍历是因为
--- node_json 已经把从机/寄存器/串口参数全拼进去了, 那串字符串变了就是拓扑
--- 真变了。重新 build 一次的代价是一次字符串拼接, 每秒一次可以忽略 —— 比
--- 自己去遍历两套来源(poll 的 regs 表 / mon.infer 的 regs 表)要短得多
 local function topo_sig()
     local nodes = build_nodes()
     if not nodes then return nil end
     return tostring(#nodes) .. ":" .. nodes
 end
 
--- U2 是【双重用途】, 靠 body 里有没有 nodes[] 区分语义(用户确认):
---   带 nodes[]    → 子设备拓补建档(建子设备 + 绑定 + 物模型)
---   不带 nodes[]  → 上报网关元数据(imei/iccid/信号/经纬度)
--- 所以拆成两个函数各发一帧, 不合成一帧 —— 合成会让平台拿不准这帧该干嘛。
--- 两帧共用 topic 和 qos, 用 pcall 包 publish, 失败只回 false 不抛
+-- U2 双重用途: 带 nodes = 子设备建档, 不带 nodes = 网关元数据上报. 拆两帧不合成
 
--- 把 "2.0.0" 变成 20000 这种纯数字。平台侧 firmwareVersion 是 BigDecimal,
--- 传字符串会【整帧被丢】(用户确认), 而我们全程只有字符串版本号, 必须转。
--- 取 major*10000 + minor*100 + patch, 与文档示例 v0.4.0 -> 400 同口径;
--- 解析不出就退回 0, 不留字符串也不编一个大数
+-- fwVersion 平台侧是 BigDecimal, 传字符串会【整帧被丢】(用户确认)
 local function fw_num()
     local v = _G.VERSION or ""
     local a, b, c = v:match("^(%d+)%.(%d+)%.(%d+)")
@@ -409,16 +332,12 @@ local function fw_num()
     return tonumber(a) * 10000 + tonumber(b) * 100 + tonumber(c)
 end
 
--- 不带 nodes 的那帧: 网关元数据。字段名/类型照平台 V3 文档示例, 一个不多一个
--- 不少 —— 少字段平台解析不出, 多字段可能按未知字段整包拒收。
--- 无源的字段(imei/iccid/longitude/latitude)按注释留空或整项不发, 不编假值
 local function send_meta()
     local did = cur_did()
     if not did then return false, "无 SN" end
     local csq = mcall("csq")
     if type(csq) ~= "number" then csq = nil end
     local p = {}
-    -- V3 平台要求顶层 vendor/model/fwVersion (元数据帧和拓扑帧都要带)
     p[#p + 1] = string.format('"vendor":%s', jstr("VKBox"))
     p[#p + 1] = string.format('"model":%s', jstr(cfg.PLATFORM_MODEL))
     p[#p + 1] = string.format('"fwVersion":%s', jstr(_G.VERSION or "0.0.0"))
@@ -437,17 +356,12 @@ local function send_meta()
     p[#p + 1] = string.format('"networkAddress":%s', jstr(mqttcfg.load().host))
     p[#p + 1] = string.format('"isShadow":0')
     p[#p + 1] = string.format('"summary":%s', jstr("VKBox Bootstrap"))
-    -- deviceType 固定 3 (产品定义: 网关). locationWay 0=未定位/2=LBS 成功
     p[#p + 1] = '"deviceType":3'
     p[#p + 1] = '"locationWay":0'
-    -- V3 平台 ts 毫秒 (13 位)
     p[#p + 1] = string.format('"ts":%d', os.time() * 1000)
     return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did), "{" .. table.concat(p, ",") .. "}", 1)
 end
 
--- 带 nodes[] 的那帧: 子设备拓补建档。
--- V3 平台要求顶层 vendor/model/fwVersion/ts(ms), 走'建子设备'路径
--- 自述字段(imei/iccid/位置等)归 send_meta, 不重复
 local function send_topo()
     local did = cur_did()
     if not did then return false, "无 SN" end
@@ -459,8 +373,6 @@ local function send_topo()
             os.time() * 1000, nodes), 1)
 end
 
--- 元数据指纹: 只挑会变的字段(imei/iccid/csq/主机名), 版本和型号是常量不必算。
--- 拿这几个字段拼串当指纹, 变了就重发, 和 topo_sig 同一套路
 local function meta_sig()
     local csq = mcall("csq")
     return string.format("%s|%s|%s|%s", imei(),
@@ -468,13 +380,9 @@ local function meta_sig()
         tostring(mqttcfg.load().host or ""))
 end
 
--- U3: 网关自身资源。口径要说清, 否则平台拿阈值做告警会定错:
---   ram_percent  = rtos.meminfo("sys") 已用/总量, 真实系统内存(比 Lua 堆全)
---   uptime_sec   = os.clock() 秒级单调计数, 开机起算, 不受 NTP 跳变影响
---   cpu_percent  = 本框架主循环的忙碌占比(真实测量, 不是 MCU 的 CPU 占用率)。
---                 LuatOS 没有 OS 级 CPU 接口(README 记过 fsinfo/fs 都不存在),
---                 与其编一个 0 骗平台, 不如报一个能测的量。平台若按 90% 做
---                 CPU 告警, 得知道这个口径 —— U5 告警本次不做(已确认)
+-- U3 口径: ram_percent = rtos.meminfo 已用/总量, 真实系统内存
+--   uptime_sec = os.clock() 开机起算, 不受 NTP 跳变
+--   cpu_percent = 主循环忙碌占比 (实测, 非 MCU CPU). 平台按 90% 做 CPU 告警需知此口径
 local function send_gw_res()
     local did = cur_did()
     if not did then return false end
@@ -495,8 +403,6 @@ local function send_gw_res()
             { id = "cpu_percent", value = cpu },
         }, ts), 1)
     if not ok then return false end
-    -- 占用比是"上一个区间"的值, 发完就归零重新攒。不清的话 busy 一直涨而
-    -- span 涨得更快, 占比会越算越小, 平台看到的是个单调下降的假曲线
     S.res_at = os.time()
     S.busy_s, S.span_s = 0, 0
     return true
