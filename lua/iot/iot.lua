@@ -8,6 +8,17 @@ local mqtt = corelib.try("mqtt")
 local rtos = corelib.try("rtos")
 local mobile = corelib.try("mobile")
 local socket = corelib.try("socket")
+-- lbsLoc2 = 合宙免费 LBS 基站定位, 默认扩展库, 单基站 1.5km 精度,
+-- 频率被卡死(官方口径 4h-2min), 工程上 30min 一次足够.
+-- 取不到就 nil, 整段 LBS 流程直接跳过
+local lbsLoc2 = corelib.try("lbsLoc2")
+if lbsLoc2 then
+    log.info("iot", "lbs lib: loaded, version=", lbsLoc2.version and lbsLoc2.version() or "?")
+else
+    -- 区分"库没烧录" vs "库坏了": require 失败的错误消息能告诉我们
+    local ok, err = pcall(require, "lbsLoc2")
+    log.info("iot", "lbs lib: MISSING, require:", ok, err)
+end
 
 local mqttcfg = require "iot/mqttcfg"
 local collector = require "data/collector"
@@ -99,6 +110,8 @@ local function reset_state()
         -- 不是上电时间 —— task_main 靠它算 pollpull 档 30min 重发。置 0 表示
         -- 这个连接还没发过 hello, 重发计时不起跑(否则开机就白发一次)
         hello_at = 0,
+        -- LBS 定位结果: {lat, lng} + 取到时间(OS time). 没取到 = nil
+        lbs = nil, lbs_at = 0,
     }
 end
 
@@ -427,7 +440,13 @@ local function send_meta()
     p[#p + 1] = string.format('"summary":%s', MqttUtil.jstr("VKBox Bootstrap"))
     -- deviceType 固定 3 (产品定义: 网关). locationWay 0=未定位/2=LBS 成功
     p[#p + 1] = '"deviceType":3'
-    p[#p + 1] = '"locationWay":0'
+    p[#p + 1] = '"locationWay":' .. (S.lbs and "2" or "0")
+    -- LBS 取到时加经纬度 (成功改 2 + 加两字段); 取不到按 send_meta 上方
+    -- "无源不发"规矩整项不写, 不编 0/0 假装定位
+    if S.lbs then
+        p[#p + 1] = string.format('"latitude":%.6f', S.lbs.lat)
+        p[#p + 1] = string.format('"longitude":%.6f', S.lbs.lng)
+    end
     -- V3 平台 ts 毫秒 (13 位)
     p[#p + 1] = string.format('"ts":%d', os.time() * 1000)
     return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did), "{" .. table.concat(p, ",") .. "}", 1)
@@ -451,9 +470,31 @@ end
 -- 拿这几个字段拼串当指纹, 变了就重发, 和 topo_sig 同一套路
 local function meta_sig()
     local csq = MqttUtil.mcall(mobile, "csq")
-    return string.format("%s|%s|%s|%s", MqttUtil.imei(mobile),
+    local lbs_lat = S.lbs and S.lbs.lat or 0
+    local lbs_lng = S.lbs and S.lbs.lng or 0
+    return string.format("%s|%s|%s|%s|%.6f|%.6f", MqttUtil.imei(mobile),
         tostring(MqttUtil.mcall(mobile, "iccid") or ""), tostring(type(csq) == "number" and csq or ""),
-        tostring(mqttcfg.load().host or ""))
+        tostring(mqttcfg.load().host or ""), lbs_lat, lbs_lng)
+end
+
+-- LBS 单基站免费定位 (合宙 lbsLoc2 默认扩展库).
+-- 失败返回 nil, 成功返回 {lat, lng}. lbsLoc2.request 返回 lat/lng 是 string
+-- (整数 3 位 + 小数 7 位, 例 "031.1346219"), 这里 tonumber 转 number 便于
+-- fingerprint 算等值比较
+local function lbs_request()
+    if not lbsLoc2 or not mobile then return nil end
+    -- 必须先扫基站, 不扫 lbsLoc2 内部 getCellInfo 取不到就直接 return nil
+    pcall(mobile.reqCellInfo, 15)
+    if sys and type(sys.waitUntil) == "function" then
+        sys.waitUntil("CELL_INFO_UPDATE", 3000)
+    end
+    local ok, r1, r2 = pcall(lbsLoc2.request, 5000)
+    if not ok then log.warn("iot", "lbs request err:", r1); return nil end
+    if r1 == nil or r2 == nil then return nil end
+    local lat, lng = tonumber(r1), tonumber(r2)
+    if type(lat) ~= "number" or type(lng) ~= "number" then return nil end
+    log.info("iot", "lbs got:", lat, lng)
+    return { lat = lat, lng = lng }
 end
 
 -- U3: 网关自身资源。口径要说清, 否则平台拿阈值做告警会定错:
@@ -1479,6 +1520,14 @@ local function task_main()
             end
             end  -- if pub_platform end
             if sys then sys.wait(1000) end
+            -- LBS 定位: 30 分钟一次. 避开免费版频率限制(官方 4h-2min 不一致,
+            -- 30min 足够稳). lbs_request 失败保留旧 S.lbs (或 nil), 指纹不变
+            -- 不会触发发 U2 (成功后指纹变, 自动发)
+            if lbsLoc2 and (os.time() - (S.lbs_at or 0)) >= 1800 then
+                local r = lbs_request()
+                S.lbs_at = os.time()
+                if r then S.lbs = r end
+            end
             -- hello 的两个时机: 连接后补发一次 + pollpull 档 30min 周期重发。
             -- 放在 sys.wait 之后，保证每轮循环只判一次、且不和本轮的上报挤在一起
             --

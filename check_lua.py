@@ -20,7 +20,8 @@ LUA_KEYWORDS = {
 }
 KNOWN_GLOBALS = {
     "sys", "uart", "gpio", "log", "fskv", "json", "mqtt", "mobile", "rtos", "mcu",
-    "wdt", "socket", "get_device_sn", "PROJECT", "VERSION", "BUILD_ID", "vcom_handle",
+    "wdt", "socket", "bit", "pack", "zbuff", "pm", "i2c", "spi", "adc",
+    "crypto", "get_device_sn", "PROJECT", "VERSION", "BUILD_ID", "vcom_handle",
 }
 BLOCK_OPENERS = re.compile(r"\b(function|if|do|while|for|repeat)\b")
 BLOCK_CLOSERS = re.compile(r"\b(end|until)\b")
