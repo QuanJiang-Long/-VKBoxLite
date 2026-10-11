@@ -463,6 +463,58 @@ end
 --                 LuatOS 没有 OS 级 CPU 接口(README 记过 fsinfo/fs 都不存在),
 --                 与其编一个 0 骗平台, 不如报一个能测的量。平台若按 90% 做
 --                 CPU 告警, 得知道这个口径 —— U5 告警本次不做(已确认)
+-- U5 资源告警阈值表 (百分比)
+local EVENT_THRESHOLD = { ram = 85, cpu = 90, disk = 90 }
+
+-- LuatOS 平台文件系统用量。rtos.fsinfo(path) 返回 total,used。内核没
+-- 暴露就返回 nil — 该资源不参与告警, 不影响其他两个。
+local function disk_used_pct()
+    if not rtos or type(rtos.fsinfo) ~= "function" then return nil end
+    local ok, total, used = pcall(rtos.fsinfo, "/")
+    if not ok or type(total) ~= "number" or total <= 0 then return nil end
+    return math.floor(used * 1000 / total) / 10
+end
+
+-- U5: 资源告警。payload 严格按 V3 文档 (sn/type/subtype/level/value/threshold/ts)
+local function send_event(subtype, value, threshold)
+    local did = cur_did()
+    if not did then return false end
+    local body = string.format(
+        '{"sn":%s,"type":"resource_alarm","subtype":%s,'
+        .. '"level":"warn","value":%s,"threshold":%s,"ts":%d}',
+        MqttUtil.jstr(did), MqttUtil.jstr(subtype),
+        tostring(value), tostring(threshold), os.time())
+    return pub(string.format(cfg.PLATFORM_EVENT_TOPIC, did), body, 1)
+end
+
+-- 上升沿触发: value>=threshold 时只在状态从 false→true 的瞬间上报,
+-- 状态保持不刷; 回到 threshold 以下把状态清掉, 下次越界再上报。
+-- 节流 30s 防止阈值附近抖动连续上报。
+local function check_event_threshold(ram_pct, cpu_pct)
+    S.event_state = S.event_state or { ram = false, cpu = false, disk = false }
+    S.event_at = S.event_at or 0
+    local now = os.time()
+    if (now - S.event_at) < 30 then return end
+    local disk = disk_used_pct()
+    local resources = {
+        ram  = { value = ram_pct, threshold = EVENT_THRESHOLD.ram },
+        cpu  = { value = cpu_pct, threshold = EVENT_THRESHOLD.cpu },
+    }
+    if disk then
+        resources.disk = { value = disk, threshold = EVENT_THRESHOLD.disk }
+    end
+    for sub, r in pairs(resources) do
+        local crossed = r.value >= r.threshold
+        if crossed and not S.event_state[sub] then
+            send_event(sub, r.value, r.threshold)
+            S.event_state[sub] = true
+            S.event_at = now
+        elseif not crossed and S.event_state[sub] then
+            S.event_state[sub] = false
+        end
+    end
+end
+
 local function send_gw_res()
     local did = cur_did()
     if not did then return false end
@@ -487,6 +539,8 @@ local function send_gw_res()
     -- span 涨得更快, 占比会越算越小, 平台看到的是个单调下降的假曲线
     S.res_at = os.time()
     S.busy_s, S.span_s = 0, 0
+    -- U5 阈值检测: 上升沿触发, 防刷屏
+    check_event_threshold(ram, cpu)
     return true
 end
 
@@ -541,12 +595,23 @@ local function build_subs()
     if get_mode() == "idle" then return subs end
     local did = S.device_id
     if not did or did == "" then return subs end
-    add(string.format(cfg.PLATFORM_GET_TOPIC, did))
-    add(string.format(cfg.PLATFORM_FUNC_TOPIC, did))
-    add(string.format(cfg.PLATFORM_PSET_TOPIC, did))
-    add(string.format(cfg.PLATFORM_PGET_TOPIC, did))
+    -- 手动档不订 4 条平台下行：manual 完全独立于平台, 唯一入口是用户 sub_topic
+    if not mqttcfg.load().manual_on then
+        add(string.format(cfg.PLATFORM_GET_TOPIC, did))
+        add(string.format(cfg.PLATFORM_FUNC_TOPIC, did))
+        add(string.format(cfg.PLATFORM_PSET_TOPIC, did))
+        add(string.format(cfg.PLATFORM_PGET_TOPIC, did))
+    end
     add(S.sub)
     return subs
+end
+
+-- 平台 topic 发布的中央闸门: idle/manual 全不发, 只 pollpull/sniff 走
+-- U1/U2/U3/U5/U6/U7 全部受这个 gate 管, U4 的 manual 路径仍走用户 pub_topic
+local function should_pub_platform()
+    if get_mode() == "idle" then return false end
+    if mqttcfg.load().manual_on then return false end
+    return true
 end
 
 -- 销毁 client。on_mqtt 的 error 分支也要调, 所以必须定义在它之前
@@ -1360,6 +1425,10 @@ local function task_main()
             end
             refresh_subs()
             local c = mqttcfg.load()
+            local pub_platform = should_pub_platform()
+            -- U4 始终跑: manual 走用户 pub_topic, idle 时 S.pub 通常为空
+            -- publish() 内已 return false. publish() 的 idle 短路靠这条 + 后续
+            -- 平台 topic 全不发靠下面的 pub_platform gate
             local due = false
             if c.interval_s > 0 then
                 due = (os.time() - S.last_pub) >= c.interval_s
@@ -1368,8 +1437,9 @@ local function task_main()
             end
             if S.dirty then due = true end
             if due then publish() end
-            -- U3 网关资源与 U4 同一节奏(interval_s), 两者互不相干
-            if (os.time() - (S.res_at or 0)) >= c.interval_s then send_gw_res() end
+            -- U1/U2/U3/U5/U6/U7 受 pub_platform gate 管: idle/manual 全不发
+            if pub_platform then
+                if (os.time() - (S.res_at or 0)) >= c.interval_s then send_gw_res() end
             -- 把这一轮的干活耗时记进 busy, 区间长度记进 span。span 与 busy
             -- 必须同一轮清零, 否则占比会越算越小
             S.busy_s = (S.busy_s or 0) + (os.clock() - t0)
@@ -1407,6 +1477,7 @@ local function task_main()
                     log.info("iot", "topology skip: " .. tostring(e))
                 end
             end
+            end  -- if pub_platform end
             if sys then sys.wait(1000) end
             -- hello 的两个时机: 连接后补发一次 + pollpull 档 30min 周期重发。
             -- 放在 sys.wait 之后，保证每轮循环只判一次、且不和本轮的上报挤在一起
@@ -1426,10 +1497,11 @@ local function task_main()
             -- 再点一次「拉取配置」。这正是文档"未拿到配置前每 30min 重发"的用途：
             -- 平台侧档案被重置/白名单到期时，设备侧无从得知，只靠上电那一次 hello
             -- 会永久失联且没有任何报错
-            if S.hello_at == 0 and get_mode() ~= "idle" and not pulling() then
+            -- 手动档不发 hello: 手动档完全独立于平台, 不需要 auto-provision
+            if pub_platform and S.hello_at == 0 and not pulling() then
                 log.info("iot", "hello on connect, mode=" .. get_mode())
                 pcall(send_hello)
-            elseif S.hello_at and S.hello_at > 0 and get_mode() == "pollpull"
+            elseif pub_platform and S.hello_at and S.hello_at > 0 and get_mode() == "pollpull"
                 and not pulling()
                 and (os.time() - S.hello_at) >= cfg.HELLO_RE_S then
                 log.info("iot", "hello re-send (30min), mode=pollpull")

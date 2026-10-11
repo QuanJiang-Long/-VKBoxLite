@@ -61,6 +61,8 @@ M.PLATFORM_RES_TOPIC = "/sys/thing/gw/property/post/%s"
 -- U7 指令回执: D2/D3 执行完回复, 平台据此更新 FunctionLog。目标 SN 可能是
 -- 子设备, 所以是 {targetSN} 而不是 {sn}
 M.PLATFORM_FPOST_TOPIC = "/sys/thing/gw/function/post/%s"
+-- U5 资源告警: 上升沿触发(ram>=85 / cpu>=90 / disk>=90), manual/idle 不发
+M.PLATFORM_EVENT_TOPIC = "/sys/thing/gw/event/post/%s"
 M.PLATFORM_FUNC_TOPIC = "/sys/thing/gw/function/get/%s"
 M.PLATFORM_PSET_TOPIC = "/sys/thing/gw/property/set/%s"
 M.PLATFORM_PGET_TOPIC = "/sys/thing/gw/property/get/%s"
