@@ -9,13 +9,14 @@ local M = {}
 
 local K_CFG = "mqtt_cfg"
 
--- host/port/ssl/client_id/interval_s/qos/allow_no_sn/keep_session 是【共用】
--- 参数, 自动档和手动档建连都读这份。user/pass 是【手动档】独有, 只有
--- manual_on 为真时才用。manual_on 为假时改用下面 auto 那套: 用户名留空
--- (iot 兜底填 SN) + 首页那份 MQTT凭证密码。
--- pub_topic/sub_topic 也是【手动档】独有: 手动档连的是用户自己的 broker 和
--- 自己的 topic 命名, 这两条由用户填。自动档不用它们, 直接走
--- core/config.lua 的 PLATFORM_* 固定常量(见 profile)。
+-- host/port/ssl/interval_s/qos/allow_no_sn/keep_session 是【共用】参数,
+-- 自动档和手动档建连都读这份。user/pass/client_id/pub_topic/sub_topic 是
+-- 【手动档】独有, 只有 manual_on 为真时才用。manual_on 为假时改用下面 auto
+-- 那套: 用户名留空(iot 兜底填 SN) + 首页那份 MQTT凭证密码。client_id 也归
+-- 入手动档: 自动档始终走 SN_ 兜底(did.."_"), 退出 poll 时清空恢复兜底。
+-- pub_topic/sub_topic 同理: 手动档连的是用户自己的 broker 和自己的 topic 命名,
+-- 这两条由用户填。自动档不用它们, 直接走 core/config.lua 的 PLATFORM_* 固定
+-- 常量(见 profile)。
 M.default = {
     host = "dz.voltkun.com",
     port = 1883,
@@ -31,7 +32,8 @@ M.default = {
     keep_session = false,
     -- 【自动档】首页「MQTT 服务器」面板: 用户名列只读显示 SN, 密码框就是
     -- 这里这个 pass。它与手动档那个密码是两份独立的值, 互不影响。
-    auto = { pass = "VKBOXGW2026KEY" },
+    -- 出厂不预置密码: 空 = 用户必须在前端配
+    auto = { pass = "" },
     manual_on = false,
 }
 
@@ -107,7 +109,7 @@ function M.normalize(c)
     -- 用户清空用户名想让它回落 SN 兜底, 实际会留下上一次的值,
     -- 表现为"我怎么改都改不掉"
     if not out.manual_on then
-        out.user, out.pass = "", ""
+        out.user, out.pass, out.client_id = "", "", ""
     end
     return out
 end
@@ -137,6 +139,21 @@ function M.load()
 end
 
 function M.save(c)
+    -- W:MQTT payload 通常不含 auto 表 (手动档 UI 不显示 auto_pass, 自动档才
+    -- 显式带)。normalize 拿到空 auto 会回退到默认值 d.auto.pass, 把 fskv 里
+    -- 已存过的密码清掉 — 切回自动档就连不上平台了。
+    -- 这里在 normalize 之前把 prev.auto.pass 兜底回去: 用户没显式覆盖
+    -- (=payload 里 auto.pass 字段不存在或为空), 就保留 fskv 旧值。
+    -- 想"主动清空" auto.pass 必须前端显式发 auto_pass="" 才能生效。
+    if c and not (type(c.auto) == "table" and type(c.auto.pass) == "string" and c.auto.pass ~= "") then
+        if not (type(c.auto_pass) == "string" and c.auto_pass ~= "") then
+            local prev = M.load()
+            if prev and prev.auto and prev.auto.pass and prev.auto.pass ~= "" then
+                c.auto = c.auto or {}
+                c.auto.pass = prev.auto.pass
+            end
+        end
+    end
     local n, err = M.normalize(c)
     if not n then return false, err end
     if not json then return false, "no json lib" end
@@ -198,14 +215,15 @@ end
 -- 切回 idle 时的 MQTT 复位: 只清手动档, 首页配好的平台连接原样留着。
 --
 -- 保留(首页「MQTT 服务器」面板能改的, 属"首页写入的内容"):
---   host / port / ssl / client_id / interval_s / qos / allow_no_sn / keep_session
+--   host / port / ssl / interval_s / qos / allow_no_sn / keep_session
 --   以及 auto.pass(首页那份 MQTT凭证密码, 与手动档的 pass 是两份独立的值)
 --   ⚠️ ssl 尤其必须留: 同一个 host 的 1883 明文和 8883 TLS 是两条路, 只保
 --      host+port 不保 ssl 会把走 TLS 的用户打回明文, 表现是"切回来就连不上了"
 --
--- 清掉: user / pass / pub_topic / sub_topic(手动档凭证与 topic)。
+-- 清掉: user / pass / client_id / pub_topic / sub_topic(手动档凭证与 topic)。
 --      置空即可, normalize 在 manual_on=false 时会强制把它们清空
---      (见 normalize 末尾), 不用在这里拼默认值。
+--      (见 normalize 末尾), 不用在这里拼默认值。client_id 同理: 退出 poll
+--      恢复 "" 由 iot 默认 client_id (did.."_") 兜底成 SN_。
 --
 -- ⚠️ manual_on 必须和"清值"在同一个 save 里完成: normalize 在 manual_on=true 时
 --    【使用】user/pass。只清值不换档的话, 设备会拿空凭证匿名连平台 ——
@@ -220,7 +238,7 @@ function M.clear_manual()
     -- 判据只看 manual_on —— normalize=false 已强制清空 user/pass/pub/sub
     if not c.manual_on then return true, nil, false end
     c.manual_on = false
-    c.user, c.pass = "", ""
+    c.user, c.pass, c.client_id = "", "", ""
     c.pub_topic, c.sub_topic = "", ""
     local ok, err = M.save(c)
     return ok, err, ok
