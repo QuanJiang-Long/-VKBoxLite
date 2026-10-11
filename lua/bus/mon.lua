@@ -83,15 +83,42 @@ end
 -- B1: 配对成功就把旁听到的值写进 collector, 让 iot 现成的 dirty->publish
 -- 链路自己把数据发上平台。sniff 自己不发请求, 不写这里 dataCache 永远空,
 -- build_items 为空、publish 直接 return, 上报链路整个空转。
--- 别名 s<从机>_r<地址>, 与前端 R:INFER 的行键保持一致; 旁听拿不到配置里的
--- 数据类型, 统一按 uint16 大端解(poll 侧默认也是这个), 多寄存器逐个拆开
+-- 别名 s<从机>_r<地址>, 与前端 R:INFER 的行键保持一致。
+-- 默认按 uint16 逐寄存器拆开（4 字节也可能是 2 个独立 uint16，不能假设跨寄存型）。
+-- 仅在位模式铁证 (NaN/Inf / 值超 2^31) 时合并成 float32/uint32。
 local function push_rsp_value(slave, addr, f)
     if not f.data or not addr then return end
-    for i = 0, math.floor(#f.data / 2) - 1 do
-        local b = f.data:sub(i * 2 + 1, i * 2 + 2)
-        if #b == 2 then
+    local total = math.floor(#f.data / 2)
+    local i = 0
+    while i < total do
+        local remaining = total - i
+        if remaining >= 2 then
+            local b1, b2 = f.data:byte(i * 2 + 1), f.data:byte(i * 2 + 2)
+            local b3, b4 = f.data:byte(i * 2 + 3), f.data:byte(i * 2 + 4)
+            local e = (b1 % 128) * 2 + math.floor(b2 / 128)
+            if e == 255 then
+                local v = mbus.parse_value(f.data, i, "float32")
+                collector.push_data(addr + i, "s" .. slave .. "_r" .. (addr + i),
+                    f.hex, v, nil, "float32")
+                i = i + 2
+            else
+                local u = b1 * 16777216 + b2 * 65536 + b3 * 256 + b4
+                if u >= 2147483648 then
+                    local v = mbus.parse_value(f.data, i, "uint32")
+                    collector.push_data(addr + i, "s" .. slave .. "_r" .. (addr + i),
+                        f.hex, v, nil, "uint32")
+                    i = i + 2
+                else
+                    collector.push_data(addr + i, "s" .. slave .. "_r" .. (addr + i),
+                        f.hex, b1 * 256 + b2, nil, "uint16")
+                    i = i + 1
+                end
+            end
+        else
+            local b1, b2 = f.data:byte(i * 2 + 1), f.data:byte(i * 2 + 2)
             collector.push_data(addr + i, "s" .. slave .. "_r" .. (addr + i),
-                f.hex, b:byte(1) * 256 + b:byte(2), nil, "uint16")
+                f.hex, b1 * 256 + b2, nil, "uint16")
+            i = i + 1
         end
     end
 end
