@@ -655,6 +655,14 @@ local function should_pub_platform()
     return true
 end
 
+-- U2 topo (带 nodes[]) 单独的闸门: 只有 sniff 主动建档需要发,
+-- pollpull 的拓扑由平台 configSnapshot 下发(平台已知道/对方主动),
+-- device 再发回去是闭环+浪费, 触发后还会被 60s 兜底限制 (见 L1460)。
+-- idle/poll 拓扑没意义
+local function should_pub_topo()
+    return get_mode() == "sniff"
+end
+
 -- 销毁 client。on_mqtt 的 error 分支也要调, 所以必须定义在它之前
 -- (local function 是词法作用域, 写在后面会让 on_mqtt 里那个名字解析到全局 nil)
 local function destroy_client()
@@ -1467,6 +1475,7 @@ local function task_main()
             refresh_subs()
             local c = mqttcfg.load()
             local pub_platform = should_pub_platform()
+            local pub_topo = should_pub_topo()
             -- U4 始终跑: manual 走用户 pub_topic, idle 时 S.pub 通常为空
             -- publish() 内已 return false. publish() 的 idle 短路靠这条 + 后续
             -- 平台 topic 全不发靠下面的 pub_platform gate
@@ -1508,7 +1517,7 @@ local function task_main()
             -- (9600), 发出去平台就按错波特率建一次模型, detect 完还得再重建 ——
             -- 白推一次配置, 白占一次 info/post
             local sig = nil
-            if not mon.status().detecting then sig = topo_sig() end
+            if pub_topo and not mon.status().detecting then sig = topo_sig() end
             if sig and sig ~= S.topo_sig then
                 local ok, e = send_topo()
                 if ok then
