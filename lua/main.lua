@@ -15,6 +15,10 @@ _G.DEBUG = not _G.BUILD_RELEASE
 local _raw_require = require
 local _pkg_ok = (type(package) == "table" and type(package.loaded) == "table")
 local _req_miss = {}
+-- 自定义 require: 子目录 fallback (bus/mbus → mbus) + 缓存, 防无限重试
+-- 任意 require 成功(即使 chunk 返回 nil)都缓存成 true, 否则二次 require
+-- 走 pcall → fallback → 报 "module not found" (踩过: probe_exmodbus 不
+-- return 时第二次 require 同名模块崩)
 require = function(name)
     if type(name) ~= "string" then return _raw_require(name) end
     local sub, base = string.match(name, "^([%a_][%w_]*)/([%a_][%w_]*)$")
@@ -22,13 +26,17 @@ require = function(name)
     if _pkg_ok and package.loaded[name] ~= nil then return package.loaded[name] end
     if _req_miss[name] then return _raw_require(name) end
     local ok, m = pcall(_raw_require, name)
-    if ok and m ~= nil then
-        if _pkg_ok then package.loaded[name] = m end
+    if ok then
+        if _pkg_ok and package.loaded[name] == nil then
+            package.loaded[name] = (m == nil) and true or m
+        end
         return m
     end
     local ok2, m2 = pcall(_raw_require, base)
-    if ok2 and m2 ~= nil then
-        if _pkg_ok then package.loaded[name] = m2 end
+    if ok2 then
+        if _pkg_ok and package.loaded[name] == nil then
+            package.loaded[name] = (m2 == nil) and true or m2
+        end
         return m2
     end
     _req_miss[name] = true
