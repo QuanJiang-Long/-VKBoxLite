@@ -45,12 +45,27 @@ end
 -- 前端 W:WRITE 都可能在 idle/sniff 档到来，而 setup 原先只在 M.start() 和
 -- raw_tx() 里做，那条路上 uart.write 等于发到空气里。
 -- 波特率没变时重复 setup 不打断在途事务，所以不必判 running
+--
+-- 🎯 修法 (19200+ 高波特率, W:CFG 改 baud 路径):
+--   合宙 FAQ #32: 重新 uart.setup 会重置 RX 缓冲和驱动上下文.
+--   19200/38400/115200 应答比 9600 早到 (19200 t3.5≈1.82ms, 6ms 内到),
+--   BSP 在 "刚 setup 状态" 没恢复, 应答字节进不了 RX FIFO → fire=0.
+--   第 2 次 setup 之前先 uart.close(1) + sys.wait(500) 让驱动完全复位,
+--   让"软重启 485"独立出来, 不影响 VUART / 前端交互.
+--   第 1 次 setup (boot 启动) 不需要 close, 加快启动.
+local _setup_n = 0
 local function ensure_uart()
     if not lastCfg then M.reload_cfg() end
+    if _setup_n >= 1 then
+        log.warn("poll", "第 2 次 setup, uart.close + wait 500ms 软重启 485")
+        pcall(uart.close, mbus.UART_ID)
+        if sys then sys.wait(500) end
+    end
     local ok, e = pcall(uart.setup, mbus.UART_ID, lastCfg and lastCfg.baud or cfg.BAUD,
         lastCfg and lastCfg.databits or cfg.DATABITS,
         lastCfg and lastCfg.stopbits or cfg.STOPBITS,
         mbus.parity_to_uart(lastCfg and lastCfg.parity or cfg.PARITY))
+    _setup_n = _setup_n + 1
     if not ok then return false, "uart setup fail: " .. tostring(e) end
     if gpio then pcall(gpio.setup, mbus.DE_PIN, 0) end
     return true
