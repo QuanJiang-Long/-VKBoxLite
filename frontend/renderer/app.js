@@ -1815,7 +1815,7 @@ function renderInfer() {
       + (inf.ignored ? '；已过滤 ' + inf.ignored + ' 条无应答的请求（从机可能不在线）' : '')
     : '';
   if (regs.length === 0) {
-    el.inferTbody.innerHTML = '<tr><td colspan="6" style="color:#999;">暂无推断结果</td></tr>';
+    el.inferTbody.innerHTML = '<tr><td colspan="7" style="color:#999;">暂无推断结果</td></tr>';
     return;
   }
   el.inferTbody.innerHTML = regs.map(r =>
@@ -1825,6 +1825,7 @@ function renderInfer() {
     '<td>' + esc(r.count) + '</td>' +
     '<td>0x' + (r.fc != null ? r.fc.toString(16).padStart(2, '0').toUpperCase() : '?') + '</td>' +
     '<td>' + esc(r.hits) + '</td>' +
+    '<td title="' + esc(r.dtype_summary || '-') + '" style="font-family:monospace;font-size:12px;color:#0066cc;">' + esc(r.dtype_summary || '-') + '</td>' +
     '<td>s' + esc(r.slave) + '_r' + esc(r.addr) + '</td>' +
     '</tr>'
   ).join('');

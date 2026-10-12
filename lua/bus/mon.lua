@@ -218,13 +218,27 @@ function M.infer()
         if f.kind == "rsp" and f.slave then online[f.slave] = true end
     end
     local agg, slaves, ignored = {}, {}, 0
+    -- dtype 汇总: 每聚合项从 collector.dataCache 查每个寄存器的 dtype
+    -- push_rsp_value (e4dbc30) 在 NaN/Inf→float32 / ≥2^31→uint32 时合并,
+    -- 多数情况同 dtype (uint16×count), 少数情况不同
+    local cache = collector.get_all_latest()
     for _, f in ipairs(fs) do
         if f.kind == "req" and f.addr ~= nil and f.qty then
             if online[f.slave] then
                 local key = f.slave .. ":" .. f.addr .. ":" .. f.qty .. ":" .. f.fc
                 local a = agg[key]
                 if not a then
-                    a = { slave = f.slave, addr = f.addr, count = f.qty, fc = f.fc, hits = 0 }
+                    local dtypes = {}
+                    for j = 0, f.qty - 1 do
+                        local alias = "s" .. f.slave .. "_r" .. (f.addr + j)
+                        local e = cache[alias]
+                        dtypes[#dtypes + 1] = (e and e.dtype) or "uint16"
+                    end
+                    a = {
+                        slave = f.slave, addr = f.addr, count = f.qty, fc = f.fc,
+                        hits = 0,
+                        dtype_summary = table.concat(dtypes, ","),
+                    }
                     agg[key] = a
                     slaves[f.slave] = true
                 end
