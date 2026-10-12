@@ -8,6 +8,14 @@ local mqtt = corelib.try("mqtt")
 local rtos = corelib.try("rtos")
 local mobile = corelib.try("mobile")
 local socket = corelib.try("socket")
+-- 兼容老固件: lbsLoc2.lua 文件加载时会自动启动 sys.taskInit (line 124-136),
+-- 直接用全局 _G.sys. base 24.10 bsp V2002 上 _G.sys 未自动注入 → sys=nil 崩
+-- (lbsLoc2.lua:148 'attempt to index a nil value (field "sys")'). 在这里强制
+-- 把 sys / socket / mobile 注册到 _G, 让 lbsLoc2 自带的协程能跑
+for _, lib in ipairs({"sys", "socket", "mobile", "json", "bit", "zbuff", "pack"}) do
+    local m = corelib.try(lib)
+    if m and _G[lib] == nil then _G[lib] = m end
+end
 -- lbsLoc2 = 合宙免费 LBS 基站定位, 默认扩展库, 单基站 1.5km 精度,
 -- 频率被卡死(官方口径 4h-2min), 工程上 30min 一次足够.
 -- 取不到就 nil, 整段 LBS 流程直接跳过
