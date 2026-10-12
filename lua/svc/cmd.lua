@@ -123,7 +123,12 @@ local function reg_cmds()
         -- 按当前运行模式取对应的配置槽
         local slot = (ctrl.get_mode() == "pollpull") and MODE_PULL or MODE_POLL
         local cfg = (slot == MODE_PULL) and cfgstore.load_pull() or cfgstore.load_poll()
-        M.reply("RET:CFG=" .. jencode({ cfg = cfg, slot = slot, src = cfgstore.poll_src() }))
+        -- src 必须反映本次 cfg 实际所在槽: pollpull 档下 ds_poll 空着但
+        -- ds_pull 已被平台覆盖的情况很常见 (老用户从 poll 切到 pollpull),
+        -- 之前这里写 poll_src() 永远查 K_POLL, 前端拿 src='default' 误判
+        -- "平台没下发", 实际 ds_pull 已经有平台配置. 用 slot 决定查哪个 src
+        local src = (slot == MODE_PULL) and cfgstore.pull_src() or cfgstore.poll_src()
+        M.reply("RET:CFG=" .. jencode({ cfg = cfg, slot = slot, src = src }))
     end)
 
     M.reg("W:CFG", function(arg)

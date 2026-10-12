@@ -249,10 +249,18 @@ function refreshCfgDirty() {
   // cfgSnap 还是 null 说明从没读过配置，没有可比基线，不算脏
   const d = S.cfgSnap !== null && cfgSnap() !== S.cfgSnap;
   if (d === S.cfgDirty) return;
+  const wasDirty = S.cfgDirty;
   S.cfgDirty = d;
   el.btnSaveCfg.textContent = d ? '保存配置 *' : '保存配置';
   el.btnSaveCfg.classList.toggle('dirty', d);
   if (d) status('有未保存的更改，点「保存配置」生效', false);
+  // 由脏变干净时要清掉 status —— 程序填表 (readCfg/readCfgSilent/
+  // pullCfg 内的 fillFormFromPlatform) 会先填成"脏"再 snapClean, 不清就
+  // 让 status bar 一直挂着那条提示, 看着像用户改了东西其实没改
+  else if (wasDirty && el.stMsg && el.stMsg.textContent === '有未保存的更改，点「保存配置」生效') {
+    el.stMsg.textContent = '';
+    el.stMsg.className = '';
+  }
 }
 
 // 会整份覆盖表单的动作（读配置/拉取/应用推断/导入/读 MQTT）之前调用。
@@ -549,20 +557,71 @@ async function readInfo() {
 // 同一个槽（W:CFG 按模式选槽，见 cmd.lua），所以这里是"所见即所存"，
 // 只是要提醒平台下次下发会盖掉本地改动。不说明白的话用户以为自己在改一份
 // 独立的副本，平台一推发现改动没了
+// sniff 也走这个 hint: 颜色更冷, 文案"线程没真跳人动的"
+//
+// 三档: pull (拉取档下 ds_pull 已下发), default (拉取档下 ds_pull 还是默认,
+// 平台没推过, 不填表单等推), sniff
 function renderCfgSrcHint(slot) {
   if (!el.cfgSrcHint) return;
   const h = el.cfgSrcHint;
   if (slot === 'pull') {
     h.hidden = false;
-    h.textContent = '当前显示并保存的都是平台拉取的配置（ds_pull）；平台下次下发会覆盖本地的改动';
+    h.textContent = '当前显示的是平台拉取的配置（ds_pull）；平台下次下发会覆盖本地改动 ——本页只读';
     h.style.color = '#b06a00';
+  } else if (slot === 'default') {
+    h.hidden = false;
+    h.textContent = '等待平台下发配置 ——本页只读';
+    h.style.color = '#999';
+  } else if (slot === 'sniff') {
+    h.hidden = false;
+    h.textContent = 'sniff 旁听模式 —— 配置由设备自动识别, 本页只读';
+    h.style.color = '#888';
   } else {
     h.hidden = true;
     h.textContent = '';
   }
 }
 
+// pollpull / sniff 把 #sp-s1 整个面板锁住: input readonly, select/radio
+// disabled, 「保存配置」/「新增寄存器」/每行「删除」全藏,「读取配置」
+// 留着让他主动查 ds_pull 内容. 只有 poll（手动配置）档是编辑档.
+// cfgSrcHint 也按 mode 给提示文案, 让用户一眼看出"这块不给你动".
+// 锁档下 snapClean() 抹掉「保存配置 *"」橙色提示, 跟用户调
+// "锁上了, 别惦记着保存" 一致
+//
+// pollpull 下的 cfgSrcHint 要看 S.cfgSrc 决定显示"等待"还是"已拉取",
+// 但 setFormLocked 是 renderMode 5s 轮询调, 此时 S.cfgSrc 可能还没被
+// readCfgSilent 设过. 这里看到 cfgSrcHint 已经是某种状态就不动, 让
+// readCfgSilent 自己负责更新
+function setFormLocked(locked) {
+  const pane = $('sp-s1');
+  if (!pane) return;
+  pane.querySelectorAll('input, select, textarea').forEach(e => {
+    if (e.type === 'radio') e.disabled = locked;
+    else e.readOnly = locked;
+    e.classList.toggle('ro', locked);
+  });
+  const edit = !locked;
+  if (el.btnSaveCfg) el.btnSaveCfg.style.display = edit ? '' : 'none';
+  if (el.btnAddReg) el.btnAddReg.style.display = edit ? '' : 'none';
+  pane.querySelectorAll('.btn-del').forEach(b => { b.style.display = edit ? '' : 'none'; });
+  if (locked) snapClean();
+  // pollpull 下若 cfgSrcHint 已显示 (readCfgSilent 跑过), 不动它; 否则
+  // 给个 'default' 兜底(等待平台下发), 不让 hint 整轮不出现
+  if (locked && S.mode === 'pollpull' && el.cfgSrcHint && el.cfgSrcHint.hidden) {
+    renderCfgSrcHint('default');
+  } else if (locked && S.mode === 'sniff' && el.cfgSrcHint && el.cfgSrcHint.hidden) {
+    renderCfgSrcHint('sniff');
+  } else if (!locked) {
+    renderCfgSrcHint(null);
+  }
+}
+
 async function readCfg(quiet) {
+  // 取消 S.mode 守卫: waitPullDone/pollpull 自动刷新都要走这条路径填表单
+  // (平台 push 后也要用, 见 renderPushBanner). 「读取配置」按钮本身在
+  // pollpull 档下保留 (让用户主动查 ds_pull), sniff/idle 档下隐藏,
+  // 没必要按模式再拦
   if (!quiet && !await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
   try {
     const rc = await sendCmd(Protocol.Enc.cfg(), 'CFG');
@@ -586,7 +645,11 @@ async function readCfg(quiet) {
       if (fillOk(el.inpRound)) el.inpRound.value = c.interval_ms || 3000;
       if (fillOk(el.inpSlave)) el.inpSlave.value = c.slave || 1;
       if (fillOk(el.inpTimeout)) el.inpTimeout.value = (c.timeout_ms == null) ? '' : c.timeout_ms;
-      if (payload && payload.src === 'default') {
+      // 首次进 pollpull 时 ds_pull 还是空的, R:CFG 会回 src='default',
+      // 这条提示只对用户主动点「读取配置」有意义; 自动路径
+      // (waitPullDone / renderPushBanner) 走 silent, 不弹, 否则切档就被
+      // 一条「还没保存」的 toast 误导, 以为配置没生效
+      if (payload && payload.src === 'default' && !quiet) {
         toast('设备尚未保存过配置，当前为默认值');
       }
     }
@@ -607,6 +670,44 @@ async function readCfg(quiet) {
     status('读取配置失败：' + e.message, false);
     toast('读取配置失败：' + e.message);
   }
+}
+
+// pollpull 自动刷新用: 静默读 R:CFG + R:REG 填表单, 不弹 toast/status,
+// 不动「未保存」标记 (snapClean 让填完是基线). 失败也静默, 不打扰横幅.
+// 失败原因最可能是设备正忙或串口被占, 下一次 5s 刷新会再试
+//
+// src='default' 特例: ds_pull 是出厂默认, 平台还没下发. 不填, 避免切档
+// 立刻点 poll tab 看到假数据; 改显示「等待平台下发…」, 等真正配置到达
+// (走 renderPushBanner 路径) 再填
+async function readCfgSilent() {
+  try {
+    const rc = await sendCmd(Protocol.Enc.cfg(), 'CFG', 3000);
+    const payload = rc.data;
+    S.cfgSrc = payload && payload.src || null;
+    const c = (payload && payload.cfg) ? payload.cfg : payload;
+    if (S.cfgSrc === 'default') {
+      renderCfgSrcHint('default');
+      return;
+    }
+    if (c && typeof c === 'object') {
+      S.cfg = c;
+      if (fillOk(el.selBaud)) el.selBaud.value = String(c.baud || 9600);
+      setRadio('databits', String(c.databits || 8));
+      setRadio('parity', String(c.parity != null ? c.parity : 0));
+      setRadio('stopbits', String(c.stopbits || 1));
+      if (fillOk(el.inpRound)) el.inpRound.value = c.interval_ms || 3000;
+      if (fillOk(el.inpSlave)) el.inpSlave.value = c.slave || 1;
+      if (fillOk(el.inpTimeout)) el.inpTimeout.value = (c.timeout_ms == null) ? '' : c.timeout_ms;
+    }
+    const rr = await sendCmd(Protocol.Enc.reg(), 'REG', 3000);
+    const d = rr.data;
+    if (Array.isArray(d) || (d && typeof d === 'object')) {
+      S.regs = toArr(d);
+      renderRegTable();
+    }
+    snapClean();
+    renderCfgSrcHint('pull');
+  } catch (e) { /* 静默: 失败不打扰, 下次再试 */ }
 }
 
 // 拉取配置：从平台拉 485 配置并回填表单（不自动保存，由用户点保存生效）
@@ -956,6 +1057,16 @@ function addRegRow(addr, type, name, alias, count) {
   const ph = el.paramTbody.querySelector('tr td[colspan]');
   if (ph) ph.parentNode.removeChild(ph);
   el.paramTbody.appendChild(tr);
+  // 新增行也要遵守当前模式的锁态: pollpull/sniff 下不该有「删除」键
+  if (S.mode !== 'poll') {
+    tr.querySelectorAll('input, select').forEach(e => {
+      if (e.classList.contains('c-val') || e.classList.contains('c-ts')) return;
+      e.readOnly = true;
+      e.classList.add('ro');
+    });
+    const delBtn = tr.querySelector('.btn-del');
+    if (delBtn) delBtn.style.display = 'none';
+  }
   refreshCfgDirty();                   // 增行是 DOM 操作，不触发 input 事件，得手动标脏
 }
 
@@ -1094,6 +1205,8 @@ function renderMode() {
   syncTabs();
   // 拉取配置按钮跟着模式显隐: 手动配置模式下不该出现这个入口
   syncPullCfgBtn();
+  // 锁定 485 表单: 只有 poll（手动配置）档可编辑, pollpull/sniff/idle 全锁
+  setFormLocked(S.mode !== 'poll');
 }
 
 //=====================================================================
@@ -1138,7 +1251,9 @@ async function waitPullDone() {
       // 轮询起来了才是真的到位: 设备是在 save_pull 之后才 start("pull") 的
       status('平台配置已拉取并生效，开始轮询', true);
       toast('已切换到 poll（拉取配置）模式，开始轮询');
-      await readCfg();       // 表单回填成平台那份, 否则用户看到的还是手配的
+      // quiet=true: 静默填表单, 避免 ds_pull 是空(首次进 pollpull 还没推)
+      // 时弹「尚未保存过配置」误导用户以为配置没生效
+      await readCfg(true);   // 表单回填成平台那份, 否则用户看到的还是手配的
       // 进 pollpull 时设备已被 ctrl 强制切到 MQTT 自动档, 不重读的话
       // MQTT 页那个手动档开关还停在旧状态, 和设备实际用的档位不一致
       readMqtt(true);
@@ -1169,6 +1284,14 @@ async function readMode() {
 async function applyMode(mode) {
   // 切换进行中再点，忽略（避免连点把设备和 UI 搞乱）
   if (S.modeSwitching) return;
+  // pollpull → poll 切档提示: 当前显示的是平台那份(ds_pull), 切过去
+  // 后会清掉显示内容, 用户得自己点「读取配置」读 ds_poll 那份
+  if (mode === 'poll' && S.mode === 'pollpull') {
+    const ok = await askConfirm(
+      '当前显示的是平台拉取配置 (ds_pull)。切换到「手动配置」会清掉显示内容, 需重新点「读取配置」读取您的本地配置。\n确定继续？',
+      '切换运行模式');
+    if (!ok) return;
+  }
   S.modeSwitching = true;
   S.modePending = mode;          // 先记下用户所选，防止 5s 定时刷新把高亮打回旧模式
   renderMode();
@@ -1198,6 +1321,8 @@ async function applyMode(mode) {
     // pollpull: W:MODE 只保证"起了拉取握手", 轮询要等平台配置落地后才开始
     // (最坏 35s = MQTT 建连 20s + 等下发 15s)。期间模式已是 pollpull 但还
     // 没在采, 只提示"已切换"会让用户以为已经在轮询了
+    // 注: 不在这里 readCfg —— 改用 activateTab('tabPoll') 钩子, 同样场景
+    // (软件一打开就是 pollpull) 也覆盖, 比 applyMode 钩子更通用
     if (mode === 'pollpull') {
       await waitPullDone();
       return;
@@ -1291,6 +1416,13 @@ function renderPushBanner(mq) {
   }
   // 同一份（push_n 没变）且用户点过忽略，就别再刷屏
   if (S.pushIgnored && S.pushSeenN === mq.push_n) { box.hidden = true; return; }
+  // pollpull 档: 平台 push 一来, 静默读一份 ds_pull 填进表单, 让用户立刻看
+  // 到新配置 (5s 定时刷新看见 push_n 增, 触发一次 readCfg; 失败就静默, 不
+  // 打断横幅本身的展示). 初次进 pollpull 由 waitPullDone 负责, 这里只管
+  // "已进 pollpull 后再有新 push" —— 与 S.pushSeenN 配合, 同一份不重读
+  if (S.mode === 'pollpull' && mq.push_n && mq.push_n !== S.pushSeenN) {
+    readCfgSilent();
+  }
   S.pushSeenN = mq.push_n;
   box.hidden = false;
 
@@ -2166,6 +2298,10 @@ function activateTab(tabId) {
   if (pane) pane.classList.add('active');
   // 切到报文页时立即拉一次
   if (tabId === 'tabSniff' && S.open && S.mode === 'sniff') readFrames();
+  // pollpull 档: 进 poll tab 时静默读一份 ds_pull 填表单 —— 软件一打开
+  // 就是 pollpull (没有 applyMode 这一步) 也覆盖。push 自动刷新另见
+  // renderPushBanner. applyMode 钩子已删除 (窄), 这个钩子宽
+  if (tabId === 'tabPoll' && S.mode === 'pollpull') readCfgSilent();
 }
 
 const tabItems = document.querySelectorAll('.tab-header .tab-item');
@@ -2187,6 +2323,10 @@ serialTabs.forEach(tab => {
     if (pane) pane.classList.add('active');
     // 切到 MQTT配置 时拉一次，避免刚切过去是空的
     if (key === 's2' && S.open) readMqtt();
+    // pollpull 档: 切回 485 总线面板 时再读一次 ds_pull, 覆盖"在 poll tab
+    // 里从 MQTT 切回 485" 的场景 (activateTab 已经读过一次了, 重复读也
+    // 没成本, 而且能赶上这中间平台 push 的内容)
+    if (key === 's1' && S.mode === 'pollpull') readCfgSilent();
   };
 });
 

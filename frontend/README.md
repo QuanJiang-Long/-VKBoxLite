@@ -78,6 +78,7 @@ mklink /J D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules D:\VKBox_Lite\VKBo
 | 标签页只有 4 个 | poll模式 / sniff模式 是合并后的结果：原「串口配置」改名 **poll模式**，原「实时报文」改名 **sniff模式**，原「MQTT上报」页取消 |
 | poll模式内有两个子标签 | 「串口1（485总线）」+「MQTT配置」，MQTT 内容已从串口1下面移到独立的「MQTT配置」子标签 |
 | poll模式有"读取配置"和"拉取配置"两个按钮 | 「读取配置」= R:CFG + R:REG 回填表单；「拉取配置」= 通过 MQTT 从平台拉配置，**回填表单并自动落盘生效、自动回执平台**，不需要再点「保存配置」（需先配好 MQTT 服务器地址和端口） |
+| poll模式表单在哪些档可编辑 | **只有「poll（手动配置）」档可编辑**。pollpull（拉取）/ idle / sniff 档下：所有 input 加 readonly、select/radio disabled、「保存配置」/「新增寄存器」/每行「删除」全藏，cfgSrcHint 显示"配置由 xxx 来源"提醒。pollpull → poll 切档会弹确认（"会清掉显示内容"），cancel 留在 pollpull |
 | 点「拉取配置」提示"请先配置 MQTT 服务器地址/端口" | 拉取走 MQTT。先在首页或「MQTT配置」子标签填好服务器地址和端口并保存，再点拉取 |
 | 首页的 MQTT 地址端口和「MQTT配置」页是什么关系 | **两份独立的凭证 + 一份共用连接参数**。首页「MQTT 服务器」面板管**自动档**：只读用户名（= SN）+ **MQTT凭证密码** + 地址/端口/ClientID。自动档用于自动拉取配置、sniff 模式上报，以及关闭手动配置后的默认建连。MQTT配置页管**手动档**：用户名/密码/发布Topic/订阅Topic自己填（**这几项和「保存」按钮只在打开「手动配置」时才显示**），另外还管与首页共用的地址/端口/SSL/ClientID/上报周期/会话管理/no_SN。**两个密码是两份独立的值**，改互不影响。首页**故意不放用户名输入框**：自动档用户名固定是 SN；首页的「用户名」是只读回显。首页 ClientID 可手输覆盖，留空 = 设备用 SN 加下划线自动拼 |
 | MQTT 显示"平台拒绝连接(CONACK 0x05 未授权)" | 本平台是 B 模型鉴权：`clientId`=`设备SN_`（SN 加下划线，尾部空）、`username`=设备SN、`password`=平台签发的凭证密码（默认 `VKBOXGW2026KEY`）。先看首页「用户名/ClientID」两行和「连接与上报状态」的 **ClientID/用户名** 两栏确认发出去的是什么，再确认该 SN 在平台侧凭证是「生效中」。详见 `../lua/README.md` 的「MQTT 连不上排查」 |
