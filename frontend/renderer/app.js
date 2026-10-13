@@ -120,6 +120,13 @@ const el = new Proxy({
   mqAllowNoSn: $('mqAllowNoSn'),
   // MQTT 会话管理：select（离线自动销毁=0 / 持久会话=1），不是开关
   mqKeepSession: $('mqKeepSession'),
+  // sniff 页面简版 MQTT 配置 (只读 broker + 可改上报周期, 跟 sp-s2 共享 mqManual + mqDirty)
+  snMqHost: $('snMqHost'),
+  snMqPort: $('snMqPort'),
+  snMqInterval: $('snMqInterval'),
+  btnSnMqttRefresh: $('btnSnMqttRefresh'),
+  btnSnMqttSave: $('btnSnMqttSave'),
+  snMqttHint: $('snMqttHint'),
   // 报文页
   btnFrameRefresh: $('btnFrameRefresh'), btnFrameClear: $('btnFrameClear'),
   frameFilter: $('frameFilter'), frameAuto: $('frameAuto'), frameLog: $('frameLog'),
@@ -296,7 +303,7 @@ function mqSnap() {
     host: g(el.mqHost), port: g(el.mqPort), ssl: c(el.mqSsl),
     user: g(el.mqUser), pass: g(el.mqPass), cid: g(el.mqClientId),
     pub: g(el.mqPub), sub: g(el.mqSub),
-    iv: g(el.mqInterval),
+    iv: g(el.mqInterval), snIv: g(el.snMqInterval),
     noSn: c(el.mqAllowNoSn), keep: g(el.mqKeepSession),
     hHost: g(el.hMqHost), hPort: g(el.hMqPort), hPass: g(el.hMqPass),
     hCid: g(el.hMqClientId)
@@ -1586,9 +1593,13 @@ function renderMqtt() {
     // 发布/订阅 topic：手动档专属，自动档整行藏掉。留空 = 用设备默认模板
     if (fillOk(el.mqPub)) el.mqPub.value = c.pub_topic || '';
     if (fillOk(el.mqSub)) el.mqSub.value = c.sub_topic || '';
+    // sniff 页面简版: 同步 broker 地址/端口 (只读) + 周期 (可编辑)
+    if (fillOk(el.snMqHost)) el.snMqHost.value = c.host || '';
+    if (fillOk(el.snMqPort)) el.snMqPort.value = c.port != null ? c.port : 1883;
     // user/client_id/topic 留空是故意的: 设备兜底填 SN 和默认模板, 所以这里
     // 显示空属正常。实际生效值看下面的连接状态面板。
     if (fillOk(el.mqInterval)) el.mqInterval.value = c.interval_s != null ? c.interval_s : 120;
+    if (fillOk(el.snMqInterval)) el.snMqInterval.value = c.interval_s != null ? c.interval_s : 120;
     // QoS 已从界面移除：设备端发布/订阅固定用 QoS 1，
     // 这里不再显示也不再下发（设备 normalize 会退回默认值 1）。
     el.mqAllowNoSn.checked = !!c.allow_no_sn;
@@ -2131,6 +2142,17 @@ if (el.btnPushIgnore) el.btnPushIgnore.onclick = () => {
   e.addEventListener('input', refreshMqDirty);
   e.addEventListener('change', refreshMqDirty);
 });
+// sniff 页面简版: snMqInterval 改 → 同步 mqInterval + 触发 mqDirty
+if (el.snMqInterval) {
+  el.snMqInterval.addEventListener('input', () => {
+    if (el.mqInterval) el.mqInterval.value = el.snMqInterval.value;
+    refreshMqDirty();
+  });
+  el.snMqInterval.addEventListener('change', () => {
+    if (el.mqInterval) el.mqInterval.value = el.snMqInterval.value;
+    refreshMqDirty();
+  });
+}
 
 // 首页
 el.btnHomeRefresh.onclick = async () => { await readHome(); await readMode(); await readMqtt(); };
@@ -2254,6 +2276,17 @@ el.btnMqttSave.onclick = saveMqtt;
 el.btnMqttReport.onclick = reportNow;
 el.btnMqttReconnect.onclick = mqttReconnect;
 el.btnMqttPassEye.onclick = togglePassEye;
+// sniff 页面简版: 刷新 = 跟 sp-s2 一起 readMqtt; 保存 = 走 saveMqtt (snMqInterval 同步到 mqInterval)
+if (el.btnSnMqttRefresh) el.btnSnMqttRefresh.onclick = readMqtt;
+if (el.btnSnMqttSave) el.btnSnMqttSave.onclick = async () => {
+  // 同步 snMqInterval → mqInterval (saveMqtt 从 mqInterval 读)
+  if (el.snMqInterval && el.mqInterval) el.mqInterval.value = el.snMqInterval.value;
+  await saveMqtt();
+  if (el.snMqttHint) {
+    el.snMqttHint.textContent = S.mqtt ? '已保存' : '';
+    setTimeout(() => { if (el.snMqttHint) el.snMqttHint.textContent = ''; }, 3000);
+  }
+};
 if (el.btnHomeMqttPassEye) el.btnHomeMqttPassEye.onclick = togglePassEye;
 el.btnMqttReset.onclick = async () => {
   if (!await guardUnsaved(S.mqDirty, 'MQTT', '保存', () => { S.mqSnap = null; })) return;
@@ -2322,6 +2355,8 @@ function activateTab(tabId) {
   if (pane) pane.classList.add('active');
   // 切到报文页时立即拉一次
   if (tabId === 'tabSniff' && S.open && S.mode === 'sniff') readFrames();
+  // 切到 sniff tab 时同步刷一次 MQTT 配置 (snMqHost/Port/Interval)
+  if (tabId === 'tabSniff' && S.open) readMqtt();
   // pollpull 档: 进 poll tab 时静默读一份 ds_pull 填表单 —— 软件一打开
   // 就是 pollpull (没有 applyMode 这一步) 也覆盖。push 自动刷新另见
   // renderPushBanner. applyMode 钩子已删除 (窄), 这个钩子宽
