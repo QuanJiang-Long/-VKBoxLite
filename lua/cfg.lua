@@ -8,7 +8,10 @@ local json = util.try("json")
 local M = {}
 
 -- 4 种工作模式提到模块顶部(各文件独立常量是 Lua 闭包隔离的代价)
-local MODE_POLL, MODE_PULL, MODE_IDLE, MODE_SNIFF = "poll", "pull", "idle", "sniff"
+-- MODE_POLL/MODE_PULL 保留作历史别名: 老 fskv 里 boot_mode="poll"/"pollpull"
+-- 软切进 "manual"/"platform" (MQTT 手动档 + 寄存器手配/平台拉, 故名 manual/platform)
+local MODE_MANUAL, MODE_PLATFORM, MODE_IDLE, MODE_SNIFF = "manual", "platform", "idle", "sniff"
+local MODE_POLL, MODE_PULL = "poll", "pollpull"  -- 历史别名, 软切用, 不删
 
 local K_POLL, K_SYS = "ds_poll", "ds_sys"
 -- ds_pull: 平台拉取的独立槽, 复用 normalize_poll/default_poll, 不新增校验。
@@ -138,7 +141,7 @@ function M.normalize_sys(c)
     local mode = str(c.boot_mode, MODE_IDLE):lower():gsub("^%s+", ""):gsub("%s+$", "")
     -- pollpull = 拉取配置档: 用 ds_pull 轮询, 且开机后自动 hello 拉一次平台配置。
     -- 和 poll 共用同一套 normalize_poll, 只是配置来源不同
-    if mode ~= MODE_IDLE and mode ~= MODE_POLL and mode ~= "pollpull" and mode ~= MODE_SNIFF then
+    if mode ~= MODE_IDLE and mode ~= MODE_MANUAL and mode ~= MODE_POLL and mode ~= MODE_PLATFORM and mode ~= MODE_PULL and mode ~= MODE_SNIFF then
         return nil, "bad boot_mode"
     end
     return { boot_mode = mode }

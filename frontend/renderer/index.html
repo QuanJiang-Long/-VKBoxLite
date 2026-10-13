@@ -292,13 +292,13 @@ body:not(.mq-manual) .manual-only{display:none !important;}
                             <div class="m-desc">不主动驱动总线<br>仅响应前端指令</div>
                             <div class="m-state" id="msIdle"></div>
                         </div>
-                        <div class="mode-card" id="mcPoll" data-mode="poll">
-                            <div class="m-title">poll（手动配置）</div>
+                        <div class="mode-card" id="mcPoll" data-mode="manual">
+                            <div class="m-title">manual（手动配置）</div>
                             <div class="m-desc">本设备作 Modbus 主机<br>用你手配的寄存器表和 MQTT</div>
                             <div class="m-state" id="msPoll"></div>
                         </div>
-                        <div class="mode-card" id="mcPollpull" data-mode="pollpull">
-                            <div class="m-title">poll（拉取配置）</div>
+                        <div class="mode-card" id="mcPollpull" data-mode="platform">
+                            <div class="m-title">platform（拉取配置）</div>
                             <div class="m-desc">进入即向平台要配置<br>寄存器表和 MQTT 全部由平台下发</div>
                             <div class="m-state" id="msPollpull"></div>
                         </div>
@@ -313,8 +313,10 @@ body:not(.mq-manual) .manual-only{display:none !important;}
                         <label>开机默认模式</label>
                         <select id="selBootMode">
                             <option value="idle">idle（不主动采，推荐）</option>
-                            <option value="poll">poll（手动配置，开机即轮询）</option>
-                            <option value="pollpull">poll（拉取配置，开机即拉取）</option>
+                            <option value="manual">manual（手动配置，开机即轮询）</option>
+                            <option value="poll">poll（历史名, 等同 manual）</option>
+                            <option value="platform">platform（拉取配置，开机即拉取）</option>
+                            <option value="pollpull">pollpull（历史名, 等同 platform）</option>
                             <option value="sniff">sniff（开机即旁听）</option>
                         </select>
                         <button id="btnSaveBoot" class="primary">保存</button>
@@ -382,6 +384,7 @@ body:not(.mq-manual) .manual-only{display:none !important;}
                     <select id="selBaud">
                         <option>1200</option><option>2400</option><option>4800</option>
                         <option selected>9600</option>
+                        <option>19200</option><option>38400</option><option>115200</option>
                     </select>
                 </div>
                 <div class="form-row">

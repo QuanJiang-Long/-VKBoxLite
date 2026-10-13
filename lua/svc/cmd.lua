@@ -20,7 +20,10 @@ local guard = util.try("svc/guard")
 local M = {}
 
 -- 4 种工作模式提到模块顶部
-local MODE_POLL, MODE_PULL, MODE_IDLE, MODE_SNIFF = "poll", "pull", "idle", "sniff"
+-- MODE_POLL/MODE_PULL 保留作历史别名: 老 fskv boot_mode="poll"/"pollpull"
+-- 软切进 "manual"/"platform"
+local MODE_MANUAL, MODE_PLATFORM, MODE_IDLE, MODE_SNIFF = "manual", "platform", "idle", "sniff"
+local MODE_POLL, MODE_PULL = "poll", "pollpull"  -- 历史别名
 
 local UART_ID = uart.VUART_0
 if UART_ID == nil then UART_ID = 4 end
@@ -108,6 +111,9 @@ local function reg_cmds()
     M.reg("W:MODE", function(arg)
         local v = trim(arg):gsub("^%s+", ""):gsub("%s+$", ""):lower()
         if v == "stop" then v = MODE_IDLE end
+        -- "poll"/"pollpull" 是历史别名, 等同 "manual"/"platform"
+        if v == MODE_POLL then v = MODE_MANUAL end
+        if v == MODE_PULL then v = MODE_PLATFORM end
         local ok, msg, cleared = ctrl.switch_mode(v)
         if not ok then return M.reply("RET:FAIL:MODE:" .. tostring(msg)) end
         -- 切回 idle 会顺带复位配置。用 k:v 而不是 k=v: protocol.js 的 kv 解析
@@ -121,7 +127,7 @@ local function reg_cmds()
 
     M.reg("R:CFG", function()
         -- 按当前运行模式取对应的配置槽
-        local slot = (ctrl.get_mode() == "pollpull") and MODE_PULL or MODE_POLL
+        local slot = (ctrl.get_mode() == "platform") and MODE_PULL or MODE_POLL
         local cfg = (slot == MODE_PULL) and cfgstore.load_pull() or cfgstore.load_poll()
         -- src 必须反映本次 cfg 实际所在槽: pollpull 档下 ds_poll 空着但
         -- ds_pull 已被平台覆盖的情况很常见 (老用户从 poll 切到 pollpull),
@@ -137,7 +143,7 @@ local function reg_cmds()
         if not t then return M.reply("RET:FAIL:CFG:bad json") end
         local n, err = cfgstore.normalize_poll(t)
         if not n then return M.reply("RET:FAIL:CFG:" .. tostring(err)) end
-        local slot = (ctrl.get_mode() == "pollpull") and MODE_PULL or MODE_POLL
+        local slot = (ctrl.get_mode() == "platform") and MODE_PULL or MODE_POLL
         local ok, serr
         if slot == MODE_PULL then ok, serr = cfgstore.save_pull(t)
         else ok, serr = cfgstore.save_poll(t) end

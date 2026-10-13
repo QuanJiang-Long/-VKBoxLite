@@ -41,13 +41,16 @@ end
 
 local function monitor()
     local mode = cur_mode()
-    local stall = mode == "poll" and (ticks - last_alive) or nil
+    -- "manual" 才是当前 mode 名; "poll" 是历史别名, 老 fskv 软切会同时返回 "poll",
+    -- 也算 manual 行为 (MQTT 手动档 + 寄存器手配)
+    local is_manual = mode == "manual" or mode == "poll"
+    local stall = is_manual and (ticks - last_alive) or nil
     local parts = {
         string.format("uptime=%ds mode=%s feed=%d", ticks, mode, cfg.WDT_FEED_MS // 1000),
     }
     if stall then parts[#parts + 1] = string.format("stall=%ds", stall) end
     -- 轮询进度: 让"是否在周期轮询"直接从心跳可见
-    if mode == "poll" then
+    if is_manual then
         local okp, poll = pcall(require, "bus/poll")
         if okp and poll then
             local ps = poll.status()
@@ -72,7 +75,7 @@ function M.status()
     return {
         uptime = ticks,
         feed = cfg.WDT_FEED_MS,
-        stall = cur_mode() == "poll" and (ticks - last_alive) or nil,
+        stall = (cur_mode() == "manual" or cur_mode() == "poll") and (ticks - last_alive) or nil,
         wdt_to = cfg.WDT_TIMEOUT,
     }
 end

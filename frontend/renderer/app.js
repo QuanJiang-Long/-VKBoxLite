@@ -5,10 +5,15 @@
 //
 // 页面分工：
 //   首页       —— 运行状态总览 + MQTT 服务器
-//   运行模式   —— poll / sniff / idle 互斥切换 + 开机默认模式
-//   poll模式   —— 485 串口参数 + 寄存器表 + MQTT 连接与上报
+//   运行模式   —— manual / pollpull / sniff / idle 互斥切换 + 开机默认模式
+//   manual模式 —— 485 串口参数 + 寄存器表 + MQTT 连接与上报
 //   sniff模式  —— 解译帧实时视图 + 轮询表推断 + 总线诊断
 //=====================================================================
+
+// "manual"/"platform" 是当前 mode 名; "poll"/"pollpull" 是历史别名 (老 fskv 软切可能返回)
+// 跟设备端对齐: 任何判定「当前是否手动档」/「当前是否拉取档」的地方都用 isManual(m)/isPlatform(m)
+const isManual = (m) => m === 'manual' || m === 'poll';
+const isPlatform = (m) => m === 'platform' || m === 'pollpull';
 
 //---------------------------------------------------------------------
 // 全局状态
@@ -446,7 +451,7 @@ function syncPullCfgBtn() {
   const b = el.btnPullCfg;
   if (!b) return;
   // 串口没开也藏: 指令发不出去, 摆着也是干扰
-  const show = S.open && S.mode === 'pollpull';
+  const show = S.open && isPlatform(S.mode);
   b.style.display = show ? '' : 'none';
   b.disabled = !show;
   b.title = '从 MQTT 平台重新拉取 485 配置到「拉取配置」槽（ds_pull）';
@@ -597,7 +602,9 @@ function setFormLocked(locked) {
   const pane = $('sp-s1');
   if (!pane) return;
   pane.querySelectorAll('input, select, textarea').forEach(e => {
-    if (e.type === 'radio') e.disabled = locked;
+    // <select> 没有 readonly 属性 (HTML 规范), 只认 disabled. input/textarea 是 readonly
+    // 之前 select 设 readOnly=true 是无效操作, dtype 下拉仍可点, 用户能偷偷改
+    if (e.tagName === 'SELECT' || e.type === 'radio') e.disabled = locked;
     else e.readOnly = locked;
     e.classList.toggle('ro', locked);
   });
@@ -608,7 +615,7 @@ function setFormLocked(locked) {
   if (locked) snapClean();
   // pollpull 下若 cfgSrcHint 已显示 (readCfgSilent 跑过), 不动它; 否则
   // 给个 'default' 兜底(等待平台下发), 不让 hint 整轮不出现
-  if (locked && S.mode === 'pollpull' && el.cfgSrcHint && el.cfgSrcHint.hidden) {
+  if (locked && isPlatform(S.mode) && el.cfgSrcHint && el.cfgSrcHint.hidden) {
     renderCfgSrcHint('default');
   } else if (locked && S.mode === 'sniff' && el.cfgSrcHint && el.cfgSrcHint.hidden) {
     renderCfgSrcHint('sniff');
@@ -721,8 +728,8 @@ async function pullCfg() {
   // poll（拉取配置）档才订这条（手动档只订用户填的那一条，见 build_subs）。
   // 在手动档下发只会白等 20s 建连 + 15s 超时，所以按模式拦，不按 mqManual 拦
   // —— mqManual 是 MQTT 页自己的档位开关，和 485 运行模式是两件事
-  if (S.mode !== 'pollpull') {
-    const msg = '拉取配置需要在「poll（拉取配置）」模式下进行，请先切换运行模式';
+  if (!isPlatform(S.mode)) {
+    const msg = '拉取配置需要在「platform（拉取配置）」模式下进行，请先切换运行模式';
     status(msg, false);
     toast(msg);
     return;
@@ -1057,11 +1064,13 @@ function addRegRow(addr, type, name, alias, count) {
   const ph = el.paramTbody.querySelector('tr td[colspan]');
   if (ph) ph.parentNode.removeChild(ph);
   el.paramTbody.appendChild(tr);
-  // 新增行也要遵守当前模式的锁态: pollpull/sniff 下不该有「删除」键
-  if (S.mode !== 'poll') {
+  // 新增行也要遵守当前模式的锁态: platform/sniff 下不该有「删除」键
+  if (!isManual(S.mode)) {
     tr.querySelectorAll('input, select').forEach(e => {
       if (e.classList.contains('c-val') || e.classList.contains('c-ts')) return;
-      e.readOnly = true;
+      // select 没有 readonly, 用 disabled
+      if (e.tagName === 'SELECT') e.disabled = true;
+      else e.readOnly = true;
       e.classList.add('ro');
     });
     const delBtn = tr.querySelector('.btn-del');
@@ -1126,15 +1135,18 @@ function renderMode() {
   const shown = S.modePending || devMode;   // 有待应用选择时优先显示它
   S.mode = devMode;                         // S.mode 始终跟设备走，别处据此判断 sniff
   el.stMode.textContent = devMode;
-  // pollpull 档: 轮询起没起决定卡片状态显示"运行中"还是"拉取中"。
+  // platform 档: 轮询起没起决定卡片状态显示"运行中"还是"拉取中"。
   // 必须在下面 forEach 之前算 —— 回调是同步执行的, const 声明在后面就是
   // 暂时性死区, 直接 ReferenceError 把整个 renderMode 打挂
   const pollRunning = !!((st.poll || {}).running);
   // 卡片选中态：有待应用选择就高亮它，否则高亮设备当前模式
-  // 模式名直接从 k 推导（idle/poll/pollpull/sniff），不读 data-mode 属性：
+  // 模式名直接从 k 推导（idle/manual/platform/sniff），不读 data-mode 属性：
   // 少一次 DOM 读取，也不依赖属性是否被正确设置。
+  // DOM id 保留 mcPoll/mcPollpull 兼容老代码; k 映射到新 mode 字符串
   ['Idle', 'Poll', 'Pollpull', 'Sniff'].forEach(k => {
-    const dm = k.toLowerCase();       // idle / poll / pollpull / sniff，与卡片 data-mode 一致
+    let dm = k.toLowerCase();      // idle / poll / pollpull / sniff
+    if (k === 'Poll') dm = 'manual';      // 卡片 ID 是 Poll, 新 mode 名是 manual
+    if (k === 'Pollpull') dm = 'platform'; // 卡片 ID 是 Pollpull, 新 mode 名是 platform
     const c = $('mc' + k);
     if (c) c.classList.toggle('active', dm === shown);
     // 卡片状态行：让用户看清"这是设备现状"还是"我选的还没应用"
@@ -1145,7 +1157,7 @@ function renderMode() {
       else if (dm === devMode) {
         // pollpull 的卡片状态要能看出"配置拉到没": 拉取是异步的(最坏 35s),
         // 那期间模式已经是 pollpull 但轮询还没起, 只显示"运行中"会误导
-        if (dm === 'pollpull') {
+        if (dm === 'platform') {
           stEl.textContent = pullStateText(st.pull, pollRunning) || '运行中';
         } else {
           stEl.textContent = (devMode === 'idle' ? '当前' : '运行中');
@@ -1167,9 +1179,10 @@ function renderMode() {
   const g = (S.stat && S.stat.guard) || {};
   setKv('mCurMode', devMode);
   // 配置来源: 让用户看清当前采的是手配那份还是平台那份。两套配置是独立的,
-  // 混在一起显示"poll"根本分不出, 所以才单列一个格子
-  setKv('mCfgSrc', devMode === 'poll' ? '手动配置（ds_poll）'
-    : devMode === 'pollpull' ? '平台拉取（ds_pull）' : '--');
+  // 混在一起显示根本分不出, 所以才单列一个格子
+  // "manual" 才是当前 mode 名; "poll" 是历史别名, 老 fskv 软切会返回 "poll"
+  setKv('mCfgSrc', isManual(devMode) ? '手动配置（ds_poll）'
+    : isPlatform(devMode) ? '平台拉取（ds_pull）' : '--');
   setKv('mBusy', st.busy ? '占用中' : '空闲');
   setKv('mSlave', p.slave);
   setKv('mBaud', p.baud);
@@ -1205,15 +1218,15 @@ function renderMode() {
   syncTabs();
   // 拉取配置按钮跟着模式显隐: 手动配置模式下不该出现这个入口
   syncPullCfgBtn();
-  // 锁定 485 表单: 只有 poll（手动配置）档可编辑, pollpull/sniff/idle 全锁
-  setFormLocked(S.mode !== 'poll');
+  // 锁定 485 表单: 只有 manual（手动配置）档可编辑, platform/sniff/idle 全锁
+  setFormLocked(!isManual(S.mode));
 }
 
 //=====================================================================
 // 栏目随运行模式显隐
 //   idle  → 只有 首页 / 运行模式
-//   poll  → 首页 / 运行模式 / poll模式
-//   pollpull → 首页 / 运行模式 / poll模式（拉取档也要能看/改配置）
+//   manual → 首页 / 运行模式 / poll模式
+//   platform → 首页 / 运行模式 / poll模式（拉取档也要能看/改配置）
 //   sniff → 首页 / 运行模式 / sniff模式
 // poll 与 sniff 是两种互斥的总线用法，设备同一时刻只跑一种，另一个页面留在
 // 栏目上只会让人以为它也在工作。设备没接总线时尤其容易误点进去看一片空。
@@ -1221,10 +1234,10 @@ function renderMode() {
 //=====================================================================
 function syncTabs() {
   const mode = S.mode || 'idle';
-  // pollpull 归到 poll 页: 拉取档一样要看寄存器表和 MQTT 状态, 只是配置
+  // platform 归到 poll 页: 拉取档一样要看寄存器表和 MQTT 状态, 只是配置
   // 来源不同(平台 vs 手配)。少开一个栏目, 用户也不用理解"为什么两个 poll 页"
   const show = { tab0: true, tabMode: true,
-    tabPoll: mode === 'poll' || mode === 'pollpull',
+    tabPoll: isManual(mode) || isPlatform(mode),
     tabSniff: mode === 'sniff' };
   Object.keys(show).forEach(id => {
     const t = document.querySelector('.tab-header .tab-item[data-tab="' + id + '"]');
@@ -1250,11 +1263,11 @@ async function waitPullDone() {
     if (polling) {
       // 轮询起来了才是真的到位: 设备是在 save_pull 之后才 start("pull") 的
       status('平台配置已拉取并生效，开始轮询', true);
-      toast('已切换到 poll（拉取配置）模式，开始轮询');
-      // quiet=true: 静默填表单, 避免 ds_pull 是空(首次进 pollpull 还没推)
+      toast('已切换到 platform（拉取配置）模式，开始轮询');
+      // quiet=true: 静默填表单, 避免 ds_pull 是空(首次进 platform 还没推)
       // 时弹「尚未保存过配置」误导用户以为配置没生效
       await readCfg(true);   // 表单回填成平台那份, 否则用户看到的还是手配的
-      // 进 pollpull 时设备已被 ctrl 强制切到 MQTT 自动档, 不重读的话
+      // 进 platform 时设备已被 ctrl 强制切到 MQTT 自动档, 不重读的话
       // MQTT 页那个手动档开关还停在旧状态, 和设备实际用的档位不一致
       readMqtt(true);
       return true;
@@ -1284,9 +1297,10 @@ async function readMode() {
 async function applyMode(mode) {
   // 切换进行中再点，忽略（避免连点把设备和 UI 搞乱）
   if (S.modeSwitching) return;
-  // pollpull → poll 切档提示: 当前显示的是平台那份(ds_pull), 切过去
+  // platform → manual 切档提示: 当前显示的是平台那份(ds_pull), 切过去
   // 后会清掉显示内容, 用户得自己点「读取配置」读 ds_poll 那份
-  if (mode === 'poll' && S.mode === 'pollpull') {
+  // "manual"/"platform" 是当前 mode 名; "poll"/"pollpull" 是历史别名
+  if (isManual(mode) && isPlatform(S.mode)) {
     const ok = await askConfirm(
       '当前显示的是平台拉取配置 (ds_pull)。切换到「手动配置」会清掉显示内容, 需重新点「读取配置」读取您的本地配置。\n确定继续？',
       '切换运行模式');
@@ -1322,14 +1336,15 @@ async function applyMode(mode) {
     // (最坏 35s = MQTT 建连 20s + 等下发 15s)。期间模式已是 pollpull 但还
     // 没在采, 只提示"已切换"会让用户以为已经在轮询了
     // 注: 不在这里 readCfg —— 改用 activateTab('tabPoll') 钩子, 同样场景
-    // (软件一打开就是 pollpull) 也覆盖, 比 applyMode 钩子更通用
-    if (mode === 'pollpull') {
+    // (软件一打开就是 platform) 也覆盖, 比 applyMode 钩子更通用
+    if (isPlatform(mode)) {
       await waitPullDone();
       return;
     }
-    // 切到 poll(手动配置)时 ctrl 会把设备 MQTT 档位强制切回手动档,
+    // 切到 manual(手动配置)时 ctrl 会把设备 MQTT 档位强制切回手动档,
     // 不重读的话 MQTT 页的手动档开关和实际档位不一致
-    if (mode === 'poll') readMqtt(true);
+    // "manual" 是当前 mode 名; "poll" 是历史别名
+    if (isManual(mode)) readMqtt(true);
     // 切回空闲时设备复位了配置, 表单还显示着旧值(手配寄存器表/手动档凭证),
     // 不清掉就算"已经删了"也和界面上看到的不一致。cleared 是设备回的实际
     // 清单, 一条都没清时不播报, 免得每次切空闲都弹一遍没信息量的 toast
@@ -1420,7 +1435,7 @@ function renderPushBanner(mq) {
   // 到新配置 (5s 定时刷新看见 push_n 增, 触发一次 readCfg; 失败就静默, 不
   // 打断横幅本身的展示). 初次进 pollpull 由 waitPullDone 负责, 这里只管
   // "已进 pollpull 后再有新 push" —— 与 S.pushSeenN 配合, 同一份不重读
-  if (S.mode === 'pollpull' && mq.push_n && mq.push_n !== S.pushSeenN) {
+  if (isPlatform(S.mode) && mq.push_n && mq.push_n !== S.pushSeenN) {
     readCfgSilent();
   }
   S.pushSeenN = mq.push_n;
@@ -2124,12 +2139,16 @@ el.btnSaveBoot.onclick = saveBootMode;
 // 之前只切高亮不发命令，5s 定时刷新一到就把高亮打回旧模式，
 // 表现为"选中后模式自动跳回原来模式"。
 // 卡片区域大、容易误点，切换又要停掉旧模式，所以必须弹窗确认。
-// 设备侧模式名 -> 用户看得懂的中文。pollpull 是内部约定名(设备侧 ds_pull
+// 设备侧模式名 -> 用户看得懂的中文。platform 是内部约定名(设备侧 ds_pull
 // 配置槽的标志), 直接显示会把用户搞糊涂, 所有 toast/status/保存回显都走它
+// "manual"/"platform" 是当前 mode 名; "poll"/"pollpull" 是历史别名,
+// 软切可能返回, 都映射到同一中文 label
 const MODE_LABEL = {
   idle: '空闲 idle',
-  poll: 'poll（手动配置）',
-  pollpull: 'poll（拉取配置）',
+  manual: 'manual（手动配置）',
+  poll: 'manual（手动配置）',  // 历史别名
+  platform: 'platform（拉取配置）',
+  pollpull: 'platform（拉取配置）',  // 历史别名
   sniff: '旁听 sniff'
 };
 // 切回空闲时设备会顺带复位用户配置, 确认弹窗里要多说一段。
@@ -2302,7 +2321,7 @@ function activateTab(tabId) {
   // pollpull 档: 进 poll tab 时静默读一份 ds_pull 填表单 —— 软件一打开
   // 就是 pollpull (没有 applyMode 这一步) 也覆盖。push 自动刷新另见
   // renderPushBanner. applyMode 钩子已删除 (窄), 这个钩子宽
-  if (tabId === 'tabPoll' && S.mode === 'pollpull') readCfgSilent();
+  if (tabId === 'tabPoll' && isPlatform(S.mode)) readCfgSilent();
 }
 
 const tabItems = document.querySelectorAll('.tab-header .tab-item');
@@ -2327,7 +2346,7 @@ serialTabs.forEach(tab => {
     // pollpull 档: 切回 485 总线面板 时再读一次 ds_pull, 覆盖"在 poll tab
     // 里从 MQTT 切回 485" 的场景 (activateTab 已经读过一次了, 重复读也
     // 没成本, 而且能赶上这中间平台 push 的内容)
-    if (key === 's1' && S.mode === 'pollpull') readCfgSilent();
+    if (key === 's1' && isPlatform(S.mode)) readCfgSilent();
   };
 });
 
@@ -2394,15 +2413,16 @@ const MOCK = {
 
 function mockModeStat() {
   const m = MOCK.mode;
-  // pollpull 也要算"在跑 poll": 它是拉取档, 轮询行为与 poll 相同, 只是配置
-  // 来源不同。少了这个分支, 浏览器预览时 pollpull 卡片永远显示"待拉取"
-  const isPoll = (m === 'poll' || m === 'pollpull');
+  // platform 也要算"在跑 poll": 它是拉取档, 轮询行为与 manual 相同, 只是配置
+  // 来源不同。少了这个分支, 浏览器预览时 platform 卡片永远显示"待拉取"
+  // "manual"/"platform" 是当前 mode 名; "poll"/"pollpull" 是历史别名
+  const isPoll = isManual(m) || isPlatform(m);
   return {
     mode: m, busy: m !== 'stop' && m !== 'idle',
     // poll_src/pull_ready 与设备 ctrl.status() 对齐, 前端据此显示"配置来源"
-    poll_src: isPoll ? (m === 'pollpull' ? 'pull' : 'poll') : null,
+    poll_src: isPoll ? (isPlatform(m) ? 'pull' : 'poll') : null,
     pull_ready: 'fskv',
-    pull: m === 'pollpull' ? { state: MOCK.pulling ? 'waiting' : 'done', msg: '' } : null,
+    pull: isPlatform(m) ? { state: MOCK.pulling ? 'waiting' : 'done', msg: '' } : null,
     poll: { running: isPoll, gen: isPoll ? 1 : 0, regs: MOCK.cfg.regs.length,
             slave: MOCK.cfg.slave, baud: MOCK.cfg.baud, interval: MOCK.cfg.interval_ms,
             resp_cap: MOCK.cfg.timeout_ms == null ? 500 : MOCK.cfg.timeout_ms,
@@ -2517,7 +2537,7 @@ function mockReply(line) {
     MOCK.detecting = (MOCK.mode === 'sniff');
     // pollpull: 真设备进模式即起 hello 拉取(异步)。预览用 1.2s 假等一会,
     // 让"拉取中→已生效"的过渡在没接设备时也看得到
-    MOCK.pulling = (MOCK.mode === 'pollpull');
+    MOCK.pulling = isPlatform(MOCK.mode);
     if (MOCK.pulling) {
       setTimeout(() => { MOCK.pulling = false; }, 1200);
     }

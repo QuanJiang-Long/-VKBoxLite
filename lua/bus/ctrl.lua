@@ -11,9 +11,12 @@ local iot = util.try("iot/iot")
 local M = {}
 
 local SWITCH_DELAY_MS = 50
--- 运行模式 -> poll 配置槽(poll=手配 / pull=平台拉取)。MQTT 手动档跟着反着走:
+-- 运行模式 -> poll 配置槽(manual=手配 / platform=平台拉取)。MQTT 手动档跟着反着走:
 -- 手动配置用手动档, 拉取配置必须用自动档(hello 应答走 config/get, 手动档不订)
-local SLOT = { poll = "poll", pollpull = "pull" }
+-- "poll"/"pollpull" 是历史别名 (老 fskv 软切可能返回), 用 alias 处理
+local SLOT = { manual = "poll", platform = "pull" }
+-- 历史别名映射: 跟 cmd.lua 一致, 老用户切档命令的 poll/pollpull 还能用
+local MODE_ALIAS = { poll = "manual", pollpull = "platform" }
 
 local function switch_delay()
     if not sys then return end
@@ -26,33 +29,35 @@ end
 
 function M.switch_mode(mode)
     if type(mode) ~= "string" then
-        return false, "FAIL unknown mode (use poll/sniff/idle)"
+        return false, "FAIL unknown mode (use manual/platform/sniff/idle)"
     end
     mode = mode:lower():gsub("^%s+", ""):gsub("%s+$", "")
+    -- 历史别名软切 (跟 cmd.lua 一致)
+    if MODE_ALIAS[mode] then mode = MODE_ALIAS[mode] end
     -- 识别期间串口正被反复 uart.setup, 切模式会和它抢串口, 扫出来的结果不可信。
     -- 只放行 idle/stop —— 那是用户主动放弃识别的唯一逃生口
-    if (mode == "poll" or mode == "pollpull" or mode == "sniff") and mon.is_detecting() then
+    if (mode == "manual" or mode == "platform" or mode == "sniff") and mon.is_detecting() then
         return false, "BUSY: 正在识别通讯参数, 完成后自动开始旁听(或先 W:MODE=idle 放弃)"
     end
-    if mode == "poll" or mode == "pollpull" then
+    if mode == "manual" or mode == "platform" then
         if mon.is_running() then
             mon.stop()
             switch_delay()
         end
         if poll.is_running() then poll.stop() end
         -- 档位先切再起轮询: iot.set_manual 会断开重连换订阅清单, 必须在
-        -- 拉取握手之前就位, 否则 hello 发出去没人应答(pollpull 才需要)。
+        -- 拉取握手之前就位, 否则 hello 发出去没人应答(platform 才需要)。
         -- ⚠️ 别把这里写反: set_manual(true)=手动档(订用户 topic),
-        --    手动配置用 ds_poll 槽所以要 true, 拉取配置用 ds_pull 槽要 false。
-        --    写反的后果是手动档收不到自己的 topic、拉取档订不上平台 topic,
+        --    manual 用 ds_poll 槽所以要 true, platform 用 ds_pull 槽要 false。
+        --    写反的后果是 manual 收不到自己的 topic、platform 订不上平台 topic,
         --    两个模式一起废
         local slot = SLOT[mode]
-        if iot then pcall(iot.set_manual, slot == "poll") end
+        if iot then pcall(iot.set_manual, mode == "manual") end
         if not poll.start(slot) then return false, "FAIL poll start" end
-        if slot == "pull" then
+        if mode == "platform" then
             -- 进拉取档一律向平台报到(hello)并重新拉一次, 不再看 ds_pull
             -- 拉没拉过。之前只在 pull_src()=="default" 时才拉: 拿过一次
-            -- 配置后再进 pollpull 就静默用旧配置, 平台那头看不到设备重新
+            -- 配置后再进 platform 就静默用旧配置, 平台那头看不到设备重新
             -- 上线, 而现场寄存器表可能已经在平台上改过了。拉取期间轮询继续
             -- 跑旧配置, 新配置到了由 auto_apply 立即生效
             local ok, err = iot and iot.pull_start()
@@ -60,7 +65,7 @@ function M.switch_mode(mode)
                 poll.stop()
                 return false, "FAIL pull: " .. tostring(err)
             end
-            return true, "OK pollpull, pulling"
+            return true, "OK platform, pulling"
         end
         -- 手动档也向平台报到(hello)。平台侧不预知这台设备的具体配置, 靠
         -- 上报 auto-provision 补建 —— hello 是让平台知道"这台网关上线了"
@@ -68,7 +73,7 @@ function M.switch_mode(mode)
         -- 主职是采用户配的寄存器表, 平台那头看不到不影响采集。真没发出去
         -- 时 task_main 连上后会补发(见 iot.lua 的 hello on connect 分支)
         if iot then pcall(iot.hello) end
-        return true, "OK poll started"
+        return true, "OK manual started"
 
     elseif mode == "sniff" then
         if poll.is_running() then
@@ -98,7 +103,7 @@ function M.switch_mode(mode)
         return true, "OK idle (bus released)", cleared
 
     else
-        return false, "FAIL unknown mode (use poll/pollpull/sniff/idle)"
+        return false, "FAIL unknown mode (use manual/platform/sniff/idle)"
     end
 end
 
@@ -125,11 +130,11 @@ function M.reset_user_cfg()
     return cleared
 end
 
--- 前端据此高亮对应的卡。pollpull 要单列一张卡, 不能和 poll 混:
+-- 前端据此高亮对应的卡。platform 要单列一张卡, 不能和 manual 混:
 -- 两者跑的是两套配置(手配 / 平台拉), 混在一起用户看不出当前在采哪份
 function M.get_mode()
     if poll.is_running() then
-        return poll.slot() == "pull" and "pollpull" or "poll"
+        return poll.cur_slot() == "pull" and "platform" or "manual"
     end
     if mon.is_running() then return "sniff" end
     return "idle"
@@ -145,7 +150,7 @@ function M.status()
         busy = M.is_busy(),
         -- 前端区分"手动配置"和"拉取配置"两张卡用的就是这两个字段:
         -- poll_src = manual/pull 当前在采哪份; pull_ready = ds_pull 拉过没有
-        poll_src = (poll.is_running() and poll.slot()) or nil,
+        poll_src = (poll.is_running() and poll.cur_slot()) or nil,
         pull_ready = cfgstore.pull_src(),
         pull = iot and iot.pull_status() or nil,
         poll = poll.status(),

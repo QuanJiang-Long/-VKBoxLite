@@ -137,10 +137,14 @@ end
 local function props_to_regs(props, limit)
     local regs, skipped, renamed = {}, {}, {}
     for i, pr in ipairs(props or {}) do
-        if type(pr) ~= "table" or type(pr.modbus) ~= "table" then
-            skipped[#skipped + 1] = "第" .. i .. "条缺少 modbus 段"
+        if type(pr) ~= "table" then
+            skipped[#skipped + 1] = "第" .. i .. "条不是 table"
         else
-            local mb = pr.modbus
+            -- 兼容两种字段位置 (V2 vs V3):
+            --   V2: properties[i].modbus.{address, quantity, dataType}
+            --   V3: properties[i].{address, quantity, dataType} (扁平, modbus 包装去掉)
+            -- 优先 modbus 子段, 没有就走扁平
+            local mb = pr.modbus or pr
             local id = trim(pr.id)
             local dt, dtwhy = map_dtype(mb.dataType)
             local addr = num(mb.address)
