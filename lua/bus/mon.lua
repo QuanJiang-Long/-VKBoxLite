@@ -335,21 +335,47 @@ end
 function M.auto_detect()
     if not sys then return nil, "no sys" end
     if not running and not M.start() then return nil, "start fail" end
+    -- sniff 启动后等 5s: 142 设备 UART 从 poll 切到 sniff 可能错乱,
+    -- 等它稳定再切 baud. 之前 0 帧就是 142 设备 UART 没准备好
+    log.info("mon", "auto_detect: wait 5s for 142 UART stable")
+    sys.wait(5000)
     for _, p in ipairs({ 0, 1, 2 }) do
         for _, b in ipairs(cfg.DETECT_BAUDS) do
-            -- 上一个候选的残留字节必须作废: 那是错参数解出来的乱码，
-            -- 不清就会在下一个候选的窗口里被误当成新参数的帧
+            -- ★ 完整复位 (合宙 Q1 修法): close + wait500 + setup + on
+            -- 在已打开的 485 口上 uart.setup 走 Uart_ChangeBR 快路径,
+            -- 只改分频不复位 RX/DE, 需 close+wait500 强制重开.
+            pcall(uart.close, mbus.UART_ID)
+            if sys then sys.wait(500) end
             rxbuf = ""
-            local ok = pcall(uart.setup, mbus.UART_ID, b, 8, 1,
-                mbus.parity_to_uart(p))
+            local ok = pcall(uart.setup, mbus.UART_ID, b, 8, 1, mbus.parity_to_uart(p))
             if ok then
-                -- ⚠️ uart.setup 会重置 receive callback，必须重新绑。
-                -- 少了这行，从这个候选开始一个字节都收不到，全部候选都会
-                -- 假阴性(原工程 VKBox_Lite(1) 的 Q-Fix 8 踩过这个坑)
                 pcall(uart.on, mbus.UART_ID, "receive", on_receive)
-                local before = stat.frames
-                sys.wait(cfg.DETECT_WIN_MS)
-                if stat.frames - before >= cfg.DETECT_HITS then
+                -- 高 baud 切完多等 200ms (跟之前 D2 v5 一致, 142 设备 19200
+                -- t3.5=1.82ms 太早到 RX FIFO 接不住, 给驱动恢复窗口)
+                if b >= 19200 then sys.wait(200) end
+                local probe = mbus.build_read(1, 142, 1)
+                if probe then
+                    if gpio then pcall(gpio.set, mbus.DE_PIN, 1) end
+                    pcall(uart.write, mbus.UART_ID, probe)
+                    if sys then sys.wait(mbus.calc_de_hold_ms(#probe, b)) end
+                    if gpio then pcall(gpio.set, mbus.DE_PIN, 0) end
+                    log.info("mon", "probe sent len=" .. #probe .. " baud=" .. b .. " p=" .. p)
+                end
+                local before_paired = stat.paired
+                -- ★ 600ms 固定 wait (不能跟 #rxbuf 联动: 字节已进 FIFO
+                -- 但 task() 协程还没跑 process_frame, paired=0 假阴性)
+                local t = 0
+                while t < 600 do
+                    if sys then sys.wait(20) end
+                    t = t + 20
+                end
+                log.info("mon", "check baud=" .. b .. " p=" .. p
+                    .. " frames=" .. tostring(stat.frames)
+                    .. " paired=" .. tostring(stat.paired)
+                    .. " orphans=" .. tostring(stat.orphans)
+                    .. " rxbuf=" .. tostring(#rxbuf)
+                    .. " last_rx=" .. tostring(lastRx))
+                if stat.paired > before_paired then
                     lastBaud = b
                     log.info("mon", "detect ok: baud=" .. b .. " parity=" .. p)
                     return { baud = b, databits = 8, stopbits = 1, parity = p }
