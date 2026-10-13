@@ -82,42 +82,132 @@ end
 
 -- B1: 配对成功就把旁听到的值写进 collector, 让 iot 现成的 dirty->publish
 -- 链路自己把数据发上平台。sniff 自己不发请求, 不写这里 dataCache 永远空,
--- build_items 为空、publish 直接 return, 上报链路整个空转。
--- 别名 s<从机>_r<地址>, 与前端 R:INFER 的行键保持一致。
--- 默认按 uint16 逐寄存器拆开（4 字节也可能是 2 个独立 uint16，不能假设跨寄存型）。
--- 仅在位模式铁证 (NaN/Inf / 值超 2^31) 时合并成 float32/uint32。
+-- V2.3_3 dtype 启发式打分: 3 维度 (连续性 50% + 值域 30% + 边界 20%)
+-- 默认按 modbus 标准 16bit 拆 (qty=N = N 个独立 uint16/int16 寄存器)
+-- 32bit 合并候选: 16bit conf<80 时试 32bit, 32bit conf>16bit+5 才合并
+-- 合并时 2 个 16bit alias 都标同 dtype (reg<addr> + reg<addr+1> 都是 float32)
+-- 跨帧一致 +5% 加成. conf cap 100
+local dtypeHistory = {}  -- alias -> { d1, d2, ..., d8 } FIFO 最近 8 帧 dtype
+
+local function pushHistory(alias, dtype)
+    local h = dtypeHistory[alias] or {}
+    h[#h + 1] = dtype
+    if #h > 8 then table.remove(h, 1) end
+    dtypeHistory[alias] = h
+end
+
+-- 连续性: 跟历史 dtype 一致率 (本帧 + 历史 7 帧 FIFO)
+local function calcContinuity(alias, cand)
+    local h = dtypeHistory[alias] or {}
+    if #h == 0 then return 50 end  -- 首帧不给满分也不给 0, 中性
+    local same = 0
+    for _, d in ipairs(h) do if d == cand then same = same + 1 end end
+    return math.floor(same / #h * 100)
+end
+
+-- 值域: 类型范围内给高分, 超出给 0
+local function calcRange(dtype, v)
+    if v == nil then return 0 end
+    if dtype == "int16" and v >= -32768 and v <= 32767 then return 100
+    elseif dtype == "uint16" and v >= 0 and v <= 65535 then return 100
+    elseif dtype == "int32" and v >= -2147483648 and v <= 2147483647 then return 100
+    elseif dtype == "uint32" and v >= 0 and v <= 4294967295 then return 100
+    elseif dtype == "float32" and v == v and v ~= 1/0 and v ~= -1/0 then return 100  -- 非 NaN/Inf
+    end
+    return 0  -- 超出类型范围, 排除
+end
+
+-- 边界: 远离极值高分, 接近极值衰减
+local function calcBoundary(dtype, v)
+    if v == nil then return 0 end
+    if dtype == "float32" then return 80 end  -- float 不强求, 不跟整数边界同分
+    local lo, hi, av
+    if dtype == "int16" then lo, hi, av = -32768, 32767, 0
+    elseif dtype == "uint16" then lo, hi, av = 0, 65535, 32767
+    elseif dtype == "int32" then lo, hi, av = -2147483648, 2147483647, 0
+    elseif dtype == "uint32" then lo, hi, av = 0, 4294967295, 2147483647
+    else lo, hi, av = 0, 0, 0 end
+    local range = hi - lo
+    local dist = math.abs(v - av) / (range / 2)
+    if dist > 1 then dist = 1 end
+    return math.floor(dist * 100)
+end
+
+-- 候选打分 (16bit 或 32bit 候选), 返回 (dtype, value, conf)
+local function score(data, off, dtype, word_swap, alias)
+    local v = mbus.parse_value(data, off, dtype, word_swap)
+    local range = calcRange(dtype, v)
+    if range == 0 then return nil, nil, 0 end
+    local cont = calcContinuity(alias, dtype)
+    local bnd = calcBoundary(dtype, v)
+    local conf = math.floor(cont * 0.5 + range * 0.3 + bnd * 0.2)
+    local h = dtypeHistory[alias] or {}
+    if #h > 0 and h[#h] == dtype then conf = conf + 5 end
+    if conf > 100 then conf = 100 end
+    return dtype, v, conf
+end
+
+-- 默认 16bit 拆 + 候选 32bit 合并, 选 conf 最高的 dtype
+-- 16bit 永远 +5 加成 (modbus 标准优先), 32bit 合并要显著高才覆盖
+local function pickDtype(data, off, remaining, addr, slave, f)
+    local alias = "reg" .. (addr + off)  -- 不带 s<slave>_ 前缀
+    -- 16bit 候选 (永远跑, modbus 标准)
+    local bestD, bestV, bestC = "uint16", 0, 0
+    for _, d in ipairs({ "int16", "uint16" }) do
+        local _, v, c = score(data, off, d, nil, alias)
+        if c > bestC then bestD, bestV, bestC = d, v, c + 5 end  -- 16bit +5 优先
+    end
+    if bestC > 100 then bestC = 100 end
+    -- 32bit 合并候选 (remaining>=2 时试 1 个 32bit 占 2 个 16bit 位置)
+    if remaining >= 2 then
+        local c32 = 0
+        local d32, v32 = "uint32", 0
+        for _, d in ipairs({ "int32", "uint32", "float32" }) do
+            for _, ws in ipairs({ false, true }) do
+                local _, v, c = score(data, off, d, ws, alias)
+                if c > c32 then c32, d32, v32 = c, d, v end
+            end
+        end
+        -- 32bit conf > 16bit+5 conf 即合并 (16bit 已 +5 加成, 公平比较)
+        if c32 > bestC then
+            return d32, v32, c32, true  -- 第 4 个参数 true = 32bit 合并
+        end
+    end
+    return bestD, bestV, bestC, false
+end
+
 local function push_rsp_value(slave, addr, f)
     if not f.data or not addr then return end
     local total = math.floor(#f.data / 2)
     local i = 0
     while i < total do
         local remaining = total - i
-        if remaining >= 2 then
-            local b1, b2 = f.data:byte(i * 2 + 1), f.data:byte(i * 2 + 2)
-            local b3, b4 = f.data:byte(i * 2 + 3), f.data:byte(i * 2 + 4)
-            local e = (b1 % 128) * 2 + math.floor(b2 / 128)
-            if e == 255 then
-                local v = mbus.parse_value(f.data, i, "float32")
-                collector.push_data(addr + i, "s" .. slave .. "_r" .. (addr + i),
-                    f.hex, v, nil, "float32")
-                i = i + 2
-            else
-                local u = b1 * 16777216 + b2 * 65536 + b3 * 256 + b4
-                if u >= 2147483648 then
-                    local v = mbus.parse_value(f.data, i, "uint32")
-                    collector.push_data(addr + i, "s" .. slave .. "_r" .. (addr + i),
-                        f.hex, v, nil, "uint32")
-                    i = i + 2
+        local dtype, v, conf, merged32 = pickDtype(f.data, i, remaining, addr, slave, f)
+        local alias0 = "reg" .. (addr + i)
+        local status
+        if conf >= 80 then status = "ok"
+        elseif conf >= 60 then status = "review"
+        else status = "uncertain" end
+        collector.push_data(addr + i, alias0, f.hex, v, nil, dtype, conf, status)
+        pushHistory(alias0, dtype)
+        if merged32 then
+            -- 32bit 合并: 2 个 16bit alias 都标同 dtype, 第 2 个 value = 低 16bit
+            local alias1 = "reg" .. (addr + i + 1)
+            local lo16 = 0
+            if v ~= nil then
+                -- 32bit value 拆 2 个 16bit: 高 16bit 跟低 16bit
+                if dtype == "float32" then
+                    -- float32 拆 2 个 uint16 (大端)
+                    lo16 = 0  -- 简化: float32 不再拆 16bit, 第 2 个 alias 留空
                 else
-                    collector.push_data(addr + i, "s" .. slave .. "_r" .. (addr + i),
-                        f.hex, b1 * 256 + b2, nil, "uint16")
-                    i = i + 1
+                    lo16 = v % 65536
+                    if lo16 < 0 then lo16 = lo16 + 65536 end
                 end
             end
+            collector.push_data(addr + i + 1, alias1, f.hex, lo16, nil, dtype, conf, status)
+            pushHistory(alias1, dtype)
+            i = i + 2
         else
-            local b1, b2 = f.data:byte(i * 2 + 1), f.data:byte(i * 2 + 2)
-            collector.push_data(addr + i, "s" .. slave .. "_r" .. (addr + i),
-                f.hex, b1 * 256 + b2, nil, "uint16")
             i = i + 1
         end
     end
@@ -218,9 +308,9 @@ function M.infer()
         if f.kind == "rsp" and f.slave then online[f.slave] = true end
     end
     local agg, slaves, ignored = {}, {}, 0
-    -- dtype 汇总: 每聚合项从 collector.dataCache 查每个寄存器的 dtype
-    -- push_rsp_value (e4dbc30) 在 NaN/Inf→float32 / ≥2^31→uint32 时合并,
-    -- 多数情况同 dtype (uint16×count), 少数情况不同
+    -- V2.3_3 dtype 启发式: 每聚合项从 collector.dataCache 查每个寄存器的 dtype + conf + status
+    -- conf 来自 push_rsp_value 多候选打分 (连续性 50% + 值域 30% + 边界 20% + 跨帧一致 +5%)
+    -- status: ok (>=80) / review (60-80) / uncertain (<60)
     local cache = collector.get_all_latest()
     for _, f in ipairs(fs) do
         if f.kind == "req" and f.addr ~= nil and f.qty then
@@ -228,16 +318,20 @@ function M.infer()
                 local key = f.slave .. ":" .. f.addr .. ":" .. f.qty .. ":" .. f.fc
                 local a = agg[key]
                 if not a then
-                    local dtypes = {}
+                    local dtypes, confs, statuses = {}, {}, {}
                     for j = 0, f.qty - 1 do
-                        local alias = "s" .. f.slave .. "_r" .. (f.addr + j)
+                        local alias = "reg" .. (f.addr + j)
                         local e = cache[alias]
                         dtypes[#dtypes + 1] = (e and e.dtype) or "uint16"
+                        confs[#confs + 1] = (e and e.conf) or 0
+                        statuses[#statuses + 1] = (e and e.status) or "uncertain"
                     end
                     a = {
                         slave = f.slave, addr = f.addr, count = f.qty, fc = f.fc,
                         hits = 0,
                         dtype_summary = table.concat(dtypes, ","),
+                        conf = confs[1] or 0,  -- 首寄存器 conf 代表整体
+                        status = statuses[1] or "uncertain",
                     }
                     agg[key] = a
                     slaves[f.slave] = true
@@ -341,7 +435,7 @@ function M.auto_detect()
     sys.wait(5000)
     for _, p in ipairs({ 0, 1, 2 }) do
         for _, b in ipairs(cfg.DETECT_BAUDS) do
-            -- ★ 完整复位 (合宙 Q1 修法): close + wait500 + setup + on
+            -- 完整复位 (合宙 Q1 修法): close + wait500 + setup + on
             -- 在已打开的 485 口上 uart.setup 走 Uart_ChangeBR 快路径,
             -- 只改分频不复位 RX/DE, 需 close+wait500 强制重开.
             pcall(uart.close, mbus.UART_ID)
@@ -353,29 +447,25 @@ function M.auto_detect()
                 -- 高 baud 切完多等 200ms (跟之前 D2 v5 一致, 142 设备 19200
                 -- t3.5=1.82ms 太早到 RX FIFO 接不住, 给驱动恢复窗口)
                 if b >= 19200 then sys.wait(200) end
-                local probe = mbus.build_read(1, 142, 1)
-                if probe then
-                    if gpio then pcall(gpio.set, mbus.DE_PIN, 1) end
-                    pcall(uart.write, mbus.UART_ID, probe)
-                    if sys then sys.wait(mbus.calc_de_hold_ms(#probe, b)) end
-                    if gpio then pcall(gpio.set, mbus.DE_PIN, 0) end
-                    log.info("mon", "probe sent len=" .. #probe .. " baud=" .. b .. " p=" .. p)
-                end
-                local before_paired = stat.paired
-                -- ★ 600ms 固定 wait (不能跟 #rxbuf 联动: 字节已进 FIFO
-                -- 但 task() 协程还没跑 process_frame, paired=0 假阴性)
+                -- ★ Q2: 静默监听 cfg.DETECT_WIN_MS (默认 2000ms), 不主动发探针.
+                -- 之前主动发 8 字节 modbus 请求会让 142 passive 设备响应, 但
+                -- 也占用 485 总线跟其他 master 冲突. 静默监听切 baud 后看 RX
+                -- 有没有 CRC 合法帧即可, 总线上有其他 master 在轮询就能命中.
+                -- 142 设备场景无 master 时永远 0 帧, 由 cfg.BAUD 兜底 (见下).
+                local before_frames = stat.frames
                 local t = 0
-                while t < 600 do
+                while t < cfg.DETECT_WIN_MS do
                     if sys then sys.wait(20) end
                     t = t + 20
                 end
                 log.info("mon", "check baud=" .. b .. " p=" .. p
                     .. " frames=" .. tostring(stat.frames)
                     .. " paired=" .. tostring(stat.paired)
-                    .. " orphans=" .. tostring(stat.orphans)
                     .. " rxbuf=" .. tostring(#rxbuf)
                     .. " last_rx=" .. tostring(lastRx))
-                if stat.paired > before_paired then
+                -- ★ Q2: 命中条件改 any CRC 合法帧 (原来要 req+rsp 配对, 静默监听
+                -- 收不到 master 的 rsp 时会漏检). 1 帧 CRC 误判 ~1/65536, 可接受.
+                if stat.frames > before_frames then
                     lastBaud = b
                     log.info("mon", "detect ok: baud=" .. b .. " parity=" .. p)
                     return { baud = b, databits = 8, stopbits = 1, parity = p }
@@ -384,9 +474,14 @@ function M.auto_detect()
             if not running then return nil, "stopped" end
         end
     end
+    -- ★ Q2: 兜底 cfg.BAUD (restore_params 已经做了). 142 设备等 passive
+    -- 从机场景没有其他 master 轮询, 静默监听永远 0 帧, 必须 user 配
+    -- cfg.BAUD 才能 work. 返回 {..., fallback=true} 让 detect_loop 知道是兜底.
     restore_params()
-    log.warn("mon", "detect fail: 21 candidates no hit")
-    return nil, "no hit"
+    log.warn("mon", "detect silent fail: 21 candidates no hit, fallback cfg.BAUD=" .. cfg.BAUD)
+    return { baud = cfg.BAUD, databits = cfg.DATABITS,
+             stopbits = cfg.STOPBITS, parity = cfg.PARITY,
+             fallback = true }
 end
 
 -- 识别循环: 扫一轮, 不中就还原参数/等 3s/再扫一轮, 直到命中或 mon.stop()。
@@ -403,7 +498,12 @@ local function detect_loop()
         if r then
             detecting = false
             _G.mon_detect_result = r
-            log.info("mon", "detect ok, sniff ready")
+            -- ★ Q2: 兜底 cfg.BAUD 也算"就绪", 但 log 跟命中区分, 不再 3s 重试循环
+            if r.fallback then
+                log.warn("mon", "detect silent fail, sniff running with cfg.BAUD fallback")
+            else
+                log.info("mon", "detect ok, sniff ready")
+            end
             return
         end
         stat.detect_fail = stat.detect_fail + 1

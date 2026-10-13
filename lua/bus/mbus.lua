@@ -179,9 +179,9 @@ local function to_i64(b)
     return v
 end
 
--- 按数据类型直接解释。Modbus 标准是大端, 不再支持 LE:
--- 前端界面已去掉字节序/字序选择, 保留 LE 分支就是死代码
-function M.parse_value(data, offset, dtype)
+-- 按数据类型直接解释。Modbus 标准是大端, 但 32bit 设备常字交换 (CD AB);
+-- 16bit 单字无字序问题. word_swap=true 时 32bit 按 [3,4,1,2] 重排
+function M.parse_value(data, offset, dtype, word_swap)
     local w = M.TYPE_WIDTH[dtype]
     if not w then return nil, "bad dtype" end
     local nbytes = w * 2
@@ -189,6 +189,10 @@ function M.parse_value(data, offset, dtype)
     if #raw < nbytes then return nil, "short data" end
     local b = {}
     for i = 1, nbytes do b[i] = raw:byte(i) end
+    -- 32bit 字交换: [b1 b2 b3 b4] -> [b3 b4 b1 b2]
+    if word_swap and w == 2 then
+        b = { b[3], b[4], b[1], b[2] }
+    end
     if dtype == "float32" then
         return bytes_to_float({ b[1], b[2], b[3], b[4] }, false)
     elseif dtype == "float64" then

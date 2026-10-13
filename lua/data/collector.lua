@@ -25,7 +25,7 @@ local function fire(cbs, ...)
     end
 end
 
-function M.push_data(addr, alias, hex, value, ts, dtype)
+function M.push_data(addr, alias, hex, value, ts, dtype, conf, status)
     if value == nil then return false end
     if not alias or alias == "" then alias = "r" .. addr end
     if not ts then ts = os.time() end
@@ -36,7 +36,10 @@ function M.push_data(addr, alias, hex, value, ts, dtype)
             dataCache[table.remove(dataOrder, 1)] = nil
         end
     end
-    dataCache[alias] = { addr = addr, hex = hex, value = value, ts = ts, dtype = dtype }
+    dataCache[alias] = {
+        addr = addr, hex = hex, value = value, ts = ts,
+        dtype = dtype, conf = conf, status = status,
+    }
     stat.pushed = stat.pushed + 1
     ring_add(string.format("data %s=%s", alias, tostring(value)))
     fire(updateCbs, alias, value, ts, addr)

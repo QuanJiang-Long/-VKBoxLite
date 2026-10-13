@@ -322,6 +322,7 @@ local function reg_debug_cmds()
             return M.reply("RET:AUTODETECT=" .. jencode({
                 baud = last.baud, databits = last.databits,
                 stopbits = last.stopbits, parity = last.parity,
+                fallback = last.fallback or false,  -- Q2: 区分命中 vs 兜底 cfg.BAUD
             }))
         end
         mon.request_detect()

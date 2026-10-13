@@ -1841,7 +1841,7 @@ function renderInfer() {
     '<td>0x' + (r.fc != null ? r.fc.toString(16).padStart(2, '0').toUpperCase() : '?') + '</td>' +
     '<td>' + esc(r.hits) + '</td>' +
     '<td title="' + esc(r.dtype_summary || '-') + '" style="font-family:monospace;font-size:12px;color:#0066cc;">' + esc(r.dtype_summary || '-') + '</td>' +
-    '<td>s' + esc(r.slave) + '_r' + esc(r.addr) + '</td>' +
+    '<td>reg' + esc(r.addr) + '</td>' +
     '</tr>'
   ).join('');
 }
@@ -1933,7 +1933,11 @@ function renderDetected() {
   // 从站号另起一段并标明"观测": 被动旁听拿不到从站号, 它是从报文里数出来的,
   // 和上面 4 个"识别"出来的参数不是一个性质, 含混写成一个"已识别"会误导
   const sl = observedSlave();
-  el.detectHint.textContent = '已识别：' + serialDesc(d) +
+  // Q2: fallback 标识 (静默监听 21 候选都失败, 兜底 cfg.BAUD). 区分"识别命中"
+  // (绿色) 跟"兜底配置" (橙色警告), user 一眼能看出 sniff baud 是从总线上抓的
+  // 还是从 cfg 里抄的, 错的 cfg.BAUD 会让 sniff 收 CRC err.
+  const tag = d.fallback ? ' ⚠ 兜底 cfg.BAUD' : '';
+  el.detectHint.textContent = '已识别：' + serialDesc(d) + tag +
     (sl != null ? ' · 观测到从站 ' + sl : ' · 从站未观测到（先听一会儿报文）');
 }
 

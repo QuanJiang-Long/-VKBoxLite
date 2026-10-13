@@ -195,7 +195,7 @@ end
 -- U4 按子设备逐条上报: /sys/thing/node/property/post/{gwSn}-{n}。
 -- n = 子设备序号, 按从机地址升序排(同一份配置只有一个 slave, 所以轮询档
 -- 恒为 1; sniff 档才可能有多个从机)。从机地址从 key 里取:
---   sniff 的 key 是 "s{slave}_r{addr}"(见 bus/mon.lua push_rsp_value), 带从机号
+--   sniff 的 key 是 "reg{addr}"(见 bus/mon.lua push_rsp_value, 不带 s<slave>_ 前缀)
 --   轮询的 key 是配置里的 name 或 "r{addr}"(见 bus/poll.lua), 不带从机号
 --   —— 一份轮询配置只有一个 slave(cfg.normalize_poll), 直接取那份的
 -- 少了 -{n} 这个后缀, 平台无法把数据归属到子设备, 上报等于白发
@@ -204,10 +204,10 @@ local function build_items()
     local c = active_cfg()
     local cfg_slave = c and c.slave or nil
     -- 过滤: 只发当前 mode 应该有的 alias, 避免切档残留数据被当成当前数据误发
-    -- 例: sniff 累积的 s<slave>_r<addr> 不该在 pollpull 模式上报
+    -- 例: sniff 累积的 reg<addr> 不该在 pollpull 模式上报
     --
     -- sniff 模式特殊: 旁听推断的 alias 跟 cfg.regs 不对应, 全发 (sniff 自己
-    -- 在推断寄存器表, alias 是 s<slave>_r<addr> 格式, 不在 cfg.regs.name 里)
+    -- 在推断寄存器表, alias 是 reg<addr> 格式, 不在 cfg.regs.name 里)
     --
     -- pollpull/poll/manual 模式: 只发 cfg.regs.name 里的 alias (cfg.regs 是真表)
     -- 平台刚下发时 cfg.regs 是空, build_items 返回空, 不发
@@ -221,7 +221,9 @@ local function build_items()
     for k, d in pairs(collector.get_all_latest()) do
         local vs = MqttUtil.jnum(d.value)
         if vs then
-            local slave = tonumber(k:match("^s(%d+)_r%d+$")) or cfg_slave
+            -- reg<addr> 格式 (去掉 s<slave>_ 前缀, 单从机场景够用,
+            -- 多从机同地址会冲突, 但 sniff 模式是单从机视角)
+            local slave = tonumber(k:match("^reg%d+$") and "1") or cfg_slave
             if slave and (sniff_mode or allowed == nil or allowed[k]) then
                 if not by_slave[slave] then
                     by_slave[slave] = {}
@@ -322,15 +324,15 @@ local function node_json(idx, slave, c, regs)
     local props = {}
     for _, r in ipairs(regs) do
         local dt = r.dtype or "uint16"
-        -- 嗅探时 r.name 通常 nil (put 不传), 兜底走 s{slave}_r{addr} 跟 U4 key 对齐
+        -- 嗅探时 r.name 通常 nil (put 不传), 兜底走 reg<addr> 跟 U4 key 对齐
         -- 轮询时 r.name 是用户配的真名, 走 r.name 路径
         local id
         if r.name and r.name ~= "" and not r.name:match("^r%d+$") then
             id = r.alias or r.name
         else
-            -- 嗅探模式: 跟 U4 上报 collector key (s{slave}_r{addr}) 对齐
+            -- 嗅探模式: 跟 U4 上报 collector key (reg<addr>) 对齐
             -- 平台按 id 匹配 property, 嗅探的 id 跟 U4 key 一致才能归属
-            id = "s" .. slave .. "_r" .. r.addr
+            id = "reg" .. r.addr
         end
         local name = r.alias or id
         -- address 是嗅探到的 Modbus 寄存器地址, 嗅探到什么发什么
@@ -375,7 +377,9 @@ local function build_nodes()
             by[slave][#by[slave] + 1] = p
         end
         for _, r in ipairs(mon.infer().regs or {}) do
-            put(r.slave, { addr = r.addr, count = r.count, fc = r.fc, dtype = "uint16" })
+            -- 用 mon.infer 推的 dtype_summary 首项当 reg dtype (启发式已给)
+            local dt = r.dtype_summary and r.dtype_summary:match("^([^,]+)") or "uint16"
+            put(r.slave, { addr = r.addr, count = r.count, fc = r.fc, dtype = dt })
         end
         local pc = cfgstore.load_pull()
         for _, r in ipairs((pc and pc.regs) or {}) do
