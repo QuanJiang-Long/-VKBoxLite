@@ -15,3 +15,9 @@ dist/
 
 # 现场截图/沟通用的图片目录，不进仓库
 图/
+
+# 临时调试脚本 (check_lua / 探针生成 / diff 分析等)
+# commit 后清掉, 加规则避免再次出现
+.tmp_*.py
+.tmp_*.txt
+.tmp_*.sh
