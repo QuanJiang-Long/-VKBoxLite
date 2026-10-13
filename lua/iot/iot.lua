@@ -449,9 +449,7 @@ local function send_meta()
     if type(csq) ~= "number" then csq = nil end
     local p = {}
     -- V3 平台要求顶层 vendor/model/fwVersion (元数据帧和拓扑帧都要带)
-    p[#p + 1] = string.format('"vendor":%s', MqttUtil.jstr("VKBox"))
-    p[#p + 1] = string.format('"model":%s', MqttUtil.jstr(cfg.PLATFORM_MODEL))
-    p[#p + 1] = string.format('"fwVersion":%s', MqttUtil.jstr(_G.VERSION or "0.0.0"))
+    -- 记录 1: send_meta 删 vendor/model/fwVersion (用户决策, send_topo 跟 send_hello 保留)
     p[#p + 1] = string.format('"sn":%s', MqttUtil.jstr(did))
     p[#p + 1] = string.format('"deviceSn":%s', MqttUtil.jstr(did))
     p[#p + 1] = string.format('"imei":%s', MqttUtil.jstr(MqttUtil.imei(mobile)))
@@ -1543,15 +1541,18 @@ local function task_main()
             --   填了连接信息 + MQTT 连上, 发到用户 broker (跟 manual 一样可填,
             --   填 dz.voltkun.com 时平台也收到, 填自家 broker 时平台收不到
             --   也不影响其他功能)
-            --   指纹变就发, 不定时, 跟 sniff/platform 一致
+            --   记录 2: 指纹变就发, 跟 sniff/platform 一致; 同时加 c.interval_s
+            --   兜底 (默认 2min), 指纹长时间没变也定期重发一次, 跟 U3/U4 共享
             --   idle 模式不发: 切回 idle 设备已退场, 继续发会污染平台档案
             if pub_meta then
                 local msig = meta_sig()
-                if msig and msig ~= S.meta_sig then
+                local due = (os.time() - (S.meta_at or 0)) >= c.interval_s
+                if (msig and msig ~= S.meta_sig) or due then
                     local ok, e = send_meta()
                     if ok then
                         S.meta_sig = msig
-                        log.info("iot", "gw meta posted: " .. msig)
+                        S.meta_at = os.time()
+                        log.info("iot", "gw meta posted: " .. (msig or "due " .. c.interval_s))
                     else
                         log.info("iot", "gw meta skip: " .. tostring(e))
                     end

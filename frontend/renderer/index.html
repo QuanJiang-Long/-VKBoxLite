@@ -50,6 +50,9 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
    上报间隔/会话管理/允许无 SN），自动档同样需要保存入口
    JS 只切这个 class，不写 style.display，避免和 .form-row 的 flex 打架 */
 body:not(.mq-manual) .manual-only{display:none !important;}
+/* 「自动档」专属 (platform/sniff), manual 档整行藏掉 (跟 .manual-only 互补).
+   上报周期 manual 走用户 pub_topic 不节流, 这项只对自动档 (U2-m/U3/U4) 有意义 */
+body.mq-manual .auto-only{display:none !important;}
 /* ⚠️ 排除 .switch：开关本身也是 <label>，会被这条规则撑到 150px 宽，
    视觉上滑块右侧拖一条大空白，整行显得被拉长。开关只该有它自己的 42px。 */
 .form-row label:not(.switch){width:150px;text-align:right;flex-shrink:0;}
@@ -491,9 +494,9 @@ body:not(.mq-manual) .manual-only{display:none !important;}
                         <label>订阅Topic</label>
                         <input id="mqSub" type="text" placeholder="留空即用设备默认模板 /sys/thing/gw/config/get/{SN}">
                     </div>
-                    <div class="form-row">
+                    <div class="form-row auto-only">
                         <label>上报周期(秒)</label>
-                        <input id="mqInterval" type="number" value="60" min="0" max="86400" style="max-width:140px;">
+                        <input id="mqInterval" type="number" value="120" min="120" max="86400" style="max-width:140px;">
                     </div>
                     <div class="form-row" style="align-items:flex-start;">
                         <label style="padding-top:5px;">MQTT 会话管理</label>

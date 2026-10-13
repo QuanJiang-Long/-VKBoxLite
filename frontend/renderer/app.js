@@ -1588,7 +1588,7 @@ function renderMqtt() {
     if (fillOk(el.mqSub)) el.mqSub.value = c.sub_topic || '';
     // user/client_id/topic 留空是故意的: 设备兜底填 SN 和默认模板, 所以这里
     // 显示空属正常。实际生效值看下面的连接状态面板。
-    if (fillOk(el.mqInterval)) el.mqInterval.value = c.interval_s != null ? c.interval_s : 60;
+    if (fillOk(el.mqInterval)) el.mqInterval.value = c.interval_s != null ? c.interval_s : 120;
     // QoS 已从界面移除：设备端发布/订阅固定用 QoS 1，
     // 这里不再显示也不再下发（设备 normalize 会退回默认值 1）。
     el.mqAllowNoSn.checked = !!c.allow_no_sn;
@@ -2053,7 +2053,7 @@ async function importCfg() {
           // 发布/订阅 topic：手动档专属，导入时一并带进来
           el.mqPub.value = d.mqtt.pub_topic || '';
           el.mqSub.value = d.mqtt.sub_topic || '';
-          el.mqInterval.value = d.mqtt.interval_s != null ? d.mqtt.interval_s : 60;
+          el.mqInterval.value = d.mqtt.interval_s != null ? d.mqtt.interval_s : 120;
           el.mqAllowNoSn.checked = !!d.mqtt.allow_no_sn;
           el.mqKeepSession.value = d.mqtt.keep_session ? '1' : '0';
           // 自动档凭证密码回首页那个框；档次按钮按导入的 manual_on 切
@@ -2410,7 +2410,7 @@ const MOCK = {
           // 手动档 topic 模板。{SN} 由设备代入；留空 = 用设备默认模板
           pub_topic: '/sys/thing/node/property/post/{SN}',
           sub_topic: '/sys/thing/gw/config/get/{SN}',
-          interval_s: 60, allow_no_sn: false, keep_session: false,
+          interval_s: 120, allow_no_sn: false, keep_session: false,
           auto: { pass: 'VKBOXGW2026KEY' }, manual_on: false },
   published: 0
 };

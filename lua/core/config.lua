@@ -28,7 +28,7 @@ M.SN_MAX_LEN = 32
 M.SN_WARN_PERIOD_S = 600
 
 -- MQTT
-M.MQTT_INTERVAL_S = 60
+M.MQTT_INTERVAL_S = 120  -- 默认 2min, U2-m (兜底) / U3 res / U4 prop 共享
 M.MQTT_QOS = 1
 M.MQTT_ALLOW_NO_SN = false
 
