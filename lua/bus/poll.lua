@@ -360,7 +360,7 @@ function M.reload_cfg(src)
 end
 
 -- 当前在跑哪个槽。iot 的平台推送据此判断要不要立即生效
-function M.slot() return curSlot end
+function M.cur_slot() return curSlot end
 
 function M.apply_cfg(c)
     if not c then return false end
@@ -421,10 +421,11 @@ function M.start(src)
         pcall(gpio.setup, mbus.DE_PIN, 0)
         pcall(gpio.set, mbus.DE_PIN, 0)
     end
-    local ok, err = pcall(uart.setup, mbus.UART_ID, lastCfg and lastCfg.baud or cfg.BAUD,
-        lastCfg and lastCfg.databits or cfg.DATABITS,
-        lastCfg and lastCfg.stopbits or cfg.STOPBITS,
-        mbus.parity_to_uart(lastCfg and lastCfg.parity or cfg.PARITY))
+    -- 走 ensure_uart 而不是直接 uart.setup: 修法 (19200+) 在 ensure_uart
+    -- 里加了第 2 次 setup 之前的 uart.close + sys.wait(500) 软重启, 绕过
+    -- 合宙 FAQ #32 "重新 setup 重置 RX 缓冲" 的 19200 fire=0 问题.
+    -- M.start 是 W:CFG 改 baud 的入口 (M.stop + M.start), 必须触发修法
+    local ok, err = ensure_uart()
     if not ok then
         log.error("poll", "setup failed:", tostring(err))
         return false

@@ -1,25 +1,25 @@
-local corelib = require "core/corelib"
+local util = require "util"
 local cfg = require "core/config"
-local log = corelib.log()
+local log = util.log()
 
-local sys = corelib.get("sys")
-local json = corelib.try("json")
-local mqtt = corelib.try("mqtt")
-local rtos = corelib.try("rtos")
-local mobile = corelib.try("mobile")
-local socket = corelib.try("socket")
+local sys = util.get("sys")
+local json = util.try("json")
+local mqtt = util.try("mqtt")
+local rtos = util.try("rtos")
+local mobile = util.try("mobile")
+local socket = util.try("socket")
 -- 兼容老固件: lbsLoc2.lua 文件加载时会自动启动 sys.taskInit (line 124-136),
 -- 直接用全局 _G.sys. base 24.10 bsp V2002 上 _G.sys 未自动注入 → sys=nil 崩
 -- (lbsLoc2.lua:148 'attempt to index a nil value (field "sys")'). 在这里强制
 -- 把 sys / socket / mobile 注册到 _G, 让 lbsLoc2 自带的协程能跑
 for _, lib in ipairs({"sys", "socket", "mobile", "json", "bit", "zbuff", "pack"}) do
-    local m = corelib.try(lib)
+    local m = util.try(lib)
     if m and _G[lib] == nil then _G[lib] = m end
 end
 -- lbsLoc2 = 合宙免费 LBS 基站定位, 默认扩展库, 单基站 1.5km 精度,
 -- 频率被卡死(官方口径 4h-2min), 工程上 30min 一次足够.
 -- 取不到就 nil, 整段 LBS 流程直接跳过
-local lbsLoc2 = corelib.try("lbsLoc2")
+local lbsLoc2 = util.try("lbsLoc2")
 if lbsLoc2 then
     log.info("iot", "lbs lib: loaded, version=", lbsLoc2.version and lbsLoc2.version() or "?")
 else
@@ -59,13 +59,13 @@ local function get_mode()
     return (ctrl_mod and ctrl_mod.get_mode()) or "idle"
 end
 
--- 当前轮询引擎用的是哪个配置槽("poll"=手动 / "pull"=拉取)。
+-- 当前轮询引擎用的是哪个配置槽("poll"=手动/manual / "pull"=拉取/pollpull)。
 -- 平台推送落地时据此决定要不要立即生效: 跑手动档就只存 ds_pull 备着，
 -- 不许把手配的寄存器表顶掉。问 poll 而不是问 ctrl 是为了不引入
 -- ctrl -> mon/poll -> iot 这条环
 local function poll_slot()
     local p = get_poll()
-    return (p and p.slot()) or "poll"
+    return (p and p.cur_slot()) or "poll"
 end
 
 -- 当前在用的那份轮询配置: 拉取档读 ds_pull, 其余读 ds_poll。
@@ -203,12 +203,26 @@ local function build_items()
     local amap = alias_map()
     local c = active_cfg()
     local cfg_slave = c and c.slave or nil
+    -- 过滤: 只发当前 mode 应该有的 alias, 避免切档残留数据被当成当前数据误发
+    -- 例: sniff 累积的 s<slave>_r<addr> 不该在 pollpull 模式上报
+    --
+    -- sniff 模式特殊: 旁听推断的 alias 跟 cfg.regs 不对应, 全发 (sniff 自己
+    -- 在推断寄存器表, alias 是 s<slave>_r<addr> 格式, 不在 cfg.regs.name 里)
+    --
+    -- pollpull/poll/manual 模式: 只发 cfg.regs.name 里的 alias (cfg.regs 是真表)
+    -- 平台刚下发时 cfg.regs 是空, build_items 返回空, 不发
+    local sniff_mode = get_mode() == "sniff"
+    local allowed
+    if not sniff_mode and c and c.regs then
+        allowed = {}
+        for _, r in ipairs(c.regs) do allowed[r.name] = true end
+    end
     local by_slave, order = {}, {}
     for k, d in pairs(collector.get_all_latest()) do
         local vs = MqttUtil.jnum(d.value)
         if vs then
             local slave = tonumber(k:match("^s(%d+)_r%d+$")) or cfg_slave
-            if slave then
+            if slave and (sniff_mode or allowed == nil or allowed[k]) then
                 if not by_slave[slave] then
                     by_slave[slave] = {}
                     order[#order + 1] = slave
@@ -238,6 +252,9 @@ end
 -- 加个 -1 之后平台那头什么都收不到(实测踩过), 所以手动档不加
 local function publish()
     if not S.client or not S.connected then return false end
+    -- idle 模式短路: collector.dataCache 可能残留之前切档前的数据, idle 不该发
+    -- (跟 should_pub_platform 一样, idle 不上送任何平台数据, 包括 U4)
+    if get_mode() == "idle" then return false end
     local items = build_items()
     if #items == 0 then return false end
     local base = S.pub or ""
@@ -696,6 +713,10 @@ local function on_mqtt(cli, event, data, payload)
         -- (判 hello_at == 0)永远不成立, 平台那头看到的是设备中途消失再回来,
         -- 而没有任何 hello
         S.hello_at = 0
+        -- meta_sig 同理: 重连后 task_main 的"指纹变了就发 send_meta"分支
+        -- 不会重置 meta_sig, 指纹不变就不发, 平台 / 用户 broker 拿不到最新
+        -- 元数据。清掉后下一轮 loop 必发第一帧 (跟 hello_at 同套路)
+        S.meta_sig = nil
         local subs = build_subs()
         S.subs = subs
         S.subscribed = false
@@ -1274,7 +1295,8 @@ local function send_hello()
     --   manual    → 平台见 manual 不推配置(行为同 sniff: 用户手配档案, 平台
     --               侧不预知具体设备, 靠上报 auto-provision 补建)
     local m = get_mode()
-    local onboard = m == "sniff" and "sniff" or m == "pollpull" and "platform" or "manual"
+    -- "platform" 是当前 mode 名; "pollpull" 是历史别名 (老 fskv 软切可能返回)
+    local onboard = m == "sniff" and "sniff" or (m == "platform" or m == "pollpull") and "platform" or "manual"
     -- deviceId 按文档取 IMEI，取不到报 "unknown"（不报空串：平台校验
     -- gateway_imei，空串和缺字段是两回事）。不一致会被拒 hello
     local dv = MqttUtil.imei(mobile)
@@ -1484,9 +1506,10 @@ local function task_main()
             local c = mqttcfg.load()
             local pub_platform = should_pub_platform()
             local pub_topo = should_pub_topo()
-            -- U4 始终跑: manual 走用户 pub_topic, idle 时 S.pub 通常为空
-            -- publish() 内已 return false. publish() 的 idle 短路靠这条 + 后续
-            -- 平台 topic 全不发靠下面的 pub_platform gate
+            -- U4 始终跑: manual 走用户 pub_topic, 自动档走 PLATFORM_PUB_TOPIC + -{n}
+            -- idle 模式由 publish() 内部 get_mode() 短路 (跟 should_pub_platform 一致),
+            -- collector.dataCache 残留历史数据不应当上送平台
+            -- U1/U2/U3/U5/U6/U7 受 pub_platform gate 管: idle/manual 全不发
             local due = false
             if c.interval_s > 0 then
                 due = (os.time() - S.last_pub) >= c.interval_s
@@ -1495,22 +1518,12 @@ local function task_main()
             end
             if S.dirty then due = true end
             if due then publish() end
-            -- U1/U2/U3/U5/U6/U7 受 pub_platform gate 管: idle/manual 全不发
-            if pub_platform then
-                if (os.time() - (S.res_at or 0)) >= c.interval_s then send_gw_res() end
-            -- 把这一轮的干活耗时记进 busy, 区间长度记进 span。span 与 busy
-            -- 必须同一轮清零, 否则占比会越算越小
-            S.busy_s = (S.busy_s or 0) + (os.clock() - t0)
-            S.span_s = (S.span_s or 0) + (os.clock() - t0) + 1.0
-            -- U2 两帧, 各按自己的指纹发, 都不做定时兜底:
-            --   元数据帧(不带 nodes): imei/iccid/信号/经纬度会变(csq 尤其), 所以
-            --     按内容指纹变化即发; 平台收到只更新属性, 不会重建模型
-            --   拓扑帧(带 nodes): 建子设备 + 绑定 + 物模型。签名没变就是子设备
-            --     清单没变, 平台那边的档还在, 不需要重建 —— 实测(2026-10-08)留了
-            --     个 60s 兜底重发, 平台一收到带 nodes 的 info/post 就重建模型并
-            --     回推 config/get, 形成"我们发拓扑 → 平台推配置 → 我们再发拓扑"
-            --     的闭环, 每 60s 一轮。兜底路径还不打日志, 现象是"sniff 档平台
-            --     不断下发模型配置", 难查
+            -- U2 元数据帧 (不带 nodes, 走 /sys/thing/gw/info/post/{sn}):
+            --   manual 模式也发 (用户需求, 2026-10-13): 触发条件是用户在 W:MQTT
+            --   填了连接信息 + MQTT 连上, 发到用户 broker (跟 manual 一样可填,
+            --   填 dz.voltkun.com 时平台也收到, 填自家 broker 时平台收不到
+            --   也不影响其他功能)
+            --   指纹变就发, 不定时, 跟 sniff/platform 一致
             local msig = meta_sig()
             if msig and msig ~= S.meta_sig then
                 local ok, e = send_meta()
@@ -1521,6 +1534,19 @@ local function task_main()
                     log.info("iot", "gw meta skip: " .. tostring(e))
                 end
             end
+            -- U1/U3/U5/U6/U7 + U2 拓扑 受 pub_platform gate 管: idle/manual 全不发
+            if pub_platform then
+                if (os.time() - (S.res_at or 0)) >= c.interval_s then send_gw_res() end
+            -- 把这一轮的干活耗时记进 busy, 区间长度记进 span。span 与 busy
+            -- 必须同一轮清零, 否则占比会越算越小
+            S.busy_s = (S.busy_s or 0) + (os.clock() - t0)
+            S.span_s = (S.span_s or 0) + (os.clock() - t0) + 1.0
+            -- U2 拓扑帧(带 nodes[]): 建子设备 + 绑定 + 物模型。签名没变就是子设备
+            --   清单没变, 平台那边的档还在, 不需要重建 —— 实测(2026-10-08)留了
+            --   个 60s 兜底重发, 平台一收到带 nodes 的 info/post 就重建模型并
+            --   回推 config/get, 形成"我们发拓扑 → 平台推配置 → 我们再发拓扑"
+            --   的闭环, 每 60s 一轮。兜底路径还不打日志, 现象是"sniff 档平台
+            --   不断下发模型配置", 难查
             -- detect 跑完之前不发拓扑: 这期间 serial 参数还是上一轮的默认值
             -- (9600), 发出去平台就按错波特率建一次模型, detect 完还得再重建 ——
             -- 白推一次配置, 白占一次 info/post
@@ -1567,10 +1593,10 @@ local function task_main()
             if pub_platform and S.hello_at == 0 and not pulling() then
                 log.info("iot", "hello on connect, mode=" .. get_mode())
                 pcall(send_hello)
-            elseif pub_platform and S.hello_at and S.hello_at > 0 and get_mode() == "pollpull"
+            elseif pub_platform and S.hello_at and S.hello_at > 0 and get_mode() == "platform"
                 and not pulling()
                 and (os.time() - S.hello_at) >= cfg.HELLO_RE_S then
-                log.info("iot", "hello re-send (30min), mode=pollpull")
+                log.info("iot", "hello re-send (30min), mode=platform")
                 pcall(send_hello)
             end
         end

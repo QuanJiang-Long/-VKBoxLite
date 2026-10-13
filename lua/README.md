@@ -214,7 +214,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
   conack 上，已连接的 client 不会自己重读。`set_manual()` 因此 `destroy_client()`
   + `kick()`，让 `task_main` 用新档位重连重建订阅。代价只是丢一次心跳周期，
   `collector` 的数据和寄存器表都不动。
-- **平台推送只在拉取档生效**。`auto_apply()` 落 `ds_pull` 后，只有 `poll.slot()=="pull"`
+- **平台推送只在拉取档生效**。`auto_apply()` 落 `ds_pull` 后，只有 `poll.cur_slot()=="pull"`
   才 `apply_cfg`/`start`。跑手动档时那份配置只是**存着备用**——否则用户没切档就被
   平台改了寄存器表。
 - **进 pollpull 前会先检查 `ds_pull` 拉过没有**。没拉过就直接拿 default 起轮询，等于
@@ -227,7 +227,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
   前端因此有一条「配置来源」提示，说明平台下次下发会覆盖本地改动。
 - ⚠️ **`poll.start()` 必须带槽**。它是 `curSlot = (src == "pull") and "pull" or "poll"`，
   不传 `src` 就等于强制置回 `"poll"`。`ctrl` 和 `W:CFG` 都要把槽传进去，否则
-  拉取档下一次保存就静默切档——`ctrl.get_mode()` 看的是 `poll.slot()`，
+  拉取档下一次保存就静默切档——`ctrl.get_mode()` 看的是 `poll.cur_slot()`，
   模式卡会跟着跳，而 `ds_pull` 还留着旧值。
 
 > ⚠️ sniff 配置目前**前端没有编辑入口**（无 `W:SNIFFCFG` 指令），始终用 `cfg.BAUD`
