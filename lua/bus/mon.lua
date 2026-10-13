@@ -180,35 +180,64 @@ local function push_rsp_value(slave, addr, f)
     if not f.data or not addr then return end
     local total = math.floor(#f.data / 2)
     local i = 0
+    -- v5: 32bit 合并赢时锁定 dtype, 后续段强制同 dtype 合并 (modbus 寄存器连续
+    -- 32bit 是工业标准, 不会中间夹 16bit). 解决 2054 第 2 段 0x00000000 被
+    -- 启发式判 16bit 拆 (uint16=0 c=75 跟 uint32=0 c=75 一样, 16bit+5 加成让
+    -- 16bit 拆抢走 32bit 合并). 强制延续让 0x00000000 跟第 1 段 float32 一致.
+    local lastMergedDtype = nil
     while i < total do
         local remaining = total - i
-        local dtype, v, conf, merged32 = pickDtype(f.data, i, remaining, addr, slave, f)
-        local alias0 = "reg" .. (addr + i)
-        local status
-        if conf >= 80 then status = "ok"
-        elseif conf >= 60 then status = "review"
-        else status = "uncertain" end
-        collector.push_data(addr + i, alias0, f.hex, v, nil, dtype, conf, status)
-        pushHistory(alias0, dtype)
-        if merged32 then
-            -- 32bit 合并: 2 个 16bit alias 都标同 dtype, 第 2 个 value = 低 16bit
+        if lastMergedDtype and remaining >= 2 then
+            -- v5: 强制 32bit 合并, dtype = lastMergedDtype (跟上一段一致)
+            local alias0 = "reg" .. (addr + i)
             local alias1 = "reg" .. (addr + i + 1)
+            local v = mbus.parse_value(f.data, i, lastMergedDtype, false)
             local lo16 = 0
-            if v ~= nil then
-                -- 32bit value 拆 2 个 16bit: 高 16bit 跟低 16bit
-                if dtype == "float32" then
-                    -- float32 拆 2 个 uint16 (大端)
-                    lo16 = 0  -- 简化: float32 不再拆 16bit, 第 2 个 alias 留空
-                else
-                    lo16 = v % 65536
-                    if lo16 < 0 then lo16 = lo16 + 65536 end
-                end
+            if v ~= nil and lastMergedDtype ~= "float32" then
+                lo16 = v % 65536
+                if lo16 < 0 then lo16 = lo16 + 65536 end
             end
-            collector.push_data(addr + i + 1, alias1, f.hex, lo16, nil, dtype, conf, status)
-            pushHistory(alias1, dtype)
+            -- 强制合并 conf=100 (跟上一段对齐, status=ok)
+            collector.push_data(addr + i, alias0, f.hex, v, nil,
+                lastMergedDtype, 100, "ok")
+            collector.push_data(addr + i + 1, alias1, f.hex, lo16, nil,
+                lastMergedDtype, 100, "ok")
+            pushHistory(alias0, lastMergedDtype)
+            pushHistory(alias1, lastMergedDtype)
             i = i + 2
         else
-            i = i + 1
+            local dtype, v, conf, merged32 = pickDtype(f.data, i, remaining, addr, slave, f)
+            local alias0 = "reg" .. (addr + i)
+            local status
+            if conf >= 80 then status = "ok"
+            elseif conf >= 60 then status = "review"
+            else status = "uncertain" end
+            collector.push_data(addr + i, alias0, f.hex, v, nil, dtype, conf, status)
+            pushHistory(alias0, dtype)
+            if merged32 then
+                -- 32bit 合并: 2 个 16bit alias 都标同 dtype, 第 2 个 value = 低 16bit
+                local alias1 = "reg" .. (addr + i + 1)
+                local lo16 = 0
+                if v ~= nil then
+                    -- 32bit value 拆 2 个 16bit: 高 16bit 跟低 16bit
+                    if dtype == "float32" then
+                        -- float32 拆 2 个 uint16 (大端)
+                        lo16 = 0  -- 简化: float32 不再拆 16bit, 第 2 个 alias 留空
+                    else
+                        lo16 = v % 65536
+                        if lo16 < 0 then lo16 = lo16 + 65536 end
+                    end
+                end
+                collector.push_data(addr + i + 1, alias1, f.hex, lo16, nil, dtype, conf, status)
+                pushHistory(alias1, dtype)
+                -- v5: 锁定 dtype, 后续段强制同 dtype 合并
+                lastMergedDtype = dtype
+                i = i + 2
+            else
+                -- v5: 16bit 拆打断 lastMergedDtype 锁定, 下一段重新 pickDtype
+                lastMergedDtype = nil
+                i = i + 1
+            end
         end
     end
 end
@@ -308,35 +337,42 @@ function M.infer()
         if f.kind == "rsp" and f.slave then online[f.slave] = true end
     end
     local agg, slaves, ignored = {}, {}, 0
-    -- V2.3_3 dtype 启发式: 每聚合项从 collector.dataCache 查每个寄存器的 dtype + conf + status
+    -- V2.3_3 dtype 启发式 + v6 表格 alias 拆分: 每 alias 各自 1 行, key = slave:alias.
+    -- 16bit 拆 2 个 alias 出 2 行 (98/99), 32bit 合并 2 个 alias 出 2 行 (2054/2055).
     -- conf 来自 push_rsp_value 多候选打分 (连续性 50% + 值域 30% + 边界 20% + 跨帧一致 +5%)
     -- status: ok (>=80) / review (60-80) / uncertain (<60)
     local cache = collector.get_all_latest()
     for _, f in ipairs(fs) do
         if f.kind == "req" and f.addr ~= nil and f.qty then
             if online[f.slave] then
-                local key = f.slave .. ":" .. f.addr .. ":" .. f.qty .. ":" .. f.fc
-                local a = agg[key]
-                if not a then
-                    local dtypes, confs, statuses = {}, {}, {}
-                    for j = 0, f.qty - 1 do
-                        local alias = "reg" .. (f.addr + j)
-                        local e = cache[alias]
-                        dtypes[#dtypes + 1] = (e and e.dtype) or "uint16"
-                        confs[#confs + 1] = (e and e.conf) or 0
-                        statuses[#statuses + 1] = (e and e.status) or "uncertain"
+                -- v8: 按 dtype 宽度遍历, 32bit 合并 1 个 32bit 寄存器 = 1 行
+                -- (跳过 alias1), 16bit 拆 1 个 16bit 寄存器 = 1 行. count 字段
+                -- 反映"占几个 modbus 16bit 位置" (uint16=1, float32=2).
+                local j = 0
+                while j < f.qty do
+                    local alias = "reg" .. (f.addr + j)
+                    local e = cache[alias]
+                    local dtype = (e and e.dtype) or "uint16"
+                    local width = mbus.TYPE_WIDTH[dtype] or 1
+                    local key = f.slave .. ":" .. alias
+                    local a = agg[key]
+                    if not a then
+                        a = {
+                            slave = f.slave,
+                            addr = f.addr + j,  -- 起始地址
+                            count = width,      -- 占几个 16bit 位置
+                            fc = f.fc,
+                            hits = 0,
+                            dtype = dtype,
+                            conf = (e and e.conf) or 0,
+                            status = (e and e.status) or "uncertain",
+                        }
+                        agg[key] = a
+                        slaves[f.slave] = true
                     end
-                    a = {
-                        slave = f.slave, addr = f.addr, count = f.qty, fc = f.fc,
-                        hits = 0,
-                        dtype_summary = table.concat(dtypes, ","),
-                        conf = confs[1] or 0,  -- 首寄存器 conf 代表整体
-                        status = statuses[1] or "uncertain",
-                    }
-                    agg[key] = a
-                    slaves[f.slave] = true
+                    a.hits = a.hits + 1
+                    j = j + width  -- 32bit 跳 2, 16bit 跳 1
                 end
-                a.hits = a.hits + 1
             else
                 ignored = ignored + 1
             end

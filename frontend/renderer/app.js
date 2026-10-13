@@ -1840,7 +1840,7 @@ function renderInfer() {
     '<td>' + esc(r.count) + '</td>' +
     '<td>0x' + (r.fc != null ? r.fc.toString(16).padStart(2, '0').toUpperCase() : '?') + '</td>' +
     '<td>' + esc(r.hits) + '</td>' +
-    '<td title="' + esc(r.dtype_summary || '-') + '" style="font-family:monospace;font-size:12px;color:#0066cc;">' + esc(r.dtype_summary || '-') + '</td>' +
+    '<td title="' + esc(r.dtype || '-') + '" style="font-family:monospace;font-size:12px;color:#0066cc;">' + esc(r.dtype || '-') + '</td>' +
     '<td>reg' + esc(r.addr) + '</td>' +
     '</tr>'
   ).join('');
