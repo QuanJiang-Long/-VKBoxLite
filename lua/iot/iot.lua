@@ -688,6 +688,17 @@ local function should_pub_topo()
     return get_mode() == "sniff"
 end
 
+-- U2 meta (不带 nodes[], 走 /sys/thing/gw/info/post/{sn}) 单独的闸门:
+-- manual 也发 (用户需求, 2026-10-13: 填 W:MQTT 后走用户 broker / 平台),
+-- sniff 主动建档需要发, platform configSnapshot 后由 send_gw_res 带过,
+-- 但 send_meta 不管 platform 怎么走, 只要指纹变就发, 简化一份冗余.
+-- idle 不发: 切回 idle 设备已经退场, 继续发会污染平台档案
+local function should_pub_meta()
+    local m = get_mode()
+    if m == "idle" then return false end
+    return true
+end
+
 -- 销毁 client。on_mqtt 的 error 分支也要调, 所以必须定义在它之前
 -- (local function 是词法作用域, 写在后面会让 on_mqtt 里那个名字解析到全局 nil)
 local function destroy_client()
@@ -1505,6 +1516,7 @@ local function task_main()
             refresh_subs()
             local c = mqttcfg.load()
             local pub_platform = should_pub_platform()
+            local pub_meta = should_pub_meta()
             local pub_topo = should_pub_topo()
             -- U4 始终跑: manual 走用户 pub_topic, 自动档走 PLATFORM_PUB_TOPIC + -{n}
             -- idle 模式由 publish() 内部 get_mode() 短路 (跟 should_pub_platform 一致),
@@ -1518,29 +1530,32 @@ local function task_main()
             end
             if S.dirty then due = true end
             if due then publish() end
+            -- 把这一轮的干活耗时记进 busy, 区间长度记进 span。span 与 busy
+            -- 必须同一轮清零, 否则占比会越算越小
+            S.busy_s = (S.busy_s or 0) + (os.clock() - t0)
+            S.span_s = (S.span_s or 0) + (os.clock() - t0) + 1.0
             -- U2 元数据帧 (不带 nodes, 走 /sys/thing/gw/info/post/{sn}):
             --   manual 模式也发 (用户需求, 2026-10-13): 触发条件是用户在 W:MQTT
             --   填了连接信息 + MQTT 连上, 发到用户 broker (跟 manual 一样可填,
             --   填 dz.voltkun.com 时平台也收到, 填自家 broker 时平台收不到
             --   也不影响其他功能)
             --   指纹变就发, 不定时, 跟 sniff/platform 一致
-            local msig = meta_sig()
-            if msig and msig ~= S.meta_sig then
-                local ok, e = send_meta()
-                if ok then
-                    S.meta_sig = msig
-                    log.info("iot", "gw meta posted: " .. msig)
-                else
-                    log.info("iot", "gw meta skip: " .. tostring(e))
+            --   idle 模式不发: 切回 idle 设备已退场, 继续发会污染平台档案
+            if pub_meta then
+                local msig = meta_sig()
+                if msig and msig ~= S.meta_sig then
+                    local ok, e = send_meta()
+                    if ok then
+                        S.meta_sig = msig
+                        log.info("iot", "gw meta posted: " .. msig)
+                    else
+                        log.info("iot", "gw meta skip: " .. tostring(e))
+                    end
                 end
             end
             -- U1/U3/U5/U6/U7 + U2 拓扑 受 pub_platform gate 管: idle/manual 全不发
             if pub_platform then
                 if (os.time() - (S.res_at or 0)) >= c.interval_s then send_gw_res() end
-            -- 把这一轮的干活耗时记进 busy, 区间长度记进 span。span 与 busy
-            -- 必须同一轮清零, 否则占比会越算越小
-            S.busy_s = (S.busy_s or 0) + (os.clock() - t0)
-            S.span_s = (S.span_s or 0) + (os.clock() - t0) + 1.0
             -- U2 拓扑帧(带 nodes[]): 建子设备 + 绑定 + 物模型。签名没变就是子设备
             --   清单没变, 平台那边的档还在, 不需要重建 —— 实测(2026-10-08)留了
             --   个 60s 兜底重发, 平台一收到带 nodes 的 info/post 就重建模型并
