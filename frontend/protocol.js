@@ -20,7 +20,8 @@
     // ---- 模式控制 ----
     mode:     ()     => 'R:MODE',                       // 读模式+状态
     setMode:  (m)    => 'W:MODE=' + m,                  // idle/poll/sniff (stop=idle 别名)
-    bootMode: (m)    => 'W:BOOTMODE=' + m,              // idle/poll/sniff
+    bootMode: (m)    => m ? 'W:BOOTMODE=' + m : 'R:BOOTMODE',  // 空字符串 = 读
+    readBootMode: () => 'R:BOOTMODE',                   // 读 boot_mode
 
     // ---- 485 配置 ----
     cfg:        ()     => 'R:CFG',                      // 读 poll 配置

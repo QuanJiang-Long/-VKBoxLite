@@ -8,10 +8,9 @@ local json = util.try("json")
 local M = {}
 
 -- 4 种工作模式提到模块顶部(各文件独立常量是 Lua 闭包隔离的代价)
--- MODE_POLL/MODE_PULL 保留作历史别名: 老 fskv 里 boot_mode="poll"/"pollpull"
--- 软切进 "manual"/"platform" (MQTT 手动档 + 寄存器手配/平台拉, 故名 manual/platform)
+-- 记录 3: 删 MODE_POLL/MODE_PULL (历史别名)。项目还在测试阶段, 没正式发布,
+-- 不存在老 fskv 存 "poll"/"pollpull" 的情况, normalize_sys 直接限 4 值。
 local MODE_MANUAL, MODE_PLATFORM, MODE_IDLE, MODE_SNIFF = "manual", "platform", "idle", "sniff"
-local MODE_POLL, MODE_PULL = "poll", "pollpull"  -- 历史别名, 软切用, 不删
 
 local K_POLL, K_SYS = "ds_poll", "ds_sys"
 -- ds_pull: 平台拉取的独立槽, 复用 normalize_poll/default_poll, 不新增校验。
@@ -139,9 +138,9 @@ end
 function M.normalize_sys(c)
     c = c or {}
     local mode = str(c.boot_mode, MODE_IDLE):lower():gsub("^%s+", ""):gsub("%s+$", "")
-    -- pollpull = 拉取配置档: 用 ds_pull 轮询, 且开机后自动 hello 拉一次平台配置。
-    -- 和 poll 共用同一套 normalize_poll, 只是配置来源不同
-    if mode ~= MODE_IDLE and mode ~= MODE_MANUAL and mode ~= MODE_POLL and mode ~= MODE_PLATFORM and mode ~= MODE_PULL and mode ~= MODE_SNIFF then
+    -- 记录 3: 限 4 值 (idle/manual/platform/sniff)。删 poll/pollpull 历史别名:
+    -- 项目测试阶段, 不存在老 fskv 兼容, 直接报 bad boot_mode 让用户重置。
+    if mode ~= MODE_IDLE and mode ~= MODE_MANUAL and mode ~= MODE_PLATFORM and mode ~= MODE_SNIFF then
         return nil, "bad boot_mode"
     end
     return { boot_mode = mode }
@@ -204,7 +203,10 @@ end
 --
 -- ⚠️ 刻意不碰 ds_sys: boot_mode 是"开机该进什么模式"的意愿, 不是配置内容。
 --    清了它下次开机又不 idle, 和设备已经 idle 的事实矛盾。
-local RESET_SLOTS = { { MODE_POLL, K_POLL }, { MODE_PULL, K_PULL } }
+-- 记录 A: 改友好名, 切 idle 时 W:MODE 应答 cleared 给用户看的字面。
+-- 显示名 (前) 是给用户看的; 键名 (后 K_POLL/K_PULL) 是 cfgstore 内部槽名, 保留
+-- "poll"/"pull" (项目内部 API, 删了工作量大, 收益小 — 跟记录 3 Q2 决策)。
+local RESET_SLOTS = { { "manual 配置", K_POLL }, { "platform 配置", K_PULL } }
 
 function M.reset_user()
     local cleared = {}

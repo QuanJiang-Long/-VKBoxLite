@@ -20,10 +20,11 @@ local guard = util.try("svc/guard")
 local M = {}
 
 -- 4 种工作模式提到模块顶部
--- MODE_POLL/MODE_PULL 保留作历史别名: 老 fskv boot_mode="poll"/"pollpull"
--- 软切进 "manual"/"platform"
+-- 记录 3: 删 MODE_POLL/MODE_PULL (历史别名)。项目测试阶段, 没正式发布,
+-- 不存在老 fskv 兼容场景, normalize_sys 限 4 值直接拒。
 local MODE_MANUAL, MODE_PLATFORM, MODE_IDLE, MODE_SNIFF = "manual", "platform", "idle", "sniff"
-local MODE_POLL, MODE_PULL = "poll", "pollpull"  -- 历史别名
+-- 内部 cfgstore 槽名常量 (跟 boot_mode 历史别名不同, 是项目内部 API, 保留)
+local SLOT_POLL, SLOT_PULL = "poll", "pull"
 
 local UART_ID = uart.VUART_0
 if UART_ID == nil then UART_ID = 4 end
@@ -111,9 +112,8 @@ local function reg_cmds()
     M.reg("W:MODE", function(arg)
         local v = trim(arg):gsub("^%s+", ""):gsub("%s+$", ""):lower()
         if v == "stop" then v = MODE_IDLE end
-        -- "poll"/"pollpull" 是历史别名, 等同 "manual"/"platform"
-        if v == MODE_POLL then v = MODE_MANUAL end
-        if v == MODE_PULL then v = MODE_PLATFORM end
+        -- 记录 3: 软切删了。"poll"/"pollpull" 现在直接被 ctrl.switch_mode
+        -- 走下游拒掉, 不会翻译成 manual/platform。
         local ok, msg, cleared = ctrl.switch_mode(v)
         if not ok then return M.reply("RET:FAIL:MODE:" .. tostring(msg)) end
         -- 切回 idle 会顺带复位配置。用 k:v 而不是 k=v: protocol.js 的 kv 解析
@@ -127,13 +127,13 @@ local function reg_cmds()
 
     M.reg("R:CFG", function()
         -- 按当前运行模式取对应的配置槽
-        local slot = (ctrl.get_mode() == "platform") and MODE_PULL or MODE_POLL
-        local cfg = (slot == MODE_PULL) and cfgstore.load_pull() or cfgstore.load_poll()
+        local slot = (ctrl.get_mode() == "platform") and SLOT_PULL or SLOT_POLL
+        local cfg = (slot == SLOT_PULL) and cfgstore.load_pull() or cfgstore.load_poll()
         -- src 必须反映本次 cfg 实际所在槽: pollpull 档下 ds_poll 空着但
         -- ds_pull 已被平台覆盖的情况很常见 (老用户从 poll 切到 pollpull),
         -- 之前这里写 poll_src() 永远查 K_POLL, 前端拿 src='default' 误判
         -- "平台没下发", 实际 ds_pull 已经有平台配置. 用 slot 决定查哪个 src
-        local src = (slot == MODE_PULL) and cfgstore.pull_src() or cfgstore.poll_src()
+        local src = (slot == SLOT_PULL) and cfgstore.pull_src() or cfgstore.poll_src()
         M.reply("RET:CFG=" .. jencode({ cfg = cfg, slot = slot, src = src }))
     end)
 
@@ -143,9 +143,9 @@ local function reg_cmds()
         if not t then return M.reply("RET:FAIL:CFG:bad json") end
         local n, err = cfgstore.normalize_poll(t)
         if not n then return M.reply("RET:FAIL:CFG:" .. tostring(err)) end
-        local slot = (ctrl.get_mode() == "platform") and MODE_PULL or MODE_POLL
+        local slot = (ctrl.get_mode() == "platform") and SLOT_PULL or SLOT_POLL
         local ok, serr
-        if slot == MODE_PULL then ok, serr = cfgstore.save_pull(t)
+        if slot == SLOT_PULL then ok, serr = cfgstore.save_pull(t)
         else ok, serr = cfgstore.save_poll(t) end
         if not ok then return M.reply("RET:FAIL:CFG:" .. tostring(serr)) end
         if poll.needs_restart(n) then
@@ -240,6 +240,14 @@ local function reg_cmds()
         local ok, err = cfgstore.save_sys({ boot_mode = m })
         if not ok then return M.reply("RET:FAIL:BOOTMODE:" .. tostring(err)) end
         M.reply("RET:BOOTMODE=OK")
+    end)
+
+    M.reg("R:BOOTMODE", function()
+        -- 读开机默认模式 (fskv ds_sys.boot_mode)。前端 "运行状态总览" 卡片
+        -- 用, 跟 W:BOOTMODE 配对: 改了 selBootMode 但没保存, 设备值跟本地
+        -- 值不一致, 提示 dirty
+        local sysc = cfgstore and cfgstore.load_sys()
+        M.reply("RET:BOOTMODE=" .. (sysc and sysc.boot_mode or "idle"))
     end)
 end
 

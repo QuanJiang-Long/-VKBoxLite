@@ -231,14 +231,10 @@ body.mq-manual .auto-only{display:none !important;}
                     </div>
                     <div class="kv-grid" id="homeKv">
                         <div class="kv"><b>运行模式</b><span id="hMode">--</span></div>
-                        <div class="kv"><b>轮询任务</b><span id="hPoll">--</span></div>
-                        <div class="kv"><b>已采寄存器</b><span id="hRegs">--</span></div>
-                        <div class="kv"><b>数据点数</b><span id="hPoints">--</span></div>
                         <div class="kv"><b>MQTT</b><span id="hMqtt">--</span></div>
                         <div class="kv"><b>设备编号</b><span id="hDevId">--</span></div>
                         <div class="kv"><b>看门狗</b><span id="hWdt">--</span></div>
-                        <div class="kv"><b>已上报</b><span id="hPub">--</span></div>
-                        <div class="kv"><b>总线报文</b><span id="hFrames">--</span></div>
+                        <div class="kv"><b>开机模式</b><span id="hBootMode">--</span></div>
                     </div>
                 </div>
                 <div class="panel">
@@ -317,9 +313,7 @@ body.mq-manual .auto-only{display:none !important;}
                         <select id="selBootMode">
                             <option value="idle">idle（不主动采，推荐）</option>
                             <option value="manual">manual（手动配置，开机即轮询）</option>
-                            <option value="poll">poll（历史名, 等同 manual）</option>
                             <option value="platform">platform（拉取配置，开机即拉取）</option>
-                            <option value="pollpull">pollpull（历史名, 等同 platform）</option>
                             <option value="sniff">sniff（开机即旁听）</option>
                         </select>
                         <button id="btnSaveBoot" class="primary">保存</button>
@@ -327,29 +321,10 @@ body.mq-manual .auto-only{display:none !important;}
                     </div>
                 </div>
 
-                <div class="panel">
-                    <div class="panel-title">当前运行详情</div>
-                    <div class="kv-grid">
-                        <div class="kv"><b>当前模式</b><span id="mCurMode">--</span></div>
-                        <div class="kv"><b>配置来源</b><span id="mCfgSrc">--</span></div>
-                        <div class="kv"><b>总线占用</b><span id="mBusy">--</span></div>
-                        <div class="kv"><b>从机地址</b><span id="mSlave">--</span></div>
-                        <div class="kv"><b>波特率</b><span id="mBaud">--</span></div>
-                        <div class="kv"><b>轮询间隔</b><span id="mInterval">--</span></div>
-                        <div class="kv"><b>响应超时</b><span id="mRespCap">--</span></div>
-                        <div class="kv"><b>寄存器项</b><span id="mRegCount">--</span></div>
-                        <div class="kv"><b>任务代际</b><span id="mGen">--</span></div>
-                        <div class="kv"><b>写队列</b><span id="mWriteQ">--</span></div>
-                        <div class="kv"><b>写成功/失败</b><span id="mWriteStat">--</span></div>
-                        <div class="kv"><b>旁听报文</b><span id="mMonFrames">--</span></div>
-                        <div class="kv"><b>配对成功</b><span id="mPaired">--</span></div>
-                        <div class="kv"><b>未配对</b><span id="mOrphan">--</span></div>
-                        <div class="kv"><b>在途请求</b><span id="mPending">--</span></div>
-                        <div class="kv"><b>收到 REQ/RSP</b><span id="mReqRsp">--</span></div>
-                        <div class="kv"><b>运行时长</b><span id="mUptime">--</span></div>
-                        <div class="kv"><b>看门狗</b><span id="mWdt">--</span></div>
-                    </div>
-                </div>
+                <!-- 记录 3: "当前运行详情" panel (19 字段) 删除
+                     - 调试时 R:STAT 串口命令查同样字段
+                     - 简化首页, 留更多空间给重要的状态指示
+                     - 设备端 ctrl.status() / R:MODE 仍返这些字段, 删的只是前端渲染 -->
             </div>
 
             <!-- ============ poll模式 tabPoll ============ -->

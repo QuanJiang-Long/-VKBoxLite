@@ -15,8 +15,9 @@ local SWITCH_DELAY_MS = 50
 -- 手动配置用手动档, 拉取配置必须用自动档(hello 应答走 config/get, 手动档不订)
 -- "poll"/"pollpull" 是历史别名 (老 fskv 软切可能返回), 用 alias 处理
 local SLOT = { manual = "poll", platform = "pull" }
--- 历史别名映射: 跟 cmd.lua 一致, 老用户切档命令的 poll/pollpull 还能用
-local MODE_ALIAS = { poll = "manual", pollpull = "platform" }
+-- 记录 3: 删 MODE_ALIAS (历史别名映射)。项目测试阶段, 无老 fskv 兼容需求,
+-- 老命令 W:MODE=poll/pollpull 现在直接被 normalize_sys 报 bad boot_mode。
+-- SLOT 表保留: 内部映射 manual→"poll" 槽 / platform→"pull" 槽, 是 cfgstore API。
 
 local function switch_delay()
     if not sys then return end
@@ -32,8 +33,8 @@ function M.switch_mode(mode)
         return false, "FAIL unknown mode (use manual/platform/sniff/idle)"
     end
     mode = mode:lower():gsub("^%s+", ""):gsub("%s+$", "")
-    -- 历史别名软切 (跟 cmd.lua 一致)
-    if MODE_ALIAS[mode] then mode = MODE_ALIAS[mode] end
+    -- 记录 3: 软切删了。poll/pollpull 现在直接被 switch_mode 下游 (ctrl.status /
+    -- poll.start 等) 拒掉, 不需要再翻译。简单些。
     -- 识别期间串口正被反复 uart.setup, 切模式会和它抢串口, 扫出来的结果不可信。
     -- 只放行 idle/stop —— 那是用户主动放弃识别的唯一逃生口
     if (mode == "manual" or mode == "platform" or mode == "sniff") and mon.is_detecting() then

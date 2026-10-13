@@ -10,10 +10,11 @@
 //   sniff模式  —— 解译帧实时视图 + 轮询表推断 + 总线诊断
 //=====================================================================
 
-// "manual"/"platform" 是当前 mode 名; "poll"/"pollpull" 是历史别名 (老 fskv 软切可能返回)
 // 跟设备端对齐: 任何判定「当前是否手动档」/「当前是否拉取档」的地方都用 isManual(m)/isPlatform(m)
-const isManual = (m) => m === 'manual' || m === 'poll';
-const isPlatform = (m) => m === 'platform' || m === 'pollpull';
+// 记录 3: 删 || 'poll' / || 'pollpull' 兼容。设备端 normalize_sys 限 4 值, 不会再返
+// poll/pollpull, 前端收到任何历史别名都视作未知 (syncTabs / renderMode 自动兜底)
+const isManual = (m) => m === 'manual';
+const isPlatform = (m) => m === 'platform';
 
 //---------------------------------------------------------------------
 // 全局状态
@@ -31,6 +32,9 @@ const S = {
                        // 含自动档下被 .manual-only 藏掉的那几项 —— 切档位时
                        // setManualMode 会重新取基线，所以不会误报脏
   mqDirty: false,      // MQTT 配置是否有未保存改动
+  bootSnap: null,      // 开机默认模式上次「干净」值 (selBootMode.value 字符串)
+  bootDirty: false,    // 开机默认模式是否有未保存改动
+  bootMode: null,      // 设备当前 boot_mode (R:BOOTMODE 应答, "运行状态总览" 卡片显示)
   mode: 'idle',        // 当前 485 运行模式（始终跟随设备，不被用户选择污染）
   modeStat: null,      // R:MODE 返回的完整状态
   modePending: null,   // 用户已选但设备尚未确认的模式；null = 无待应用选择
@@ -369,6 +373,29 @@ function refreshMqDirty() {
     el.btnHomeMqttSave.classList.toggle('dirty', d);
   }
   if (d) status('有未保存的 MQTT 更改，点「保存」生效', false);
+}
+
+// 开机默认模式 dirty 提示: 跟 mqDirty 同模式, 改 selBootMode → 按钮变
+// "保存 *", 点保存成功后清回。snapBootClean 在页面初始化 + readBootMode
+// 应答后调一次 (取 selBootMode.value 当基线, 之后改动才报脏)。
+function snapBootClean() {
+  if (!el.selBootMode) return;
+  // 同步 selBootMode 跟设备值: 启动时 HTML 默认 'idle', 但设备 boot_mode
+  // 可能是别的 (上次用户改过没保存 / 切档等), 把 selBootMode 拉到设备值
+  if (S.bootMode && S.bootMode !== el.selBootMode.value) {
+    el.selBootMode.value = S.bootMode;
+  }
+  S.bootSnap = el.selBootMode.value;
+  refreshBootDirty();
+}
+function refreshBootDirty() {
+  if (!el.btnSaveBoot) return;
+  const d = S.bootSnap !== null && el.selBootMode.value !== S.bootSnap;
+  if (d === S.bootDirty) return;
+  S.bootDirty = d;
+  el.btnSaveBoot.textContent = d ? '保存 *' : '保存';
+  el.btnSaveBoot.classList.toggle('dirty', d);
+  if (d) status('开机默认模式已更改，点「保存」生效（重启后生效）', false);
 }
 
 function esc(s) {
@@ -1182,30 +1209,10 @@ function renderMode() {
   const p = st.poll || {}, m = st.mon || {};
   // 写队列统计：设备在顶层给 write，兼容只有 poll.write 的老固件
   const w = st.write || p.write || {};
-  // guard 段只在 R:STAT 顶层有，R:MODE 不返回 → 必须从 S.stat 取
-  const g = (S.stat && S.stat.guard) || {};
-  setKv('mCurMode', devMode);
-  // 配置来源: 让用户看清当前采的是手配那份还是平台那份。两套配置是独立的,
-  // 混在一起显示根本分不出, 所以才单列一个格子
-  // "manual" 才是当前 mode 名; "poll" 是历史别名, 老 fskv 软切会返回 "poll"
-  setKv('mCfgSrc', isManual(devMode) ? '手动配置（ds_poll）'
-    : isPlatform(devMode) ? '平台拉取（ds_pull）' : '--');
-  setKv('mBusy', st.busy ? '占用中' : '空闲');
-  setKv('mSlave', p.slave);
-  setKv('mBaud', p.baud);
-  setKv('mInterval', p.interval != null ? p.interval + ' ms' : '');
-  setKv('mRespCap', p.resp_cap != null ? p.resp_cap + ' ms' : '早返回');
-  setKv('mRegCount', p.regs);
-  setKv('mGen', p.gen);
-  setKv('mWriteQ', (w.queued != null ? w.queued : 0) + ' / ' + (w.qmax != null ? w.qmax : 0));
-  setKv('mWriteStat', (w.done != null ? w.done : 0) + ' 成功 / ' + (w.fail != null ? w.fail : 0) + ' 失败');
-  setKv('mMonFrames', m.frames);
-  setKv('mPaired', m.paired);
-  setKv('mOrphan', m.orphans);
-  setKv('mPending', m.pending);
-  setKv('mReqRsp', (m.reqs != null ? m.reqs : 0) + ' / ' + (m.rsps != null ? m.rsps : 0));
-  setKv('mUptime', g && g.uptime != null ? g.uptime + ' s' : '');
-  setKv('mWdt', g.wdt_to ? (wdtStalled(g, !!p.running).stalled ? '停滞!' : '正常') : '未启用');
+  // 记录 3: 删 19 字段 setKv (mCurMode/mCfgSrc/mBusy/mSlave/mBaud/mInterval/
+  // mRespCap/mRegCount/mGen/mWriteQ/mWriteStat/mMonFrames/mPaired/mOrphan/
+  // mPending/mReqRsp/mUptime/mWdt)。HTML panel 已删, 调 setKv 会报 null ref.
+  // 调试: 走 R:STAT 串口命令查同样字段。
 
   // sniff 页的「已识别/正在识别」提示也由这里驱动: R:MODE 的 mon 段带
   // detecting/detect_round/detect_fail, 5s 轮询就能让用户看到识别进度,
@@ -1297,7 +1304,8 @@ async function readMode() {
     S.modeStat = r.data;
     renderMode();
   } catch (e) {
-    setKv('mCurMode', '读取失败', true);
+    // 记录 3: 删 mCurMode setKv。HTML panel 已删, 改用 status 提示一行
+    status('读取模式状态失败：' + e.message, false);
   }
 }
 
@@ -1388,10 +1396,25 @@ async function saveBootMode() {
     const label = MODE_LABEL[v] || v;
     status('开机默认模式已设为 ' + label + '（重启后生效）', true);
     toast('开机默认模式：' + label);
+    // 同步 dirty 基线: 保存成功, 当前值变干净。设备值也更新, selBootMode = 设备值
+    S.bootMode = v;
+    snapBootClean();
+    renderHome();
   } catch (e) {
     status('保存失败：' + e.message, false);
     toast('保存失败：' + e.message);
   }
+}
+
+async function readBootMode() {
+  try {
+    const r = await sendCmd(Protocol.Enc.readBootMode(), 'BOOTMODE', 2000);
+    // r 是 Protocol.decode 返的 {cmd, ok, data, raw}, r.data 是应答字面
+    // "idle"/"manual"/"platform"/"sniff" 直返字面
+    if (r && r.data) S.bootMode = r.data;
+    // 同步 selBootMode 跟设备值, 刷新 dirty 状态
+    snapBootClean();
+  } catch (e) { /* 读失败不打扰用户, 卡片显示 -- 即可 */ }
 }
 
 //=====================================================================
@@ -1402,18 +1425,18 @@ function renderHome() {
   // data/guard 两段只在 R:STAT 顶层，R:MODE 不返回，必须从 S.stat 取。
   const st   = S.modeStat || {};
   const full = S.stat || {};
-  const p = st.poll || {}, m = st.mon || {}, d = full.data || {}, g = full.guard || {};
+  const g = full.guard || {};
   const mq = (S.mqtt && S.mqtt.stat) || {};
   setKv('hMode', (st.mode || 'idle') + (st.busy ? '（占用总线）' : ''));
-  setKv('hPoll', p.running ? '运行中' : '未运行');
-  setKv('hRegs', p.regs);
-  setKv('hPoints', d.points);
   setKv('hMqtt', mq.connected ? '已连接' : '未连接', !mq.connected);
   setKv('hDevId', mq.device_id || (mq.sn || ''));
-  setKv('hWdt', g.wdt_to ? (wdtStalled(g, !!p.running).stalled ? '停滞!' : '正常') : '未启用',
-        wdtStalled(g, !!p.running).stalled);
-  setKv('hPub', mq.published);
-  setKv('hFrames', m.frames);
+  setKv('hWdt', g.wdt_to ? (wdtStalled(g, !!(st.poll || {}).running).stalled ? '停滞!' : '正常') : '未启用',
+        wdtStalled(g, !!(st.poll || {}).running).stalled);
+  // 开机模式: 设备值 S.bootMode (R:BOOTMODE 应答), 跟本地 selBootMode 比对
+  // 标 dirty (跟运行模式 tab 的 btnSaveBoot 同步)。这里只是渲染, dirty 状态
+  // 状态由 refreshBootDirty() 维护 (改 selBootMode 时触发)
+  const bootLabel = MODE_LABEL[S.bootMode] || S.bootMode || '--';
+  setKv('hBootMode', bootLabel + (S.bootDirty ? ' *' : ''));
   // 首页 MQTT 地址/端口回填。5s 定时刷新会打到这里, 正在输入时不能抢,
   // 否则字打到一半被冲掉。密码要另外传 cfg —— stat 段不含 pass
   fillMqHome(mq, S.mqtt && S.mqtt.cfg);
@@ -1571,6 +1594,8 @@ async function readHome() {
       }
       renderMode();
     }
+    // 开机模式不在 R:STAT 4 段里, 单独发 R:BOOTMODE 读
+    await readBootMode();
     renderHome();
   } catch (e) { /* 首页刷新失败不打扰用户 */ }
 }
@@ -2161,20 +2186,19 @@ el.btnHomeMqttSave.onclick = saveHomeMqtt;
 // 运行模式页
 el.btnModeRefresh.onclick = readMode;
 el.btnSaveBoot.onclick = saveBootMode;
+// 开机默认模式 dirty 检测: 改了 selBootMode → 按钮变 "保存 *"
+if (el.selBootMode) el.selBootMode.onchange = refreshBootDirty;
 // 点卡片 = 弹窗确认后立即切换（"应用所选模式"按钮已去掉，卡片即操作）。
 // 之前只切高亮不发命令，5s 定时刷新一到就把高亮打回旧模式，
 // 表现为"选中后模式自动跳回原来模式"。
 // 卡片区域大、容易误点，切换又要停掉旧模式，所以必须弹窗确认。
 // 设备侧模式名 -> 用户看得懂的中文。platform 是内部约定名(设备侧 ds_pull
 // 配置槽的标志), 直接显示会把用户搞糊涂, 所有 toast/status/保存回显都走它
-// "manual"/"platform" 是当前 mode 名; "poll"/"pollpull" 是历史别名,
-// 软切可能返回, 都映射到同一中文 label
+// 记录 3: 删 poll/pollpull 项。设备端 normalize_sys 限 4 值, 不会再返历史别名
 const MODE_LABEL = {
   idle: '空闲 idle',
   manual: 'manual（手动配置）',
-  poll: 'manual（手动配置）',  // 历史别名
   platform: 'platform（拉取配置）',
-  pollpull: 'platform（拉取配置）',  // 历史别名
   sniff: '旁听 sniff'
 };
 // 切回空闲时设备会顺带复位用户配置, 确认弹窗里要多说一段。
@@ -2437,6 +2461,7 @@ const MOCK_CFG_DEFAULT = {
 };
 const MOCK = {
   mode: 'idle',
+  bootMode: 'idle',   // 预览用: 开机默认模式 (R:BOOTMODE 应答值), 默认跟 mode 一致
   detecting: false,   // 预览用: 下一次 R:AUTODETECT 先回一次 BUSY
   pulling: false,     // 预览用: pollpull 的假拉取进行中(见 mockModeStat)
   cfg: JSON.parse(JSON.stringify(MOCK_CFG_DEFAULT)),
@@ -2521,6 +2546,7 @@ function mockReply(line) {
     }
   }
   else if (line === 'R:MODE') resp = 'RET:MODE=' + JSON.stringify(mockModeStat());
+  else if (line === 'R:BOOTMODE') resp = 'RET:BOOTMODE=' + MOCK.bootMode;  // 跟 MOCK.mode 同步
   else if (line === 'R:MQTT') resp = 'RET:MQTT=' + JSON.stringify({
     cfg: MOCK.mqtt,
     auto_pass: MOCK.mqtt.auto.pass,
@@ -2570,6 +2596,10 @@ function mockReply(line) {
     { baud: 9600, databits: 8, stopbits: 1, parity: 0 });
   else if (line.indexOf('R:SNIFF=') === 0) resp = 'RET:SNIFF=3';
   else if (line.indexOf('W:TX=') === 0) resp = 'RET:TX=OK';
+  else if (line.indexOf('W:BOOTMODE=') === 0) {
+    MOCK.bootMode = line.slice(11);
+    resp = 'RET:BOOTMODE=OK';
+  }
   else if (line.indexOf('W:MODE=') === 0) {
     MOCK.mode = line.slice(7);
     // 真设备是"进 sniff 就异步开始识别", 预览也照样演一遍
@@ -2592,7 +2622,8 @@ function mockReply(line) {
       // topic 回落默认模板（设备端 norm_topic 见空串回退默认值）
       MOCK.mqtt.pub_topic = '/sys/thing/node/property/post/{SN}';
       MOCK.mqtt.sub_topic = '/sys/thing/gw/config/get/{SN}';
-      resp = 'RET:MODE=OK;cleared:poll+mqtt_manual';
+      // 记录 3+A: cleared 用友好名 (跟设备端 cfg.lua RESET_SLOTS 对齐)
+      resp = 'RET:MODE=OK;cleared:manual 配置+platform 配置';
     } else {
       resp = 'RET:MODE=OK';
     }
@@ -2623,4 +2654,5 @@ renderRegTable();
 renderMode();
 renderHome();
 renderFrames();
+snapBootClean();     // 取 selBootMode.value 当基线, 之后改动才报脏
 status('请选择串口并打开', true);

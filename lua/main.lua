@@ -108,11 +108,15 @@ if ctrl then
     local boot = sysc and sysc.boot_mode or "idle"
     -- 三种主动模式都能开机自启。漏一个的症状很隐蔽: 开机模式选了它,
     -- 日志打"485 idle"但设备其实没起来, 用户只会以为"开机启动坏了"
-    if boot == "poll" or boot == "pollpull" or boot == "sniff" then
+    -- 记录 3 回归修: 这里历史漏改过, 原来写的是 "poll"/"pollpull", 但
+    -- e0d0bf3 commit 已经把全项目 poll/pollpull 改成 manual/platform,
+    -- 开机路径漏了一处, 设备启动时 fskv 读到 "manual"/"platform" 走 else,
+    -- 用户看到的现象是 W:BOOTMODE=manual 重启后不进 manual。
+    if boot == "manual" or boot == "platform" or boot == "sniff" then
         local ok, msg = ctrl.switch_mode(boot)
         log.info("main", "  boot_mode=" .. boot .. " -> " .. tostring(msg))
     else
-        log.info("main", "  485 idle, 等前端命令 W:MODE=poll|sniff|stop")
+        log.info("main", "  boot_mode=" .. tostring(boot) .. " (485 idle, 等前端命令 W:MODE=manual|platform|sniff|stop)")
     end
 end
 
