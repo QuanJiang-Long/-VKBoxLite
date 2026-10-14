@@ -275,6 +275,13 @@ function mqttPrefix() {
   if (isPlatform(S.mode)) return 'p';
   return '';
 }
+// Step 2e: cfgPrefix() 跟 mqttPrefix 同逻辑, 485 段 + 寄存器表 (selBaud/
+// inpRound/inpSlave/inpTimeout/paramTbody 等) 走 m/p 拆分
+function cfgPrefix() {
+  if (isManual(S.mode)) return 'm';
+  if (isPlatform(S.mode)) return 'p';
+  return '';
+}
 // 回填输入框前的占位判断：这个值现在能不能写进去。
 // 焦点在它上面 → 不能（会冲掉正打的字）；
 // 它所在的标签页不可见 → 也不能（切走时浏览器已 blur，activeElement 不再是它，
@@ -296,31 +303,36 @@ function fillOk(e) {
 //        导入之后）比对。比给每个控件挂 input 监听可靠——漏挂一个就漏判；
 //        也不怕回填过程误触发——回填完再取快照。
 //---------------------------------------------------------------------
-function cfgSnap() {
+function cfgSnap(pre) {
+  if (pre === undefined) pre = cfgPrefix();
+  const tbody = E(pre, 'paramTbody');
   const rows = [];
-  el.paramTbody.querySelectorAll('tr').forEach(tr => {
-    if (!tr.querySelector('.c-addr')) return;          // 空表提示行
-    rows.push([
-      tr.querySelector('.c-addr').value,
-      tr.querySelector('.c-type').value,
-      tr.querySelector('.c-count').value,
-      tr.querySelector('.c-name').value,
-      tr.querySelector('.c-alias').value
-    ].join('|'));
-  });
+  if (tbody.querySelectorAll) {
+    tbody.querySelectorAll('tr').forEach(tr => {
+      if (!tr.querySelector('.c-addr')) return;          // 空表提示行
+      rows.push([
+        tr.querySelector('.c-addr').value,
+        tr.querySelector('.c-type').value,
+        tr.querySelector('.c-count').value,
+        tr.querySelector('.c-name').value,
+        tr.querySelector('.c-alias').value
+      ].join('|'));
+    });
+  }
   return JSON.stringify({
-    b: el.selBaud.value, db: radioVal('databits'), p: radioVal('parity'),
-    sb: radioVal('stopbits'), sl: el.inpSlave.value,
-    iv: el.inpRound.value, to: el.inpTimeout.value, r: rows
+    b: E(pre, 'selBaud').value, db: radioVal('databits'), p: radioVal('parity'),
+    sb: radioVal('stopbits'), sl: E(pre, 'inpSlave').value,
+    iv: E(pre, 'inpRound').value, to: E(pre, 'inpTimeout').value, r: rows
   });
 }
 
 // 表单被程序改过（读配置 / 保存 / 拉取 / 导入）之后调用：当前状态记为干净
-function snapClean() { S.cfgSnap = cfgSnap(); refreshCfgDirty(); }
+function snapClean(pre) { S.cfgSnap = cfgSnap(pre); refreshCfgDirty(pre); }
 
-function refreshCfgDirty() {
+function refreshCfgDirty(pre) {
   // cfgSnap 还是 null 说明从没读过配置，没有可比基线，不算脏
-  const d = S.cfgSnap !== null && cfgSnap() !== S.cfgSnap;
+  if (pre === undefined) pre = cfgPrefix();
+  const d = S.cfgSnap !== null && cfgSnap(pre) !== S.cfgSnap;
   if (d === S.cfgDirty) return;
   const wasDirty = S.cfgDirty;
   S.cfgDirty = d;
@@ -379,11 +391,13 @@ function snapMqClean() { S.mqSnap = mqSnap(); refreshMqDirty(); }
 // 是设备实际存的那份，回填它等于"把你上次填的还给你"
 function refillManual() {
   const c = (S.mqtt && S.mqtt.cfg) || {};
-  if (fillOk(el.mqUser)) el.mqUser.value = c.user || '';
-  if (fillOk(el.mqPass)) el.mqPass.value = c.pass || '';
-  if (fillOk(el.mqClientId)) el.mqClientId.value = c.client_id || '';
-  if (fillOk(el.mqPub)) el.mqPub.value = c.pub_topic || '';
-  if (fillOk(el.mqSub)) el.mqSub.value = c.sub_topic || '';
+  // Step 2e: refillManual 是 setManualMode 调, 手动档专属, 写 m- 前缀元素
+  const pre = 'm';
+  if (fillOk(E(pre, 'mqUser'))) E(pre, 'mqUser').value = c.user || '';
+  if (fillOk(E(pre, 'mqPass'))) E(pre, 'mqPass').value = c.pass || '';
+  if (fillOk(E(pre, 'mqClientId'))) E(pre, 'mqClientId').value = c.client_id || '';
+  if (fillOk(E(pre, 'mqPub'))) E(pre, 'mqPub').value = c.pub_topic || '';
+  if (fillOk(E(pre, 'mqSub'))) E(pre, 'mqSub').value = c.sub_topic || '';
 }
 
 //---------------------------------------------------------------------
@@ -721,6 +735,8 @@ async function readCfg(quiet) {
   // pollpull 档下保留 (让用户主动查 ds_pull), sniff/idle 档下隐藏,
   // 没必要按模式再拦
   if (!quiet && !await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
+  // Step 2e: 用 E(pre, ...) 写当前 tab 内的 485 段 + 寄存器表
+  const pre = cfgPrefix();
   try {
     const rc = await sendCmd(Protocol.Enc.cfg(), 'CFG');
     const payload = rc.data;
@@ -731,18 +747,15 @@ async function readCfg(quiet) {
       S.cfg = c;
       // 正在编辑的表单项不能抢：用户可能在从站地址/间隔/超时里打字，
       // 读配置应答一到就把字冲掉，表现为"输入框改不动"。
-      if (fillOk(el.selBaud)) el.selBaud.value = String(c.baud || 9600);
+      if (fillOk(E(pre, 'selBaud'))) E(pre, 'selBaud').value = String(c.baud || 9600);
       setRadio('databits', String(c.databits || 8));
       setRadio('parity', String(c.parity != null ? c.parity : 0));
       setRadio('stopbits', String(c.stopbits || 1));
       // "485方向控制GPIO" 输入框已按需求移除。GPIO8 方向控制由设备端
       // 脚本固定处理（core/config.lua 的 UART_485_PIN），前端不再暴露。
-      // ⚠️ 千万不要在这里给已删除的控件赋值：el 取不到会是 null，
-      //    整个 readCfg 抛 TypeError 被下面的 catch 吞掉，
-      //    后面所有表单项都不回填，表现为"读配置后表单全空"。
-      if (fillOk(el.inpRound)) el.inpRound.value = c.interval_ms || 3000;
-      if (fillOk(el.inpSlave)) el.inpSlave.value = c.slave || 1;
-      if (fillOk(el.inpTimeout)) el.inpTimeout.value = (c.timeout_ms == null) ? '' : c.timeout_ms;
+      if (fillOk(E(pre, 'inpRound'))) E(pre, 'inpRound').value = c.interval_ms || 3000;
+      if (fillOk(E(pre, 'inpSlave'))) E(pre, 'inpSlave').value = c.slave || 1;
+      if (fillOk(E(pre, 'inpTimeout'))) E(pre, 'inpTimeout').value = (c.timeout_ms == null) ? '' : c.timeout_ms;
       // 首次进 pollpull 时 ds_pull 还是空的, R:CFG 会回 src='default',
       // 这条提示只对用户主动点「读取配置」有意义; 自动路径
       // (waitPullDone / renderPushBanner) 走 silent, 不弹, 否则切档就被
@@ -758,12 +771,12 @@ async function readCfg(quiet) {
     const d = rr.data;
     if (Array.isArray(d) || (d && typeof d === 'object')) {
       S.regs = toArr(d);
-      renderRegTable();
+      renderRegTable(pre);
       status('配置已读取：' + S.regs.length + ' 个寄存器', true);
     } else {
       status('配置已读取', true);
     }
-    snapClean();                       // 读完了，当前表单就是干净基线
+    snapClean(pre);                    // 读完了，当前表单就是干净基线
   } catch (e) {
     status('读取配置失败：' + e.message, false);
     toast('读取配置失败：' + e.message);
@@ -778,6 +791,7 @@ async function readCfg(quiet) {
 // 立刻点 poll tab 看到假数据; 改显示「等待平台下发…」, 等真正配置到达
 // (走 renderPushBanner 路径) 再填
 async function readCfgSilent() {
+  const pre = cfgPrefix();   // Step 2e
   try {
     const rc = await sendCmd(Protocol.Enc.cfg(), 'CFG', 3000);
     const payload = rc.data;
@@ -789,21 +803,21 @@ async function readCfgSilent() {
     }
     if (c && typeof c === 'object') {
       S.cfg = c;
-      if (fillOk(el.selBaud)) el.selBaud.value = String(c.baud || 9600);
+      if (fillOk(E(pre, 'selBaud'))) E(pre, 'selBaud').value = String(c.baud || 9600);
       setRadio('databits', String(c.databits || 8));
       setRadio('parity', String(c.parity != null ? c.parity : 0));
       setRadio('stopbits', String(c.stopbits || 1));
-      if (fillOk(el.inpRound)) el.inpRound.value = c.interval_ms || 3000;
-      if (fillOk(el.inpSlave)) el.inpSlave.value = c.slave || 1;
-      if (fillOk(el.inpTimeout)) el.inpTimeout.value = (c.timeout_ms == null) ? '' : c.timeout_ms;
+      if (fillOk(E(pre, 'inpRound'))) E(pre, 'inpRound').value = c.interval_ms || 3000;
+      if (fillOk(E(pre, 'inpSlave'))) E(pre, 'inpSlave').value = c.slave || 1;
+      if (fillOk(E(pre, 'inpTimeout'))) E(pre, 'inpTimeout').value = (c.timeout_ms == null) ? '' : c.timeout_ms;
     }
     const rr = await sendCmd(Protocol.Enc.reg(), 'REG', 3000);
     const d = rr.data;
     if (Array.isArray(d) || (d && typeof d === 'object')) {
       S.regs = toArr(d);
-      renderRegTable();
+      renderRegTable(pre);
     }
-    snapClean();
+    snapClean(pre);
     renderCfgSrcHint('pull');
   } catch (e) { /* 静默: 失败不打扰, 下次再试 */ }
 }
@@ -902,14 +916,15 @@ function fillFormFromPlatform(d) {
 // 收集串口配置。返回 { ok, cfg } 或 { ok:false, err }
 // 单选钮没选中时 parseInt('') = NaN，绝不能让 NaN/null 流到设备端
 // （设备 normalize 会整条拒绝，用户只看到一句"保存失败"却不知道原因）
-function collectCfg() {
-  const baud      = parseInt(el.selBaud.value, 10);
+function collectCfg(pre) {
+  if (pre === undefined) pre = cfgPrefix();
+  const baud      = parseInt(E(pre, 'selBaud').value, 10);
   const databits  = parseInt(radioVal('databits'), 10);
   const parity    = parseInt(radioVal('parity'), 10);
   const stopbits  = parseInt(radioVal('stopbits'), 10);
-  const slave     = parseInt(el.inpSlave.value, 10);
-  const interval  = parseInt(el.inpRound.value, 10);
-  const timeout   = el.inpTimeout.value.trim();
+  const slave     = parseInt(E(pre, 'inpSlave').value, 10);
+  const interval  = parseInt(E(pre, 'inpRound').value, 10);
+  const timeout   = E(pre, 'inpTimeout').value.trim();
 
   if (!baud || baud < 300 || baud > 921600) return { ok: false, err: '波特率越界(300~921600)' };
   if (databits !== 7 && databits !== 8)    return { ok: false, err: '数据位只能是 7 或 8' };
@@ -936,9 +951,12 @@ function collectCfg() {
   };
 }
 
-function collectRegs() {
+function collectRegs(pre) {
+  if (pre === undefined) pre = cfgPrefix();
+  const tbody = E(pre, 'paramTbody');
   const out = [];
-  el.paramTbody.querySelectorAll('tr').forEach(tr => {
+  if (!tbody.querySelectorAll) return out;
+  tbody.querySelectorAll('tr').forEach(tr => {
     // 空表提示行没有 .c-addr，必须先判空。
     // 少了这道判断，空表时点保存配置会在这里抛 TypeError，
     // 而 collectRegs 在 saveCfg 的 try 之外，异常直接冲出 onclick，
@@ -986,13 +1004,14 @@ function cfgErr(raw) {
 async function saveCfg() {
   // 兜底：前置校验任何意外都必须留下痕迹。否则异常会直接冲出 onclick，
   // 界面不弹 toast 也不改 status，用户看到的就是"点了没反应"
+  const pre = cfgPrefix();  // Step 2e: 用当前 tab 内的 485 + 寄存器表
   try {
-    const c = collectCfg();
+    const c = collectCfg(pre);
     if (!c.ok) { toast(c.err); status('配置无效：' + c.err, false); return; }
     const cfg = c.cfg;
-    const bad = badRegRow();
+    const bad = badRegRow(pre);
     if (bad) { toast(bad); status('配置无效：' + bad, false); return; }
-    const regs = collectRegs();
+    const regs = collectRegs(pre);
     if (regs.length === 0) { toast('参数列表为空，请先添加寄存器'); return; }
     const dup = regs.some((r, i) => regs.findIndex(x => x.addr === r.addr && x.name === r.name) !== i);
     if (dup) { toast('存在重复的寄存器标识符，请检查'); return; }
@@ -1009,7 +1028,7 @@ async function saveCfg() {
       cfg.regs = regs;
       await sendCmd(Protocol.Enc.writeCfg(cfg), 'CFG', 5000);
       S.cfg = cfg; S.regs = regs;
-      snapClean();                     // 保存成功 = 表单和设备一致，清掉「未保存」标记
+      snapClean(pre);                  // 保存成功 = 表单和设备一致，清掉「未保存」标记
       status('配置已保存（串口参数变化时设备会自动重启轮询任务）', true);
       toast('保存成功');
       await readMode();
@@ -1026,8 +1045,11 @@ async function saveCfg() {
 
 // 逐行检查参数表，返回第一条不合法的人类可读原因（全部合法返回 null）。
 // 比 collectRegs 静默丢弃更好：能说清是第几行、缺什么
-function badRegRow() {
-  const rows = el.paramTbody.querySelectorAll('tr');
+function badRegRow(pre) {
+  if (pre === undefined) pre = cfgPrefix();
+  const tbody = E(pre, 'paramTbody');
+  if (!tbody.querySelectorAll) return null;
+  const rows = tbody.querySelectorAll('tr');
   for (let i = 0; i < rows.length; i++) {
     const tr = rows[i];
     if (!tr.querySelector('.c-addr')) continue;      // 空表提示行
@@ -1113,30 +1135,34 @@ async function readVal() {
 //---------------------------------------------------------------------
 const ALL_TYPES = ['uint16', 'int16', 'uint32', 'int32', 'float32', 'uint64', 'int64', 'float64'];
 
-function renderRegTable() {
+function renderRegTable(pre) {
+  // Step 2e: 拆 m/p 分支, pre 由 readCfg/readCfgSilent/activateTab 传入
+  if (pre === undefined) pre = cfgPrefix();
+  const tbody = E(pre, 'paramTbody');
   // 两种情况都不重建 DOM：
   // ① 焦点正在参数表里 —— 重建会丢焦点、冲掉刚打的字；
-  // ② poll 标签页不可见且表里已有真实数据行 —— 切走时浏览器会把焦点里的
-  //    输入框 blur 掉，activeElement 变成 <body>，只判焦点会漏。此时用户
-  //    看不见表格，重建只会悄悄丢数据，等切回来发现"编辑的内容没了"。
-  //    ⚠️ 必须确认表里真的有 .c-addr 行才跳过：空表/占位行时该渲染，
-  //    否则首次进入（首页默认激活）连"暂无寄存器"都画不出来。
+  // ② 对应 tab 标签页不可见且表里已有真实数据行 —— 切走时浏览器会把焦点里的
+  //    输入框 blur 掉，activeElement 变成 <body>，只判焦点会漏。
+  //    ⚠️ 必须确认表里真的有 .c-addr 行才跳过：空表/占位行时该渲染
   const ae = document.activeElement;
-  if (ae && ae.closest && el.paramTbody.contains(ae)) return;
-  const pane = $('tabPoll');
-  if (pane && !pane.classList.contains('active') && el.paramTbody.querySelector('.c-addr')) return;
-  el.paramTbody.innerHTML = '';
+  if (ae && ae.closest && tbody.contains && tbody.contains(ae)) return;
+  const tabName = pre ? (pre === 'm' ? 'tabManual' : 'tabPlatform') : 'tabPoll';
+  const pane = $(tabName);
+  if (pane && !pane.classList.contains('active') && tbody.querySelector && tbody.querySelector('.c-addr')) return;
+  tbody.innerHTML = '';
   const rows = toArr(S.regs);
   if (rows.length === 0) {
     const tr = document.createElement('tr');
     tr.innerHTML = '<td colspan="8" style="color:#999;padding:14px;">暂无寄存器，点「新增寄存器」添加</td>';
-    el.paramTbody.appendChild(tr);
+    tbody.appendChild(tr);
     return;
   }
-  rows.forEach(r => addRegRow(r.addr, r.dtype || r.type, r.name, r.alias, r.count));
+  rows.forEach(r => addRegRow(pre, r.addr, r.dtype || r.type, r.name, r.alias, r.count));
 }
 
-function addRegRow(addr, type, name, alias, count) {
+function addRegRow(pre, addr, type, name, alias, count) {
+  if (pre === undefined) pre = cfgPrefix();
+  const tbody = E(pre, 'paramTbody');
   const tr = document.createElement('tr');
   const opts = ALL_TYPES
     .map(t => '<option' + (t === type ? ' selected' : '') + '>' + t + '</option>').join('');
@@ -1152,9 +1178,9 @@ function addRegRow(addr, type, name, alias, count) {
     '<td><button class="btn-del" onclick="deleteRow(this)">删除</button></td>';
   // 空表提示行没有 .c-addr，新增第一行前先删掉，否则它会和真实数据行并存，
   // 界面同时显示"暂无寄存器"和一个寄存器，自相矛盾
-  const ph = el.paramTbody.querySelector('tr td[colspan]');
+  const ph = tbody.querySelector && tbody.querySelector('tr td[colspan]');
   if (ph) ph.parentNode.removeChild(ph);
-  el.paramTbody.appendChild(tr);
+  tbody.appendChild(tr);
   // 新增行也要遵守当前模式的锁态: platform/sniff 下不该有「删除」键
   if (!isManual(S.mode)) {
     tr.querySelectorAll('input, select').forEach(e => {
@@ -1167,7 +1193,7 @@ function addRegRow(addr, type, name, alias, count) {
     const delBtn = tr.querySelector('.btn-del');
     if (delBtn) delBtn.style.display = 'none';
   }
-  refreshCfgDirty();                   // 增行是 DOM 操作，不触发 input 事件，得手动标脏
+  refreshCfgDirty(pre);                // 增行是 DOM 操作，不触发 input 事件，得手动标脏
 }
 
 function deleteRow(btn) {
@@ -1199,7 +1225,8 @@ function confirmAddReg() {
   if (cnt % w !== 0) { regErr(type + ' 占 ' + w + ' 个寄存器，个数需为 ' + w + ' 的整数倍'); return; }
   if (!/^\w+$/.test(phyId.trim())) { regErr('标识符只能含字母、数字、下划线'); return; }
   if (phyId.trim().length > 16) { regErr('标识符最长 16 字符'); return; }
-  addRegRow(parseInt(addr, 10), type, phyId.trim(), alias, cnt);
+  // Step 2e: 传当前档位 pre 给 addRegRow, 让行加到 m/p 各自 tab 的 paramTbody
+  addRegRow(cfgPrefix(), parseInt(addr, 10), type, phyId.trim(), alias, cnt);
   regErr('');
   closeModal();
 }
@@ -2210,9 +2237,14 @@ function stopAutoRefresh() {
 el.btnRefresh.onclick = refreshPorts;
 el.btnOpen.onclick = togglePort;
 el.btnReadInfo.onclick = readInfo;
-el.btnReadCfg.onclick = readCfg;
-el.btnPullCfg.onclick = pullCfg;
-el.btnSaveCfg.onclick = saveCfg;
+// Step 2e: 485 + 寄存器表 4 button 拆 tab 后 m/p 都有, 单绑 el.btnXxx 只
+// 拿到 tabPoll 内的, 切到 manual/platform tab 时点不到。querySelectorAll
+// 绑所有 3 份, 跟 btnMqttSave/Reconnect/Report 同一改法
+document.querySelectorAll('#mBtnReadCfg, #pBtnReadCfg, #btnReadCfg').forEach(b => { b.onclick = readCfg; });
+document.querySelectorAll('#mBtnSaveCfg, #pBtnSaveCfg, #btnSaveCfg').forEach(b => { b.onclick = saveCfg; });
+document.querySelectorAll('#mBtnPullCfg, #pBtnPullCfg, #btnPullCfg').forEach(b => { b.onclick = pullCfg; });
+document.querySelectorAll('#mBtnAddReg, #pBtnAddReg, #btnAddReg').forEach(b => { b.onclick = addParamRow; });
+document.querySelectorAll('#mBtnReadVal, #pBtnReadVal, #btnReadVal').forEach(b => { b.onclick = readVal; });
 el.btnReadVal.onclick = readVal;
 el.btnAddReg.onclick = addParamRow;
 el.btnImport.onclick = importCfg;
