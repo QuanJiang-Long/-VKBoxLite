@@ -2176,7 +2176,14 @@ let frameTimer = null, homeTimer = null;
 function startAutoRefresh() {
   stopAutoRefresh();
   if (S.mock) return;
-  homeTimer = setInterval(() => { if (!S.pending) readHome(); }, 5000);
+  // Step 2c/2d fix: homeTimer 5s 跑 readHome + readMqtt, 让 manual/platform
+  // tab 的 5 字段状态 / 17 字段状态都自动刷。之前只 readHome, mqtt 状态不更新
+  homeTimer = setInterval(async () => {
+    if (S.pending) return;
+    try { await readHome(); } catch (_) {}
+    if (S.pending) return;
+    try { await readMqtt(true); } catch (_) {}
+  }, 5000);
   frameTimer = setInterval(() => {
     if (!S.pending && el.frameAuto.checked && S.mode === 'sniff') readFrames();
   }, 2000);
