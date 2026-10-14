@@ -2167,6 +2167,11 @@ async function importCfg(pre) {
   // Step 2f: 拆 m/p 分支, 填当前 tab 内的 485 + MQTT 字段. pre 由
   // btnImport.onclick 传 cfgPrefix() 进来
   if (pre === undefined) pre = cfgPrefix();
+  // 平台档配置从平台拉取, 不允许用户手动导入 (导入会被 5s 后 readCfg 顶掉)
+  if (isPlatform(S.mode)) {
+    toast('平台档配置从 MQTT 平台拉取，不能导入。如需修改请联系平台');
+    return;
+  }
   // 先问再弹文件选择框：顺序反了的话用户选完文件才被告知会丢改动，白选一趟
   if (!await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
   const inp = document.createElement('input');
