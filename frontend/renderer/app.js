@@ -2381,6 +2381,21 @@ function activateTab(tabId) {
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
   const pane = $(tabId);
   if (pane) pane.classList.add('active');
+  // Step 1b fix: 切到 manual/platform/poll tab 时, 重置当前 tab 内的
+  // .serial-pane active (默认显示"串口配置"段 = s1)。否则上次在另一个
+  // tab 操作留下的 active 状态会让用户切回来看到空白/错位
+  if (tabId === 'tabManual' || tabId === 'tabPlatform' || tabId === 'tabPoll') {
+    const prefix = tabId === 'tabManual' ? 'm-' :
+                   tabId === 'tabPlatform' ? 'p-' : '';
+    const s1 = document.getElementById('sp-' + prefix + 's1');
+    const s2 = document.getElementById('sp-' + prefix + 's2');
+    if (s1) s1.classList.add('active');
+    if (s2) s2.classList.remove('active');
+    // .serial-tab 也要 reset 到 s1
+    pane.querySelectorAll('.serial-tab').forEach(t => {
+      t.classList.toggle('active', t.getAttribute('data-serial') === 's1');
+    });
+  }
   // 切到报文页时立即拉一次
   if (tabId === 'tabSniff' && S.open && S.mode === 'sniff') readFrames();
   // 切到 sniff tab 时同步刷一次 MQTT 配置 (snMqHost/Port/Interval)
@@ -2389,6 +2404,10 @@ function activateTab(tabId) {
   // 就是 pollpull (没有 applyMode 这一步) 也覆盖。push 自动刷新另见
   // renderPushBanner. applyMode 钩子已删除 (窄), 这个钩子宽
   if (tabId === 'tabPoll' && isPlatform(S.mode)) readCfgSilent();
+  // Step 1b fix: 同样, manual/platform tab 静默读一次配置
+  if ((tabId === 'tabManual' || tabId === 'tabPlatform') && S.open) {
+    if (isPlatform(S.mode)) readCfgSilent();
+  }
 }
 
 const tabItems = document.querySelectorAll('.tab-header .tab-item');
@@ -2399,14 +2418,26 @@ tabItems.forEach(item => {
 });
 
 // poll模式子标签切换：串口1（485总线）/ MQTT配置
+// Step 1b fix: 拆 tab 后有 3 份 .serial-pane (sp-m-s1/sp-m-s2, sp-p-s1/sp-p-s2,
+// sp-s1/sp-s2), 用 getElementById('sp-s1') 只拿第一个 = tabPoll 内的 sp-s1,
+// 切到 manual/platform tab 时会拿错 pane。改成在当前 .tab-pane 作用域内找
 const serialTabs = document.querySelectorAll('.serial-tab');
 serialTabs.forEach(tab => {
   tab.onclick = () => {
-    serialTabs.forEach(s => s.classList.remove('active'));
+    // 当前 .serial-tab 在哪个 .tab-pane 下面 — click 时离它最近的那个
+    const tabPane = tab.closest('.tab-pane');
+    if (!tabPane) return;
+    const tabId = tabPane.id;                    // tabManual / tabPlatform / tabPoll
+    const prefix = tabId === 'tabManual' ? 'm-' :
+                   tabId === 'tabPlatform' ? 'p-' : '';
+    // 当前 tab 自己的 .serial-tab 列表 (其他 tab 的不在范围内)
+    const myTabs = tabPane.querySelectorAll('.serial-tab');
+    myTabs.forEach(s => s.classList.remove('active'));
     tab.classList.add('active');
-    const key = tab.getAttribute('data-serial');   // s1 / s2
-    document.querySelectorAll('.serial-pane').forEach(p => p.classList.remove('active'));
-    const pane = document.getElementById('sp-' + key);
+    const key = tab.getAttribute('data-serial'); // s1 / s2
+    // 只在当前 tab 内操作 .serial-pane, 不会误碰其他 tab 的同名 pane
+    tabPane.querySelectorAll('.serial-pane').forEach(p => p.classList.remove('active'));
+    const pane = document.getElementById('sp-' + prefix + key);
     if (pane) pane.classList.add('active');
     // 切到 MQTT配置 时拉一次，避免刚切过去是空的
     if (key === 's2' && S.open) readMqtt();
