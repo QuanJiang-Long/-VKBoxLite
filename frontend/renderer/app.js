@@ -125,20 +125,19 @@ const el = new Proxy({
   mMqAllowNoSn: $('mMqAllowNoSn'),
   mMqKeepSession: $('mMqKeepSession'),
   // ====== Step 2a: tabPlatform 内的 p- 前缀引用 ======
+  // Step 2c/2d: 平台档删 6 字段 (user/pass/ClientId/Pub/Sub/AllowNoSn) + 1 按钮
+  // (pBtnManualCfg) + pBtnMqttSave/pBtnMqttReset/pBtnMqttPassEye (平台档不能改/不需要)
+  // — 这些引用也不建了, 业务用不到
   pBtnReadCfg: $('pBtnReadCfg'), pBtnSaveCfg: $('pBtnSaveCfg'), pBtnPullCfg: $('pBtnPullCfg'),
   pCfgSrcHint: $('pCfgSrcHint'),
   pSelBaud: $('pSelBaud'), pInpRound: $('pInpRound'),
   pInpSlave: $('pInpSlave'), pInpTimeout: $('pInpTimeout'),
   pBtnReadVal: $('pBtnReadVal'), pBtnAddReg: $('pBtnAddReg'), pParamTbody: $('pParamTbody'),
-  pBtnManualCfg: $('pBtnManualCfg'),
-  pBtnMqttRefresh: $('pBtnMqttRefresh'), pBtnMqttSave: $('pBtnMqttSave'),
-  pBtnMqttReport: $('pBtnMqttReport'), pBtnMqttReset: $('pBtnMqttReset'),
-  pMqHost: $('pMqHost'), pMqPort: $('pMqPort'), pMqSsl: $('pMqSsl'), pMqUser: $('pMqUser'),
-  pMqPass: $('pMqPass'), pMqClientId: $('pMqClientId'),
-  pBtnMqttPassEye: $('pBtnMqttPassEye'),
-  pMqPub: $('pMqPub'), pMqSub: $('pMqSub'),
+  pBtnMqttRefresh: $('pBtnMqttRefresh'),
+  pBtnMqttReport: $('pBtnMqttReport'),
+  pBtnMqttReconnect: $('pBtnMqttReconnect'),
+  pMqHost: $('pMqHost'), pMqPort: $('pMqPort'), pMqSsl: $('pMqSsl'),
   pMqInterval: $('pMqInterval'),
-  pMqAllowNoSn: $('pMqAllowNoSn'),
   pMqKeepSession: $('pMqKeepSession'),
   // ====== 共享元素 (仅在 tab0/tabSniff 用, 没拆) ======
   stPort: $('stPort'), stDev: $('stDev'), stSn: $('stSn'), stMode: $('stMode'),
@@ -2360,8 +2359,12 @@ el.btnManualCfg.onclick = async () => {
   }
 };
 el.btnMqttSave.onclick = saveMqtt;
-el.btnMqttReport.onclick = reportNow;
-el.btnMqttReconnect.onclick = mqttReconnect;
+// Step 2c/2d: 拆 tab 后 m-/p- 各有 button, 单绑 el.btnXxx 只拿到第一个 = tabPoll 内的
+// 切到 manual/platform tab 时点不到。改用 querySelectorAll 绑所有 3 份
+document.querySelectorAll('#mBtnMqttReport, #pBtnMqttReport, #btnMqttReport').forEach(b => { b.onclick = reportNow; });
+document.querySelectorAll('#mBtnMqttReconnect, #pBtnMqttReconnect, #btnMqttReconnect').forEach(b => { b.onclick = mqttReconnect; });
+// 密码眼按钮 manual 档有, 平台档没 (Step 2c 删了), tabPoll 仍保留
+document.querySelectorAll('#mBtnMqttPassEye, #btnMqttPassEye').forEach(b => { b.onclick = togglePassEye; });
 el.btnMqttPassEye.onclick = togglePassEye;
 // sniff 页面简版: 刷新 = 跟 sp-s2 一起 readMqtt; 保存 = 走 saveMqtt (snMqInterval 同步到 mqInterval)
 if (el.btnSnMqttRefresh) el.btnSnMqttRefresh.onclick = readMqtt;

@@ -90,6 +90,11 @@ body.mq-manual .auto-only{display:none !important;}
 .panel-title button.sm.on:hover{background:#2b8aef;color:#fff;}
 /* 只读的 MQTT topic：浅灰底 + 禁则光标，肉眼一眼分得清"这块不给你动" */
 .form-row input.ro{background:#f4f6f9;color:#888;cursor:not-allowed;}
+/* Step 2d: 平台档只读 5 字段 (host/port/ssl/interval/keepSession) 整行
+   灰底+绿字, 一眼看出"这是平台下发的, 设备那边说了算"。input 加 readonly,
+   select/checkbox 加 disabled, 这里只管外观 */
+.ro-val{background:#f4f6f9 !important;color:#0a7d2c !important;cursor:not-allowed !important;font-weight:bold !important;border-color:#dde2ea !important;}
+.ro-wrap{padding:6px 10px;background:#f4f6f9;border:1px solid #dde2ea;border-radius:3px;color:#0a7d2c;font-weight:bold;display:inline-block;min-width:60px;}
 /* 串口子标签 */
 .serial-tabs{display:flex;border-bottom:1px solid #ddd;margin-bottom:10px;}
 .serial-tab{padding:6px 10px;border:1px solid #ddd;border-bottom:none;margin-right:4px;cursor:pointer;background:#f3f5f8;}
@@ -599,71 +604,34 @@ body.mq-manual .auto-only{display:none !important;}
                 <div class="serial-pane" id="sp-p-s2">
                 <div class="panel">
                     <div class="panel-title">MQTT 连接
-                        <button class="sm" id="pBtnManualCfg" title="关闭时：用户名/密码/ClientID/Topic 由设备自动拼接；打开后：这几项自己填，保存生效">手动配置</button>
                         <div class="spacer"></div>
                         <button class="sm" id="pBtnMqttRefresh">刷新</button>
                     </div>
                     <div class="form-row">
                         <label>MQTT 服务器地址</label>
-                        <input id="pMqHost" type="text" placeholder="如 dz.voltkun.com 或 192.168.1.10">
+                        <input id="pMqHost" type="text" placeholder="如 dz.voltkun.com 或 192.168.1.10" class="ro-val" readonly>
                     </div>
                     <div class="form-row">
                         <label>端口</label>
-                        <input id="pMqPort" type="number" value="1883" min="1" max="65535" style="max-width:140px;">
+                        <input id="pMqPort" type="number" value="1883" min="1" max="65535" style="max-width:140px;" class="ro-val" readonly>
                         <label style="margin-left:16px;">TLS/SSL</label>
-                        <label class="switch"><input id="pMqSsl" type="checkbox"><span class="sl"></span></label>
-                    </div>
-                    <div class="form-row manual-only">
-                        <label>用户名</label>
-                        <input id="pMqUser" type="text" placeholder="留空即用设备 SN">
-                    </div>
-                    <div class="form-row manual-only">
-                        <label>密码</label>
-                        <span class="pw-wrap">
-                            <input id="pMqPass" type="password" placeholder="无则留空">
-                            <button type="button" class="pw-eye" id="pBtnMqttPassEye" title="显示密码">
-                                <svg viewBox="0 0 16 16" aria-hidden="true">
-                                    <path d="M8 2.5C4.4 2.5 1.4 5.6.3 8c1.1 2.4 4.1 5.5 7.7 5.5s6.6-3.1 7.7-5.5C14.6 5.6 11.6 2.5 8 2.5z"/>
-                                    <circle cx="8" cy="8" r="2.6"/>
-                                    <line class="slash" x1="2.5" y1="13.5" x2="13.5" y2="2.5"/>
-                                </svg>
-                            </button>
-                        </span>
-                    </div>
-                    <div class="form-row manual-only">
-                        <label>ClientID</label>
-                        <input id="pMqClientId" type="text" placeholder="留空即用设备 SN 加下划线，如 11802026092600016_">
-                    </div>
-                    <div class="form-row manual-only">
-                        <label>发布Topic</label>
-                        <input id="pMqPub" type="text" placeholder="留空即用设备默认模板 /sys/thing/node/property/post/{SN}">
-                    </div>
-                    <div class="form-row manual-only">
-                        <label>订阅Topic</label>
-                        <input id="pMqSub" type="text" placeholder="留空即用设备默认模板 /sys/thing/gw/config/get/{SN}">
+                        <label class="switch"><input id="pMqSsl" type="checkbox" disabled><span class="sl"></span></label>
                     </div>
                     <div class="form-row auto-only">
                         <label>上报周期(秒)</label>
-                        <input id="pMqInterval" type="number" value="120" min="120" max="86400" style="max-width:140px;">
+                        <input id="pMqInterval" type="number" value="120" min="120" max="86400" style="max-width:140px;" class="ro-val" readonly>
                     </div>
                     <div class="form-row" style="align-items:flex-start;">
                         <label style="padding-top:5px;">MQTT 会话管理</label>
-                        <select id="pMqKeepSession" style="max-width:220px;">
+                        <select id="pMqKeepSession" style="max-width:220px;" disabled>
                             <option value="0" selected>离线自动销毁</option>
                             <option value="1">持久会话</option>
                         </select>
                     </div>
-                    <div class="form-row">
-                        <label>no_SN 建连</label>
-                        <label class="switch"><input id="pMqAllowNoSn" type="checkbox"><span class="sl"></span></label>
-                        <span class="hint">默认关闭：防止多台未烧号设备撞同一 topic</span>
-                    </div>
                     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;">
-                        <button id="pBtnMqttReset" class="danger">恢复默认</button>
                         <button id="pBtnMqttReport">立即上报一次</button>
                         <div style="margin-left:auto;"></div>
                         <button id="pBtnMqttReconnect">重连</button>
-                        <button id="pBtnMqttSave" class="primary">保存</button>
                     </div>
                 </div>
                 <div class="panel">
