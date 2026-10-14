@@ -337,24 +337,24 @@ body.mq-manual .auto-only{display:none !important;}
                 </div>
                 <div class="serial-pane active" id="sp-m-s1">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:4px 0;">
-                    <button id="btnReadCfg">读取配置</button>
-                    <button id="btnPullCfg" title="从 MQTT 平台重新拉取 485 配置到「拉取配置」槽（ds_pull）">重新拉取</button>
-                    <span class="hint" id="cfgSrcHint" hidden></span>
+                    <button id="mBtnReadCfg">读取配置</button>
+                    <button id="mBtnPullCfg" title="从 MQTT 平台重新拉取 485 配置到「拉取配置」槽（ds_pull）">重新拉取</button>
+                    <span class="hint" id="mCfgSrcHint" hidden></span>
                     <div style="margin-left: auto;"></div>
-                    <button id="btnSaveCfg" class="primary">保存配置</button>
+                    <button id="mBtnSaveCfg" class="primary">保存配置</button>
                 </div>
-                <div id="pushBanner" class="push-banner" hidden>
-                    <span id="pushBannerText"></span>
-                    <button id="btnPushView" class="primary">查看详情</button>
-                    <button id="btnPushIgnore" class="push-ignore">知道了</button>
+                <div id="mPushBanner" class="push-banner" hidden>
+                    <span id="mPushBannerText"></span>
+                    <button id="mBtnPushView" class="primary">查看详情</button>
+                    <button id="mBtnPushIgnore" class="push-ignore">知道了</button>
                 </div>
                 <div class="form-row">
                     <label>从站地址</label>
-                    <input id="inpSlave" type="number" value="1" min="1" max="247">
+                    <input id="mInpSlave" type="number" value="1" min="1" max="247">
                 </div>
                 <div class="form-row">
                     <label>串口1波特率</label>
-                    <select id="selBaud">
+                    <select id="mSelBaud">
                         <option>1200</option><option>2400</option><option>4800</option>
                         <option selected>9600</option>
                         <option>19200</option><option>38400</option><option>115200</option>
@@ -384,17 +384,17 @@ body.mq-manual .auto-only{display:none !important;}
                 </div>
                 <div class="form-row">
                     <label>轮询间隔(ms)</label>
-                    <input id="inpRound" type="number" value="3000" min="200" step="100">
+                    <input id="mInpRound" type="number" value="3000" min="200" step="100">
                 </div>
                 <div class="form-row">
                     <label>响应超时(ms)</label>
-                    <input id="inpTimeout" type="number" value="500" min="50" max="500" step="50">
+                    <input id="mInpTimeout" type="number" value="500" min="50" max="500" step="50">
                 </div>
                 <div class="panel">
                     <div class="panel-title">参数列表
                         <div class="spacer"></div>
-                        <button class="sm" id="btnReadVal">读实时值</button>
-                        <button class="sm" id="btnAddReg">新增寄存器</button>
+                        <button class="sm" id="mBtnReadVal">读实时值</button>
+                        <button class="sm" id="mBtnAddReg">新增寄存器</button>
                     </div>
                     <table class="param-table">
                         <thead>
@@ -411,36 +411,36 @@ body.mq-manual .auto-only{display:none !important;}
                                 <th style="width:60px;">操作</th>
                             </tr>
                         </thead>
-                        <tbody id="paramTbody"></tbody>
+                        <tbody id="mParamTbody"></tbody>
                     </table>
                 </div>
                 </div>
                 <div class="serial-pane" id="sp-m-s2">
                 <div class="panel">
                     <div class="panel-title">MQTT 连接
-                        <button class="sm" id="btnManualCfg" title="关闭时：用户名/密码/ClientID/Topic 由设备自动拼接；打开后：这几项自己填，保存生效">手动配置</button>
+                        <button class="sm" id="mBtnManualCfg" title="关闭时：用户名/密码/ClientID/Topic 由设备自动拼接；打开后：这几项自己填，保存生效">手动配置</button>
                         <div class="spacer"></div>
-                        <button class="sm" id="btnMqttRefresh">刷新</button>
+                        <button class="sm" id="mBtnMqttRefresh">刷新</button>
                     </div>
                     <div class="form-row">
                         <label>MQTT 服务器地址</label>
-                        <input id="mqHost" type="text" placeholder="如 dz.voltkun.com 或 192.168.1.10">
+                        <input id="mMqHost" type="text" placeholder="如 dz.voltkun.com 或 192.168.1.10">
                     </div>
                     <div class="form-row">
                         <label>端口</label>
-                        <input id="mqPort" type="number" value="1883" min="1" max="65535" style="max-width:140px;">
+                        <input id="mMqPort" type="number" value="1883" min="1" max="65535" style="max-width:140px;">
                         <label style="margin-left:16px;">TLS/SSL</label>
-                        <label class="switch"><input id="mqSsl" type="checkbox"><span class="sl"></span></label>
+                        <label class="switch"><input id="mMqSsl" type="checkbox"><span class="sl"></span></label>
                     </div>
                     <div class="form-row manual-only">
                         <label>用户名</label>
-                        <input id="mqUser" type="text" placeholder="留空即用设备 SN">
+                        <input id="mMqUser" type="text" placeholder="留空即用设备 SN">
                     </div>
                     <div class="form-row manual-only">
                         <label>密码</label>
                         <span class="pw-wrap">
-                            <input id="mqPass" type="password" placeholder="无则留空">
-                            <button type="button" class="pw-eye" id="btnMqttPassEye" title="显示密码">
+                            <input id="mMqPass" type="password" placeholder="无则留空">
+                            <button type="button" class="pw-eye" id="mBtnMqttPassEye" title="显示密码">
                                 <svg viewBox="0 0 16 16" aria-hidden="true">
                                     <path d="M8 2.5C4.4 2.5 1.4 5.6.3 8c1.1 2.4 4.1 5.5 7.7 5.5s6.6-3.1 7.7-5.5C14.6 5.6 11.6 2.5 8 2.5z"/>
                                     <circle cx="8" cy="8" r="2.6"/>
@@ -451,60 +451,60 @@ body.mq-manual .auto-only{display:none !important;}
                     </div>
                     <div class="form-row manual-only">
                         <label>ClientID</label>
-                        <input id="mqClientId" type="text" placeholder="留空即用设备 SN 加下划线，如 11802026092600016_">
+                        <input id="mMqClientId" type="text" placeholder="留空即用设备 SN 加下划线，如 11802026092600016_">
                     </div>
                     <div class="form-row manual-only">
                         <label>发布Topic</label>
-                        <input id="mqPub" type="text" placeholder="留空即用设备默认模板 /sys/thing/node/property/post/{SN}">
+                        <input id="mMqPub" type="text" placeholder="留空即用设备默认模板 /sys/thing/node/property/post/{SN}">
                     </div>
                     <div class="form-row manual-only">
                         <label>订阅Topic</label>
-                        <input id="mqSub" type="text" placeholder="留空即用设备默认模板 /sys/thing/gw/config/get/{SN}">
+                        <input id="mMqSub" type="text" placeholder="留空即用设备默认模板 /sys/thing/gw/config/get/{SN}">
                     </div>
                     <div class="form-row auto-only">
                         <label>上报周期(秒)</label>
-                        <input id="mqInterval" type="number" value="120" min="120" max="86400" style="max-width:140px;">
+                        <input id="mMqInterval" type="number" value="120" min="120" max="86400" style="max-width:140px;">
                     </div>
                     <div class="form-row" style="align-items:flex-start;">
                         <label style="padding-top:5px;">MQTT 会话管理</label>
-                        <select id="mqKeepSession" style="max-width:220px;">
+                        <select id="mMqKeepSession" style="max-width:220px;">
                             <option value="0" selected>离线自动销毁</option>
                             <option value="1">持久会话</option>
                         </select>
                     </div>
                     <div class="form-row">
                         <label>no_SN 建连</label>
-                        <label class="switch"><input id="mqAllowNoSn" type="checkbox"><span class="sl"></span></label>
+                        <label class="switch"><input id="mMqAllowNoSn" type="checkbox"><span class="sl"></span></label>
                         <span class="hint">默认关闭：防止多台未烧号设备撞同一 topic</span>
                     </div>
                     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;">
-                        <button id="btnMqttReset" class="danger">恢复默认</button>
-                        <button id="btnMqttReport">立即上报一次</button>
+                        <button id="mBtnMqttReset" class="danger">恢复默认</button>
+                        <button id="mBtnMqttReport">立即上报一次</button>
                         <div style="margin-left:auto;"></div>
-                        <button id="btnMqttReconnect">重连</button>
-                        <button id="btnMqttSave" class="primary">保存</button>
+                        <button id="mBtnMqttReconnect">重连</button>
+                        <button id="mBtnMqttSave" class="primary">保存</button>
                     </div>
                 </div>
                 <div class="panel">
                     <div class="panel-title">连接与上报状态</div>
                     <div class="kv-grid">
-                        <div class="kv"><b>连接状态</b><span id="mqStConn">--</span></div>
-                        <div class="kv"><b>ClientID</b><span id="mqStClientId">--</span></div>
-                        <div class="kv"><b>用户名</b><span id="mqStUser">--</span></div>
-                        <div class="kv"><b>设备编号</b><span id="mqStDevId">--</span></div>
-                        <div class="kv"><b>当前档次</b><span id="mqStMode">--</span></div>
-                        <div class="kv"><b>生效发布</b><span id="mqStPub">--</span></div>
-                        <div class="kv"><b>生效订阅</b><span id="mqStSub">--</span></div>
-                        <div class="kv"><b>已订阅</b><span id="mqStSubed">--</span></div>
-                        <div class="kv"><b>订阅Topic</b><span id="mqStSubs">--</span></div>
-                        <div class="kv"><b>配置回执</b><span id="mqStReplied">--</span></div>
-                        <div class="kv"><b>已上报条数</b><span id="mqStPubed">--</span></div>
-                        <div class="kv"><b>失败次数</b><span id="mqStFailed">--</span></div>
-                        <div class="kv"><b>最近上报</b><span id="mqStLast">--</span></div>
-                        <div class="kv"><b>重连退避</b><span id="mqStBackoff">--</span></div>
-                        <div class="kv"><b>会话管理</b><span id="mqStKeepSession">--</span></div>
-                        <div class="kv"><b>最近错误</b><span id="mqStErr">--</span></div>
-                        <div class="kv"><b>SN 状态</b><span id="mqStSn">--</span></div>
+                        <div class="kv"><b>连接状态</b><span id="mMqStConn">--</span></div>
+                        <div class="kv"><b>ClientID</b><span id="mMqStClientId">--</span></div>
+                        <div class="kv"><b>用户名</b><span id="mMqStUser">--</span></div>
+                        <div class="kv"><b>设备编号</b><span id="mMqStDevId">--</span></div>
+                        <div class="kv"><b>当前档次</b><span id="mMqStMode">--</span></div>
+                        <div class="kv"><b>生效发布</b><span id="mMqStPub">--</span></div>
+                        <div class="kv"><b>生效订阅</b><span id="mMqStSub">--</span></div>
+                        <div class="kv"><b>已订阅</b><span id="mMqStSubed">--</span></div>
+                        <div class="kv"><b>订阅Topic</b><span id="mMqStSubs">--</span></div>
+                        <div class="kv"><b>配置回执</b><span id="mMqStReplied">--</span></div>
+                        <div class="kv"><b>已上报条数</b><span id="mMqStPubed">--</span></div>
+                        <div class="kv"><b>失败次数</b><span id="mMqStFailed">--</span></div>
+                        <div class="kv"><b>最近上报</b><span id="mMqStLast">--</span></div>
+                        <div class="kv"><b>重连退避</b><span id="mMqStBackoff">--</span></div>
+                        <div class="kv"><b>会话管理</b><span id="mMqStKeepSession">--</span></div>
+                        <div class="kv"><b>最近错误</b><span id="mMqStErr">--</span></div>
+                        <div class="kv"><b>SN 状态</b><span id="mMqStSn">--</span></div>
                     </div>
                 </div>
                 </div>
@@ -518,24 +518,24 @@ body.mq-manual .auto-only{display:none !important;}
                 </div>
                 <div class="serial-pane active" id="sp-p-s1">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:4px 0;">
-                    <button id="btnReadCfg">读取配置</button>
-                    <button id="btnPullCfg" title="从 MQTT 平台重新拉取 485 配置到「拉取配置」槽（ds_pull）">重新拉取</button>
-                    <span class="hint" id="cfgSrcHint" hidden></span>
+                    <button id="pBtnReadCfg">读取配置</button>
+                    <button id="pBtnPullCfg" title="从 MQTT 平台重新拉取 485 配置到「拉取配置」槽（ds_pull）">重新拉取</button>
+                    <span class="hint" id="pCfgSrcHint" hidden></span>
                     <div style="margin-left: auto;"></div>
-                    <button id="btnSaveCfg" class="primary">保存配置</button>
+                    <button id="pBtnSaveCfg" class="primary">保存配置</button>
                 </div>
-                <div id="pushBanner" class="push-banner" hidden>
-                    <span id="pushBannerText"></span>
-                    <button id="btnPushView" class="primary">查看详情</button>
-                    <button id="btnPushIgnore" class="push-ignore">知道了</button>
+                <div id="pPushBanner" class="push-banner" hidden>
+                    <span id="pPushBannerText"></span>
+                    <button id="pBtnPushView" class="primary">查看详情</button>
+                    <button id="pBtnPushIgnore" class="push-ignore">知道了</button>
                 </div>
                 <div class="form-row">
                     <label>从站地址</label>
-                    <input id="inpSlave" type="number" value="1" min="1" max="247">
+                    <input id="pInpSlave" type="number" value="1" min="1" max="247">
                 </div>
                 <div class="form-row">
                     <label>串口1波特率</label>
-                    <select id="selBaud">
+                    <select id="pSelBaud">
                         <option>1200</option><option>2400</option><option>4800</option>
                         <option selected>9600</option>
                         <option>19200</option><option>38400</option><option>115200</option>
@@ -565,17 +565,17 @@ body.mq-manual .auto-only{display:none !important;}
                 </div>
                 <div class="form-row">
                     <label>轮询间隔(ms)</label>
-                    <input id="inpRound" type="number" value="3000" min="200" step="100">
+                    <input id="pInpRound" type="number" value="3000" min="200" step="100">
                 </div>
                 <div class="form-row">
                     <label>响应超时(ms)</label>
-                    <input id="inpTimeout" type="number" value="500" min="50" max="500" step="50">
+                    <input id="pInpTimeout" type="number" value="500" min="50" max="500" step="50">
                 </div>
                 <div class="panel">
                     <div class="panel-title">参数列表
                         <div class="spacer"></div>
-                        <button class="sm" id="btnReadVal">读实时值</button>
-                        <button class="sm" id="btnAddReg">新增寄存器</button>
+                        <button class="sm" id="pBtnReadVal">读实时值</button>
+                        <button class="sm" id="pBtnAddReg">新增寄存器</button>
                     </div>
                     <table class="param-table">
                         <thead>
@@ -592,36 +592,36 @@ body.mq-manual .auto-only{display:none !important;}
                                 <th style="width:60px;">操作</th>
                             </tr>
                         </thead>
-                        <tbody id="paramTbody"></tbody>
+                        <tbody id="pParamTbody"></tbody>
                     </table>
                 </div>
                 </div>
                 <div class="serial-pane" id="sp-p-s2">
                 <div class="panel">
                     <div class="panel-title">MQTT 连接
-                        <button class="sm" id="btnManualCfg" title="关闭时：用户名/密码/ClientID/Topic 由设备自动拼接；打开后：这几项自己填，保存生效">手动配置</button>
+                        <button class="sm" id="pBtnManualCfg" title="关闭时：用户名/密码/ClientID/Topic 由设备自动拼接；打开后：这几项自己填，保存生效">手动配置</button>
                         <div class="spacer"></div>
-                        <button class="sm" id="btnMqttRefresh">刷新</button>
+                        <button class="sm" id="pBtnMqttRefresh">刷新</button>
                     </div>
                     <div class="form-row">
                         <label>MQTT 服务器地址</label>
-                        <input id="mqHost" type="text" placeholder="如 dz.voltkun.com 或 192.168.1.10">
+                        <input id="pMqHost" type="text" placeholder="如 dz.voltkun.com 或 192.168.1.10">
                     </div>
                     <div class="form-row">
                         <label>端口</label>
-                        <input id="mqPort" type="number" value="1883" min="1" max="65535" style="max-width:140px;">
+                        <input id="pMqPort" type="number" value="1883" min="1" max="65535" style="max-width:140px;">
                         <label style="margin-left:16px;">TLS/SSL</label>
-                        <label class="switch"><input id="mqSsl" type="checkbox"><span class="sl"></span></label>
+                        <label class="switch"><input id="pMqSsl" type="checkbox"><span class="sl"></span></label>
                     </div>
                     <div class="form-row manual-only">
                         <label>用户名</label>
-                        <input id="mqUser" type="text" placeholder="留空即用设备 SN">
+                        <input id="pMqUser" type="text" placeholder="留空即用设备 SN">
                     </div>
                     <div class="form-row manual-only">
                         <label>密码</label>
                         <span class="pw-wrap">
-                            <input id="mqPass" type="password" placeholder="无则留空">
-                            <button type="button" class="pw-eye" id="btnMqttPassEye" title="显示密码">
+                            <input id="pMqPass" type="password" placeholder="无则留空">
+                            <button type="button" class="pw-eye" id="pBtnMqttPassEye" title="显示密码">
                                 <svg viewBox="0 0 16 16" aria-hidden="true">
                                     <path d="M8 2.5C4.4 2.5 1.4 5.6.3 8c1.1 2.4 4.1 5.5 7.7 5.5s6.6-3.1 7.7-5.5C14.6 5.6 11.6 2.5 8 2.5z"/>
                                     <circle cx="8" cy="8" r="2.6"/>
@@ -632,60 +632,60 @@ body.mq-manual .auto-only{display:none !important;}
                     </div>
                     <div class="form-row manual-only">
                         <label>ClientID</label>
-                        <input id="mqClientId" type="text" placeholder="留空即用设备 SN 加下划线，如 11802026092600016_">
+                        <input id="pMqClientId" type="text" placeholder="留空即用设备 SN 加下划线，如 11802026092600016_">
                     </div>
                     <div class="form-row manual-only">
                         <label>发布Topic</label>
-                        <input id="mqPub" type="text" placeholder="留空即用设备默认模板 /sys/thing/node/property/post/{SN}">
+                        <input id="pMqPub" type="text" placeholder="留空即用设备默认模板 /sys/thing/node/property/post/{SN}">
                     </div>
                     <div class="form-row manual-only">
                         <label>订阅Topic</label>
-                        <input id="mqSub" type="text" placeholder="留空即用设备默认模板 /sys/thing/gw/config/get/{SN}">
+                        <input id="pMqSub" type="text" placeholder="留空即用设备默认模板 /sys/thing/gw/config/get/{SN}">
                     </div>
                     <div class="form-row auto-only">
                         <label>上报周期(秒)</label>
-                        <input id="mqInterval" type="number" value="120" min="120" max="86400" style="max-width:140px;">
+                        <input id="pMqInterval" type="number" value="120" min="120" max="86400" style="max-width:140px;">
                     </div>
                     <div class="form-row" style="align-items:flex-start;">
                         <label style="padding-top:5px;">MQTT 会话管理</label>
-                        <select id="mqKeepSession" style="max-width:220px;">
+                        <select id="pMqKeepSession" style="max-width:220px;">
                             <option value="0" selected>离线自动销毁</option>
                             <option value="1">持久会话</option>
                         </select>
                     </div>
                     <div class="form-row">
                         <label>no_SN 建连</label>
-                        <label class="switch"><input id="mqAllowNoSn" type="checkbox"><span class="sl"></span></label>
+                        <label class="switch"><input id="pMqAllowNoSn" type="checkbox"><span class="sl"></span></label>
                         <span class="hint">默认关闭：防止多台未烧号设备撞同一 topic</span>
                     </div>
                     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;">
-                        <button id="btnMqttReset" class="danger">恢复默认</button>
-                        <button id="btnMqttReport">立即上报一次</button>
+                        <button id="pBtnMqttReset" class="danger">恢复默认</button>
+                        <button id="pBtnMqttReport">立即上报一次</button>
                         <div style="margin-left:auto;"></div>
-                        <button id="btnMqttReconnect">重连</button>
-                        <button id="btnMqttSave" class="primary">保存</button>
+                        <button id="pBtnMqttReconnect">重连</button>
+                        <button id="pBtnMqttSave" class="primary">保存</button>
                     </div>
                 </div>
                 <div class="panel">
                     <div class="panel-title">连接与上报状态</div>
                     <div class="kv-grid">
-                        <div class="kv"><b>连接状态</b><span id="mqStConn">--</span></div>
-                        <div class="kv"><b>ClientID</b><span id="mqStClientId">--</span></div>
-                        <div class="kv"><b>用户名</b><span id="mqStUser">--</span></div>
-                        <div class="kv"><b>设备编号</b><span id="mqStDevId">--</span></div>
-                        <div class="kv"><b>当前档次</b><span id="mqStMode">--</span></div>
-                        <div class="kv"><b>生效发布</b><span id="mqStPub">--</span></div>
-                        <div class="kv"><b>生效订阅</b><span id="mqStSub">--</span></div>
-                        <div class="kv"><b>已订阅</b><span id="mqStSubed">--</span></div>
-                        <div class="kv"><b>订阅Topic</b><span id="mqStSubs">--</span></div>
-                        <div class="kv"><b>配置回执</b><span id="mqStReplied">--</span></div>
-                        <div class="kv"><b>已上报条数</b><span id="mqStPubed">--</span></div>
-                        <div class="kv"><b>失败次数</b><span id="mqStFailed">--</span></div>
-                        <div class="kv"><b>最近上报</b><span id="mqStLast">--</span></div>
-                        <div class="kv"><b>重连退避</b><span id="mqStBackoff">--</span></div>
-                        <div class="kv"><b>会话管理</b><span id="mqStKeepSession">--</span></div>
-                        <div class="kv"><b>最近错误</b><span id="mqStErr">--</span></div>
-                        <div class="kv"><b>SN 状态</b><span id="mqStSn">--</span></div>
+                        <div class="kv"><b>连接状态</b><span id="pMqStConn">--</span></div>
+                        <div class="kv"><b>ClientID</b><span id="pMqStClientId">--</span></div>
+                        <div class="kv"><b>用户名</b><span id="pMqStUser">--</span></div>
+                        <div class="kv"><b>设备编号</b><span id="pMqStDevId">--</span></div>
+                        <div class="kv"><b>当前档次</b><span id="pMqStMode">--</span></div>
+                        <div class="kv"><b>生效发布</b><span id="pMqStPub">--</span></div>
+                        <div class="kv"><b>生效订阅</b><span id="pMqStSub">--</span></div>
+                        <div class="kv"><b>已订阅</b><span id="pMqStSubed">--</span></div>
+                        <div class="kv"><b>订阅Topic</b><span id="pMqStSubs">--</span></div>
+                        <div class="kv"><b>配置回执</b><span id="pMqStReplied">--</span></div>
+                        <div class="kv"><b>已上报条数</b><span id="pMqStPubed">--</span></div>
+                        <div class="kv"><b>失败次数</b><span id="pMqStFailed">--</span></div>
+                        <div class="kv"><b>最近上报</b><span id="pMqStLast">--</span></div>
+                        <div class="kv"><b>重连退避</b><span id="pMqStBackoff">--</span></div>
+                        <div class="kv"><b>会话管理</b><span id="pMqStKeepSession">--</span></div>
+                        <div class="kv"><b>最近错误</b><span id="pMqStErr">--</span></div>
+                        <div class="kv"><b>SN 状态</b><span id="pMqStSn">--</span></div>
                     </div>
                 </div>
                 </div>

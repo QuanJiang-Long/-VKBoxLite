@@ -92,11 +92,55 @@ const el = new Proxy({
   btnImport: $('btnImport'), btnExport: $('btnExport'), btnReadInfo: $('btnReadInfo'),
   fSn: $('fSn'), fImei: $('fImei'), fIccid: $('fIccid'), fCsq: $('fCsq'),
   fVer: $('fVer'), fProj: $('fProj'), fUrl: $('fUrl'),
+  // tabPoll 内的引用 (Step 2a 之前业务用这些, 现在仍保留作 fallback)
   btnReadCfg: $('btnReadCfg'), btnSaveCfg: $('btnSaveCfg'), btnPullCfg: $('btnPullCfg'),
   cfgSrcHint: $('cfgSrcHint'),
   selBaud: $('selBaud'), inpRound: $('inpRound'),
   inpSlave: $('inpSlave'), inpTimeout: $('inpTimeout'),
   btnReadVal: $('btnReadVal'), btnAddReg: $('btnAddReg'), paramTbody: $('paramTbody'),
+  btnManualCfg: $('btnManualCfg'),
+  btnMqttRefresh: $('btnMqttRefresh'), btnMqttSave: $('btnMqttSave'),
+  btnMqttReport: $('btnMqttReport'), btnMqttReset: $('btnMqttReset'),
+  mqHost: $('mqHost'), mqPort: $('mqPort'), mqSsl: $('mqSsl'), mqUser: $('mqUser'),
+  mqPass: $('mqPass'), mqClientId: $('mqClientId'),
+  btnMqttPassEye: $('btnMqttPassEye'),
+  mqPub: $('mqPub'), mqSub: $('mqSub'),
+  mqInterval: $('mqInterval'),
+  mqAllowNoSn: $('mqAllowNoSn'),
+  mqKeepSession: $('mqKeepSession'),
+  // ====== Step 2a: tabManual 内的 m- 前缀引用 ======
+  mBtnReadCfg: $('mBtnReadCfg'), mBtnSaveCfg: $('mBtnSaveCfg'), mBtnPullCfg: $('mBtnPullCfg'),
+  mCfgSrcHint: $('mCfgSrcHint'),
+  mSelBaud: $('mSelBaud'), mInpRound: $('mInpRound'),
+  mInpSlave: $('mInpSlave'), mInpTimeout: $('mInpTimeout'),
+  mBtnReadVal: $('mBtnReadVal'), mBtnAddReg: $('mBtnAddReg'), mParamTbody: $('mParamTbody'),
+  mBtnManualCfg: $('mBtnManualCfg'),
+  mBtnMqttRefresh: $('mBtnMqttRefresh'), mBtnMqttSave: $('mBtnMqttSave'),
+  mBtnMqttReport: $('mBtnMqttReport'), mBtnMqttReset: $('mBtnMqttReset'),
+  mMqHost: $('mMqHost'), mMqPort: $('mMqPort'), mMqSsl: $('mMqSsl'), mMqUser: $('mMqUser'),
+  mMqPass: $('mMqPass'), mMqClientId: $('mMqClientId'),
+  mBtnMqttPassEye: $('mBtnMqttPassEye'),
+  mMqPub: $('mMqPub'), mMqSub: $('mMqSub'),
+  mMqInterval: $('mMqInterval'),
+  mMqAllowNoSn: $('mMqAllowNoSn'),
+  mMqKeepSession: $('mMqKeepSession'),
+  // ====== Step 2a: tabPlatform 内的 p- 前缀引用 ======
+  pBtnReadCfg: $('pBtnReadCfg'), pBtnSaveCfg: $('pBtnSaveCfg'), pBtnPullCfg: $('pBtnPullCfg'),
+  pCfgSrcHint: $('pCfgSrcHint'),
+  pSelBaud: $('pSelBaud'), pInpRound: $('pInpRound'),
+  pInpSlave: $('pInpSlave'), pInpTimeout: $('pInpTimeout'),
+  pBtnReadVal: $('pBtnReadVal'), pBtnAddReg: $('pBtnAddReg'), pParamTbody: $('pParamTbody'),
+  pBtnManualCfg: $('pBtnManualCfg'),
+  pBtnMqttRefresh: $('pBtnMqttRefresh'), pBtnMqttSave: $('pBtnMqttSave'),
+  pBtnMqttReport: $('pBtnMqttReport'), pBtnMqttReset: $('pBtnMqttReset'),
+  pMqHost: $('pMqHost'), pMqPort: $('pMqPort'), pMqSsl: $('pMqSsl'), pMqUser: $('pMqUser'),
+  pMqPass: $('pMqPass'), pMqClientId: $('pMqClientId'),
+  pBtnMqttPassEye: $('pBtnMqttPassEye'),
+  pMqPub: $('pMqPub'), pMqSub: $('pMqSub'),
+  pMqInterval: $('pMqInterval'),
+  pMqAllowNoSn: $('pMqAllowNoSn'),
+  pMqKeepSession: $('pMqKeepSession'),
+  // ====== 共享元素 (仅在 tab0/tabSniff 用, 没拆) ======
   stPort: $('stPort'), stDev: $('stDev'), stSn: $('stSn'), stMode: $('stMode'),
   stMqtt: $('stMqtt'), stMsg: $('stMsg'), toast: $('toast'),
   // 运行模式页
@@ -109,21 +153,6 @@ const el = new Proxy({
   hMqClientIdHint: $('hMqClientIdHint'),
   hMqPass: $('hMqPass'), btnHomeMqttPassEye: $('btnHomeMqttPassEye'),
   btnHomeMqttSave: $('btnHomeMqttSave'),
-  // MQTT 页
-  btnManualCfg: $('btnManualCfg'),
-  btnMqttRefresh: $('btnMqttRefresh'), btnMqttSave: $('btnMqttSave'),
-  btnMqttReport: $('btnMqttReport'), btnMqttReset: $('btnMqttReset'),
-  mqHost: $('mqHost'), mqPort: $('mqPort'), mqSsl: $('mqSsl'), mqUser: $('mqUser'),
-  mqPass: $('mqPass'), mqClientId: $('mqClientId'),
-  // 密码框右侧小眼睛：显/隐切换
-  btnMqttPassEye: $('btnMqttPassEye'),
-  // 发布/订阅 Topic：只属于手动档（.manual-only），自动档整行藏掉。
-  // 手动档连的是用户自己的 broker，这两条由用户填；自动档走设备默认模板
-  mqPub: $('mqPub'), mqSub: $('mqSub'),
-  mqInterval: $('mqInterval'),
-  mqAllowNoSn: $('mqAllowNoSn'),
-  // MQTT 会话管理：select（离线自动销毁=0 / 持久会话=1），不是开关
-  mqKeepSession: $('mqKeepSession'),
   // sniff 页面简版 MQTT 配置 (只读 broker + 可改上报周期, 跟 sp-s2 共享 mqManual + mqDirty)
   snMqHost: $('snMqHost'),
   snMqPort: $('snMqPort'),
@@ -144,6 +173,16 @@ const el = new Proxy({
   // 取不到返回 null，由调用方判空
   get(t, k) { return t[k] !== undefined ? t[k] : $(k); }
 });
+
+// Step 2a: E(prefix, id) helper — 取当前档位对应的元素引用
+// 例: E('m', 'mqHost') = el.mMqHost,  E('p', 'mqHost') = el.pMqHost
+// 业务调用前先按 S.mode 选 prefix:
+//   const h = E(isManual(S.mode) ? 'm' : (isPlatform(S.mode) ? 'p' : ''), 'mqHost');
+// Step 2b 开始在 readMqtt/renderMqtt 用上
+function E(prefix, id) {
+  if (!prefix) return el[id];                     // tabPoll (无前缀)
+  return el[prefix + id[0].toUpperCase() + id.slice(1)];
+}
 
 //---------------------------------------------------------------------
 // 基础 UI 辅助
