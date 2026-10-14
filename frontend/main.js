@@ -50,8 +50,17 @@ function createWindow() {
     }
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  // 需要调试时打开：
-  // win.webContents.openDevTools();
+  // F12 切换 DevTools (Electron 默认没绑, 这里加上)
+  // webContents.devToolsOpened 跟踪当前状态, 按 F12 时切换
+  let devToolsOpen = false;
+  win.webContents.on('devtools-opened', () => { devToolsOpen = true; });
+  win.webContents.on('devtools-closed', () => { devToolsOpen = false; });
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.key === 'F12' && input.type === 'keyDown') {
+      if (devToolsOpen) win.webContents.closeDevTools();
+      else win.webContents.openDevTools();
+    }
+  });
 }
 
 //---------------------------------------------------------------------
