@@ -870,7 +870,7 @@ async function pullCfg() {
       toast('拉取失败：' + ((d && d.msg) || '未知原因'));
       return;
     }
-    fillFormFromPlatform(d);
+    fillFormFromPlatform(d, cfgPrefix());  // Step 2f: 传 pre, 填当前 tab 内的元素
     // 不用在这里切 MQTT 档位了: poll（拉取配置）模式下设备侧 ctrl 已经强制
     // 自动档(manual_on=false)，MQTT 页读一次就是这个状态
     snapClean();                       // 拉回来的值成为新基线，不再是「未保存」
@@ -900,16 +900,18 @@ async function pullCfg() {
 }
 
 // 把平台拉回的配置填进表单。只填不存：W:CFG/W:MQTT 全由用户点保存触发
-function fillFormFromPlatform(d) {
+// Step 2f: 拆 m/p 分支, pre 由 pullCfg 传 cfgPrefix() 进来
+function fillFormFromPlatform(d, pre) {
+  if (pre === undefined) pre = cfgPrefix();
   const p = d.poll || {};
-  if (p.baud) el.selBaud.value = String(p.baud);
+  if (p.baud) E(pre, 'selBaud').value = String(p.baud);
   if (p.databits) setRadio('databits', String(p.databits));
   if (p.parity != null) setRadio('parity', String(p.parity));
   if (p.stopbits) setRadio('stopbits', String(p.stopbits));
-  if (p.slave) el.inpSlave.value = p.slave;
+  if (p.slave) E(pre, 'inpSlave').value = p.slave;
   if (p.regs) {
     S.regs = toArr(p.regs);
-    renderRegTable();
+    renderRegTable(pre);
   }
   if (d.mqtt) {
     // MQTT 段里已无 topic：发布/订阅两档都是设备固定平台常量，界面不显示
@@ -2124,26 +2126,30 @@ async function txHex() {
 //---------------------------------------------------------------------
 // 导入 / 导出配置（JSON 文件）
 //---------------------------------------------------------------------
-function exportCfg() {
-  const c = collectCfg();
+function exportCfg(pre) {
+  // Step 2f: 拆 m/p 分支, 读当前 tab 内的 485 + MQTT 字段, 切档时不再导出
+  // 错档的内容 (之前 el.xxx 只读 tabPoll 内的, 切 manual tab 改 485 后导
+  // 出的还是 tabPoll 内的旧值)
+  if (pre === undefined) pre = cfgPrefix();
+  const c = collectCfg(pre);
   if (!c.ok) { toast('当前表单配置无效，无法导出：' + c.err); return; }
   const data = {
     tool: 'VKBox配置工具', version: '2.0.0',
     exported: new Date().toISOString(),
     serial: c.cfg,
-    registers: collectRegs(),
+    registers: collectRegs(pre),
     mqtt: {
-      host: el.mqHost.value.trim(), port: parseInt(el.mqPort.value, 10) || 1883,
-      ssl: el.mqSsl.checked, user: el.mqUser.value.trim(),
+      host: E(pre, 'mqHost').value.trim(), port: parseInt(E(pre, 'mqPort').value, 10) || 1883,
+      ssl: E(pre, 'mqSsl').checked, user: E(pre, 'mqUser').value.trim(),
       // 手动档凭证 + 自动档凭证密码分两个键，与设备端一致
-      pass: el.mqPass.value,
-      client_id: el.mqClientId.value.trim(),
+      pass: E(pre, 'mqPass').value,
+      client_id: E(pre, 'mqClientId').value.trim(),
       // 手动档 topic。留空 = 用设备默认模板
-      pub_topic: el.mqPub.value.trim(),
-      sub_topic: el.mqSub.value.trim(),
-      interval_s: parseInt(el.mqInterval.value, 10) || 0,
-      allow_no_sn: el.mqAllowNoSn.checked,
-      keep_session: el.mqKeepSession.value === '1',
+      pub_topic: E(pre, 'mqPub').value.trim(),
+      sub_topic: E(pre, 'mqSub').value.trim(),
+      interval_s: parseInt(E(pre, 'mqInterval').value, 10) || 0,
+      allow_no_sn: E(pre, 'mqAllowNoSn').checked,
+      keep_session: E(pre, 'mqKeepSession').value === '1',
       auto: { pass: (S.mqtt && S.mqtt.auto_pass) || '' },
       manual_on: S.mqManual
     }
@@ -2157,7 +2163,10 @@ function exportCfg() {
   toast('配置已导出');
 }
 
-async function importCfg() {
+async function importCfg(pre) {
+  // Step 2f: 拆 m/p 分支, 填当前 tab 内的 485 + MQTT 字段. pre 由
+  // btnImport.onclick 传 cfgPrefix() 进来
+  if (pre === undefined) pre = cfgPrefix();
   // 先问再弹文件选择框：顺序反了的话用户选完文件才被告知会丢改动，白选一趟
   if (!await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
   const inp = document.createElement('input');
@@ -2171,36 +2180,36 @@ async function importCfg() {
       try {
         const d = JSON.parse(rd.result);
         const c = d.serial || d.cfg || {};
-        if (c.baud) el.selBaud.value = String(c.baud);
+        if (c.baud) E(pre, 'selBaud').value = String(c.baud);
         if (c.databits) setRadio('databits', String(c.databits));
         if (c.parity != null) setRadio('parity', String(c.parity));
         if (c.stopbits) setRadio('stopbits', String(c.stopbits));
-        if (c.interval_ms) el.inpRound.value = c.interval_ms;
-        if (c.slave) el.inpSlave.value = c.slave;
-        el.inpTimeout.value = (c.timeout_ms == null || c.timeout_ms === '') ? '' : c.timeout_ms;
+        if (c.interval_ms) E(pre, 'inpRound').value = c.interval_ms;
+        if (c.slave) E(pre, 'inpSlave').value = c.slave;
+        E(pre, 'inpTimeout').value = (c.timeout_ms == null || c.timeout_ms === '') ? '' : c.timeout_ms;
         if (c.server) el.fUrl.value = c.server;
         const regs = d.registers || d.regs || [];
         S.regs = toArr(regs);
-        renderRegTable();
+        renderRegTable(pre);
         if (d.mqtt) {
-          el.mqHost.value = d.mqtt.host || '';
-          el.mqPort.value = d.mqtt.port || 1883;
-          el.mqSsl.checked = !!d.mqtt.ssl;
-          el.mqUser.value = d.mqtt.user || '';
-          el.mqPass.value = d.mqtt.pass || '';
-          el.mqClientId.value = d.mqtt.client_id || '';
+          E(pre, 'mqHost').value = d.mqtt.host || '';
+          E(pre, 'mqPort').value = d.mqtt.port || 1883;
+          E(pre, 'mqSsl').checked = !!d.mqtt.ssl;
+          E(pre, 'mqUser').value = d.mqtt.user || '';
+          E(pre, 'mqPass').value = d.mqtt.pass || '';
+          E(pre, 'mqClientId').value = d.mqtt.client_id || '';
           // 发布/订阅 topic：手动档专属，导入时一并带进来
-          el.mqPub.value = d.mqtt.pub_topic || '';
-          el.mqSub.value = d.mqtt.sub_topic || '';
-          el.mqInterval.value = d.mqtt.interval_s != null ? d.mqtt.interval_s : 120;
-          el.mqAllowNoSn.checked = !!d.mqtt.allow_no_sn;
-          el.mqKeepSession.value = d.mqtt.keep_session ? '1' : '0';
+          E(pre, 'mqPub').value = d.mqtt.pub_topic || '';
+          E(pre, 'mqSub').value = d.mqtt.sub_topic || '';
+          E(pre, 'mqInterval').value = d.mqtt.interval_s != null ? d.mqtt.interval_s : 120;
+          E(pre, 'mqAllowNoSn').checked = !!d.mqtt.allow_no_sn;
+          E(pre, 'mqKeepSession').value = d.mqtt.keep_session ? '1' : '0';
           // 自动档凭证密码回首页那个框；档次按钮按导入的 manual_on 切
           if (el.hMqPass && d.mqtt.auto) el.hMqPass.value = d.mqtt.auto.pass || '';
           setManualMode(!!d.mqtt.manual_on, { refill: true });
         }
         toast('配置已导入：' + regs.length + ' 个寄存器');
-        snapClean();                   // 导入的内容成为新基线
+        snapClean(pre);                // 导入的内容成为新基线
       } catch (e) {
         toast('导入失败：不是合法的 JSON 配置文件');
       }
@@ -2252,8 +2261,10 @@ document.querySelectorAll('#pBtnPullCfg, #btnPullCfg').forEach(b => { b.onclick 
 document.querySelectorAll('#mBtnAddReg, #btnAddReg').forEach(b => { b.onclick = addParamRow; });
 document.querySelectorAll('#mBtnReadVal, #pBtnReadVal, #btnReadVal').forEach(b => { b.onclick = readVal; });
 el.btnReadVal.onclick = readVal;
-el.btnImport.onclick = importCfg;
-el.btnExport.onclick = exportCfg;
+// Step 2f: importCfg / exportCfg 拆 m/p 后, 顶部 btnImport / btnExport
+// 仍只 1 份 (top-bar 全局), 调时把当前档位 pre 传进去
+el.btnImport.onclick = () => importCfg(cfgPrefix());
+el.btnExport.onclick = () => exportCfg(cfgPrefix());
 el.comSel.onchange = () => { S.port = el.comSel.value; };
 
 // 平台推送横幅：查看 = 走 pullCfg 读设备已解析好的那份；
