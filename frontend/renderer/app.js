@@ -1248,10 +1248,14 @@ function renderMode() {
 //=====================================================================
 function syncTabs() {
   const mode = S.mode || 'idle';
-  // platform 归到 poll 页: 拉取档一样要看寄存器表和 MQTT 状态, 只是配置
-  // 来源不同(平台 vs 手配)。少开一个栏目, 用户也不用理解"为什么两个 poll 页"
+  // Step 1a: tabManual/tabPlatform 各管自己档位, tabPoll 完全隐藏
+  // (后续 Step 1b 决定删/留)。tabManual/tabPlatform 内容跟 tabPoll
+  // 一模一样, 业务 0 改 → getElementById 仍拿 tabPoll 内元素,
+  // 切到新 tab 看到内容但响应跟 tabPoll 同步
   const show = { tab0: true, tabMode: true,
-    tabPoll: isManual(mode) || isPlatform(mode),
+    tabManual: isManual(mode),
+    tabPlatform: isPlatform(mode),
+    tabPoll: false,
     tabSniff: mode === 'sniff' };
   Object.keys(show).forEach(id => {
     const t = document.querySelector('.tab-header .tab-item[data-tab="' + id + '"]');
