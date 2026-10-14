@@ -2124,12 +2124,126 @@ async function txHex() {
 }
 
 //---------------------------------------------------------------------
-// 导入 / 导出配置（JSON 文件）
+// 导入 / 导出配置（JSON / CSV 两种格式）
+// 2h: 加 CSV 支持, 中文列名 (Excel 直接打开), 用扩展名/弹窗选 走对应格式
 //---------------------------------------------------------------------
-function exportCfg(pre) {
-  // Step 2f: 拆 m/p 分支, 读当前 tab 内的 485 + MQTT 字段, 切档时不再导出
-  // 错档的内容 (之前 el.xxx 只读 tabPoll 内的, 切 manual tab 改 485 后导
-  // 出的还是 tabPoll 内的旧值)
+// 列名(中文, 用户 Excel 看到的) -> 内部 key (跟 JSON 字段对齐, 走同样导入流程)
+const CSV_COLS = {
+  serial: [
+    ['波特率', 'baud'],
+    ['数据位', 'databits'],
+    ['校验位', 'parity'],
+    ['停止位', 'stopbits'],
+    ['从机地址', 'slave'],
+    ['轮询间隔ms', 'interval_ms'],
+    ['响应超时ms', 'timeout_ms']
+  ],
+  registers: [
+    ['地址', 'addr'],
+    ['数据类型', 'dtype'],
+    ['寄存器个数', 'count'],
+    ['标识符', 'name'],
+    ['中文名', 'alias']
+  ],
+  mqtt: [
+    ['服务器地址', 'host'],
+    ['端口', 'port'],
+    ['SSL', 'ssl'],
+    ['用户名', 'user'],
+    ['密码', 'pass'],
+    ['ClientID', 'client_id'],
+    ['发布Topic', 'pub_topic'],
+    ['订阅Topic', 'sub_topic'],
+    ['上报周期秒', 'interval_s']
+  ]
+};
+function csvEscape(s) {
+  if (s == null) return '';
+  s = String(s);
+  if (s.indexOf(',') >= 0 || s.indexOf('"') >= 0 || s.indexOf('\n') >= 0) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+function parseCsvLine(line) {
+  const cells = [];
+  let cur = '';
+  let inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inQuote) {
+      if (c === '"' && line[i+1] === '"') { cur += '"'; i++; }
+      else if (c === '"') { inQuote = false; }
+      else { cur += c; }
+    } else {
+      if (c === ',') { cells.push(cur); cur = ''; }
+      else if (c === '"' && cur === '') { inQuote = true; }
+      else { cur += c; }
+    }
+  }
+  cells.push(cur);
+  return cells;
+}
+function toCsv(data) {
+  const lines = [
+    '# VKBox 配置导出',
+    '# 导出时间: ' + new Date().toISOString(),
+    ''
+  ];
+  lines.push('[serial]');
+  const sCols = CSV_COLS.serial;
+  lines.push(sCols.map(c => csvEscape(c[0])).join(','));
+  const s = data.serial || {};
+  lines.push(sCols.map(c => csvEscape(s[c[1]])).join(','));
+  lines.push('');
+  lines.push('[registers]');
+  const rCols = CSV_COLS.registers;
+  lines.push(rCols.map(c => csvEscape(c[0])).join(','));
+  for (const r of (data.registers || [])) {
+    lines.push(rCols.map(c => csvEscape(r[c[1]])).join(','));
+  }
+  lines.push('');
+  lines.push('[mqtt]');
+  const mCols = CSV_COLS.mqtt;
+  lines.push(mCols.map(c => csvEscape(c[0])).join(','));
+  const m = data.mqtt || {};
+  lines.push(mCols.map(c => csvEscape(m[c[1]])).join(','));
+  return lines.join('\n');
+}
+function parseCsv(text) {
+  const lines = text.split(/\r?\n/);
+  let section = null;
+  let headers = null;
+  const result = { serial: {}, registers: [], mqtt: {} };
+  for (let line of lines) {
+    line = line.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (line.startsWith('[') && line.endsWith(']')) {
+      section = line.slice(1, -1);
+      headers = null;
+      continue;
+    }
+    if (!section) continue;
+    const cells = parseCsvLine(line);
+    if (!headers) { headers = cells; continue; }
+    if (section === 'serial') {
+      const cols = CSV_COLS.serial;
+      for (let i = 0; i < cols.length; i++) result.serial[cols[i][1]] = cells[i] || '';
+    } else if (section === 'registers') {
+      const cols = CSV_COLS.registers;
+      const reg = {};
+      for (let i = 0; i < cols.length; i++) reg[cols[i][1]] = cells[i] || '';
+      result.registers.push(reg);
+    } else if (section === 'mqtt') {
+      const cols = CSV_COLS.mqtt;
+      for (let i = 0; i < cols.length; i++) result.mqtt[cols[i][1]] = cells[i] || '';
+    }
+  }
+  return result;
+}
+
+// data: { serial, registers, mqtt } - 内部统一格式
+function exportCfgAsJson(pre) {
   if (pre === undefined) pre = cfgPrefix();
   const c = collectCfg(pre);
   if (!c.ok) { toast('当前表单配置无效，无法导出：' + c.err); return; }
@@ -2141,10 +2255,8 @@ function exportCfg(pre) {
     mqtt: {
       host: E(pre, 'mqHost').value.trim(), port: parseInt(E(pre, 'mqPort').value, 10) || 1883,
       ssl: E(pre, 'mqSsl').checked, user: E(pre, 'mqUser').value.trim(),
-      // 手动档凭证 + 自动档凭证密码分两个键，与设备端一致
       pass: E(pre, 'mqPass').value,
       client_id: E(pre, 'mqClientId').value.trim(),
-      // 手动档 topic。留空 = 用设备默认模板
       pub_topic: E(pre, 'mqPub').value.trim(),
       sub_topic: E(pre, 'mqSub').value.trim(),
       interval_s: parseInt(E(pre, 'mqInterval').value, 10) || 0,
@@ -2154,18 +2266,121 @@ function exportCfg(pre) {
       manual_on: S.mqManual
     }
   };
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const json = JSON.stringify(data, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  downloadBlob(blob, 'vkbox_config_' + new Date().toISOString().slice(0, 10) + '.json');
+  toast('配置已导出为 JSON');
+}
+function exportCfgAsCsv(pre) {
+  if (pre === undefined) pre = cfgPrefix();
+  const c = collectCfg(pre);
+  if (!c.ok) { toast('当前表单配置无效，无法导出：' + c.err); return; }
+  // 抽 11 MQTT 字段 (跟 JSON 一样, 内部用 JSON 字段名)
+  const m = {
+    host: E(pre, 'mqHost').value.trim(),
+    port: parseInt(E(pre, 'mqPort').value, 10) || 1883,
+    ssl: E(pre, 'mqSsl').checked,
+    user: E(pre, 'mqUser').value.trim(),
+    pass: E(pre, 'mqPass').value,
+    client_id: E(pre, 'mqClientId').value.trim(),
+    pub_topic: E(pre, 'mqPub').value.trim(),
+    sub_topic: E(pre, 'mqSub').value.trim(),
+    interval_s: parseInt(E(pre, 'mqInterval').value, 10) || 0,
+    allow_no_sn: E(pre, 'mqAllowNoSn').checked,
+    keep_session: E(pre, 'mqKeepSession').value === '1'
+  };
+  // CSV 不存 allow_no_sn / keep_session / auto.pass / manual_on, 注释里说明
+  const csv = toCsv({
+    serial: c.cfg,
+    registers: collectRegs(pre),
+    mqtt: m
+  });
+  // 头部注释: 手动档额外字段
+  const headerNote = '# manual_on=' + S.mqManual + ', allow_no_sn=' + m.allow_no_sn + ', keep_session=' + m.keep_session + '\n';
+  const blob = new Blob([headerNote + csv], { type: 'text/csv' });
+  downloadBlob(blob, 'vkbox_config_' + new Date().toISOString().slice(0, 10) + '.csv');
+  toast('配置已导出为 CSV');
+}
+function downloadBlob(blob, name) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'vkbox_config_' + new Date().toISOString().slice(0, 10) + '.json';
+  a.download = name;
   a.click();
   URL.revokeObjectURL(a.href);
-  toast('配置已导出');
 }
 
+// 内部统一: 把 {serial, registers, mqtt} 数据填到当前 tab
+// export 走 exportCfgAsJson/Csv, import 走 applyParsedData
+function applyParsedData(pre, d) {
+  const c = d.serial || d.cfg || {};
+  if (c.baud) E(pre, 'selBaud').value = String(c.baud);
+  if (c.databits) setRadio('databits', String(c.databits));
+  if (c.parity != null) setRadio('parity', String(c.parity));
+  if (c.stopbits) setRadio('stopbits', String(c.stopbits));
+  if (c.interval_ms) E(pre, 'inpRound').value = c.interval_ms;
+  if (c.slave) E(pre, 'inpSlave').value = c.slave;
+  E(pre, 'inpTimeout').value = (c.timeout_ms == null || c.timeout_ms === '') ? '' : c.timeout_ms;
+  if (c.server) el.fUrl.value = c.server;
+  const regs = d.registers || d.regs || [];
+  S.regs = toArr(regs);
+  renderRegTable(pre);
+  if (d.mqtt) {
+    E(pre, 'mqHost').value = d.mqtt.host || '';
+    E(pre, 'mqPort').value = d.mqtt.port || 1883;
+    E(pre, 'mqSsl').checked = !!d.mqtt.ssl;
+    E(pre, 'mqUser').value = d.mqtt.user || '';
+    E(pre, 'mqPass').value = d.mqtt.pass || '';
+    E(pre, 'mqClientId').value = d.mqtt.client_id || '';
+    // 发布/订阅 topic：手动档专属，导入时一并带进来
+    E(pre, 'mqPub').value = d.mqtt.pub_topic || '';
+    E(pre, 'mqSub').value = d.mqtt.sub_topic || '';
+    E(pre, 'mqInterval').value = d.mqtt.interval_s != null ? d.mqtt.interval_s : 120;
+    E(pre, 'mqAllowNoSn').checked = !!d.mqtt.allow_no_sn;
+    E(pre, 'mqKeepSession').value = d.mqtt.keep_session ? '1' : '0';
+    // 自动档凭证密码回首页那个框；档次按钮按导入的 manual_on 切
+    if (el.hMqPass && d.mqtt.auto) el.hMqPass.value = d.mqtt.auto.pass || '';
+    setManualMode(!!d.mqtt.manual_on, { refill: true });
+  }
+  return regs.length;
+}
+
+// 2h.3 弹窗选格式: 导出时让用户选 JSON 或 CSV
+// 用浏览器原生 confirm 太粗糙, 用自定义迷你模态 (不引外部库)
+// 返回 'json' / 'csv' / null (取消)
+function askExportFormat() {
+  return new Promise(resolve => {
+    const modal = document.createElement('div');
+    modal.className = 'modal modal-open';
+    modal.innerHTML = `
+      <div class="modal-content" style="text-align:center;">
+        <h3 style="margin:0 0 14px 0;">选择导出格式</h3>
+        <div style="display:flex;gap:10px;margin-bottom:8px;">
+          <button class="primary" data-fmt="json" style="flex:1;padding:10px;">JSON</button>
+          <button data-fmt="csv" style="flex:1;padding:10px;">CSV (Excel)</button>
+        </div>
+        <button data-fmt="cancel" style="background:transparent;color:#666;border:none;cursor:pointer;">取消</button>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.addEventListener('click', e => {
+      if (e.target === modal) { document.body.removeChild(modal); resolve(null); return; }
+      const fmt = e.target && e.target.dataset && e.target.dataset.fmt;
+      if (!fmt) return;
+      document.body.removeChild(modal);
+      resolve(fmt === 'cancel' ? null : fmt);
+    });
+  });
+}
+
+// 2h exportCfg: 弹窗选 json/csv, dispatch 到对应导出函数
+async function exportCfg(pre) {
+  if (pre === undefined) pre = cfgPrefix();
+  const fmt = await askExportFormat();
+  if (fmt === 'json') return exportCfgAsJson(pre);
+  if (fmt === 'csv')  return exportCfgAsCsv(pre);
+}
+
+// 2h importCfg: 文件选择框 (filter .json,.csv), 选完按扩展名 dispatch
 async function importCfg(pre) {
-  // Step 2f: 拆 m/p 分支, 填当前 tab 内的 485 + MQTT 字段. pre 由
-  // btnImport.onclick 传 cfgPrefix() 进来
   if (pre === undefined) pre = cfgPrefix();
   // 平台档配置从平台拉取, 不允许用户手动导入 (导入会被 5s 后 readCfg 顶掉)
   if (isPlatform(S.mode)) {
@@ -2176,47 +2391,40 @@ async function importCfg(pre) {
   if (!await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
   const inp = document.createElement('input');
   inp.type = 'file';
-  inp.accept = '.json,application/json';
+  inp.accept = '.json,application/json,.csv,text/csv';
   inp.onchange = () => {
     const f = inp.files && inp.files[0];
     if (!f) return;
     const rd = new FileReader();
     rd.onload = () => {
+      const text = rd.result;
+      let data, fmt;
       try {
-        const d = JSON.parse(rd.result);
-        const c = d.serial || d.cfg || {};
-        if (c.baud) E(pre, 'selBaud').value = String(c.baud);
-        if (c.databits) setRadio('databits', String(c.databits));
-        if (c.parity != null) setRadio('parity', String(c.parity));
-        if (c.stopbits) setRadio('stopbits', String(c.stopbits));
-        if (c.interval_ms) E(pre, 'inpRound').value = c.interval_ms;
-        if (c.slave) E(pre, 'inpSlave').value = c.slave;
-        E(pre, 'inpTimeout').value = (c.timeout_ms == null || c.timeout_ms === '') ? '' : c.timeout_ms;
-        if (c.server) el.fUrl.value = c.server;
-        const regs = d.registers || d.regs || [];
-        S.regs = toArr(regs);
-        renderRegTable(pre);
-        if (d.mqtt) {
-          E(pre, 'mqHost').value = d.mqtt.host || '';
-          E(pre, 'mqPort').value = d.mqtt.port || 1883;
-          E(pre, 'mqSsl').checked = !!d.mqtt.ssl;
-          E(pre, 'mqUser').value = d.mqtt.user || '';
-          E(pre, 'mqPass').value = d.mqtt.pass || '';
-          E(pre, 'mqClientId').value = d.mqtt.client_id || '';
-          // 发布/订阅 topic：手动档专属，导入时一并带进来
-          E(pre, 'mqPub').value = d.mqtt.pub_topic || '';
-          E(pre, 'mqSub').value = d.mqtt.sub_topic || '';
-          E(pre, 'mqInterval').value = d.mqtt.interval_s != null ? d.mqtt.interval_s : 120;
-          E(pre, 'mqAllowNoSn').checked = !!d.mqtt.allow_no_sn;
-          E(pre, 'mqKeepSession').value = d.mqtt.keep_session ? '1' : '0';
-          // 自动档凭证密码回首页那个框；档次按钮按导入的 manual_on 切
-          if (el.hMqPass && d.mqtt.auto) el.hMqPass.value = d.mqtt.auto.pass || '';
-          setManualMode(!!d.mqtt.manual_on, { refill: true });
+        const lower = f.name.toLowerCase();
+        if (lower.endsWith('.json')) {
+          data = JSON.parse(text);
+          fmt = 'JSON';
+        } else if (lower.endsWith('.csv')) {
+          data = parseCsv(text);
+          fmt = 'CSV';
+        } else {
+          // 后缀名不在, 尝试按内容嗅探
+          const t = String(text).trim();
+          if (t.startsWith('{') || t.startsWith('[')) {
+            data = JSON.parse(text);
+            fmt = 'JSON';
+          } else if (t.indexOf('[serial]') >= 0) {
+            data = parseCsv(text);
+            fmt = 'CSV';
+          } else {
+            throw new Error('无法识别格式');
+          }
         }
-        toast('配置已导入：' + regs.length + ' 个寄存器');
+        const cnt = applyParsedData(pre, data);
+        toast('配置已导入 (' + fmt + ')：' + cnt + ' 个寄存器');
         snapClean(pre);                // 导入的内容成为新基线
       } catch (e) {
-        toast('导入失败：不是合法的 JSON 配置文件');
+        toast('导入失败：不是合法的配置文件 (' + e.message + ')');
       }
     };
     rd.readAsText(f);
