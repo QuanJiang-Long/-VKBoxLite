@@ -1744,7 +1744,10 @@ async function readMqtt(quiet) {
     }
     snapMqClean();                 // 读完了，当前表单就是干净基线
   } catch (e) {
-    setKv('mqStErr', '读取失败：' + e.message, true);
+    // Step 2c/2d fix: 失败也写到当前 tab 内的 mqStErr (mMqStErr/pMqStErr),
+    // 否则切到 manual/platform tab 时 17 字段状态全 "--" 但 mqStErr 错误
+    // 信息仍写 tabPoll 内的, 用户看不到
+    setKvPre(mqttPrefix(), 'mqStErr', '读取失败：' + e.message, true);
   }
 }
 
