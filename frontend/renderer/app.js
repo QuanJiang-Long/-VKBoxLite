@@ -178,9 +178,14 @@ const el = new Proxy({
 // 业务调用前先按 S.mode 选 prefix:
 //   const h = E(isManual(S.mode) ? 'm' : (isPlatform(S.mode) ? 'p' : ''), 'mqHost');
 // Step 2b 开始在 readMqtt/renderMqtt 用上
+// Step 2c 修: 元素不存在时返 null-stub (所有属性写都吞掉, 业务不用 if 保护)
+// 否则 renderMqtt 内部 E('p','mqAllowNoSn').checked = ... 会让整个 renderMqtt 抛错,
+// 后续 17 字段 setKvPre 全跑不到
+const _nullStub = { value: '', textContent: '', checked: false, className: '', hidden: false, addEventListener: () => {} };
 function E(prefix, id) {
-  if (!prefix) return el[id];                     // tabPoll (无前缀)
-  return el[prefix + id[0].toUpperCase() + id.slice(1)];
+  if (!prefix) return el[id] || _nullStub;                       // tabPoll (无前缀)
+  const n = el[prefix + id[0].toUpperCase() + id.slice(1)];
+  return n || _nullStub;
 }
 
 //---------------------------------------------------------------------
@@ -1669,7 +1674,7 @@ function renderMqtt() {
     // 应答落地时把用户打到一半的字冲掉，表现为"输入框改不动"。
     if (fillOk(E(pre, 'mqHost'))) E(pre, 'mqHost').value = c.host || '';
     if (fillOk(E(pre, 'mqPort'))) E(pre, 'mqPort').value = c.port != null ? c.port : 1883;
-    E(pre, 'mqSsl').checked = !!c.ssl;
+    const sslEl = E(pre, 'mqSsl'); if (sslEl) sslEl.checked = !!c.ssl;
     if (fillOk(E(pre, 'mqUser'))) E(pre, 'mqUser').value = c.user || '';
     if (fillOk(E(pre, 'mqPass'))) E(pre, 'mqPass').value = c.pass || '';
     if (fillOk(E(pre, 'mqClientId'))) E(pre, 'mqClientId').value = c.client_id || '';
@@ -1686,9 +1691,12 @@ function renderMqtt() {
     if (fillOk(el.snMqInterval)) el.snMqInterval.value = c.interval_s != null ? c.interval_s : 120;
     // QoS 已从界面移除：设备端发布/订阅固定用 QoS 1，
     // 这里不再显示也不再下发（设备 normalize 会退回默认值 1）。
-    E(pre, 'mqAllowNoSn').checked = !!c.allow_no_sn;
+    // Step 2c 删了 platform tab 的 pMqAllowNoSn/mqKeepSession 等, E() 返 null
+    // 跳空, 不再触发 "Cannot set properties of null" 错误 (该错误会让整个
+    // renderMqtt 抛错, 17 字段 setKvPre 后续全跑不到)
+    const allowEl = E(pre, 'mqAllowNoSn'); if (allowEl) allowEl.checked = !!c.allow_no_sn;
     // MQTT 会话管理（select）：'1'=持久会话  '0'=离线自动销毁（默认）
-    E(pre, 'mqKeepSession').value = c.keep_session ? '1' : '0';
+    const keepEl = E(pre, 'mqKeepSession'); if (keepEl) keepEl.value = c.keep_session ? '1' : '0';
   }
   const s = r.stat || {};
   // Step 2b: 17 字段状态写 m/p 各自 tab
