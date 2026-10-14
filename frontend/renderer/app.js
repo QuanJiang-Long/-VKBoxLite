@@ -109,7 +109,8 @@ const el = new Proxy({
   mqAllowNoSn: $('mqAllowNoSn'),
   mqKeepSession: $('mqKeepSession'),
   // ====== Step 2a: tabManual 内的 m- 前缀引用 ======
-  mBtnReadCfg: $('mBtnReadCfg'), mBtnSaveCfg: $('mBtnSaveCfg'), mBtnPullCfg: $('mBtnPullCfg'),
+  mBtnReadCfg: $('mBtnReadCfg'), mBtnSaveCfg: $('mBtnSaveCfg'),
+  // Step 2e+: manual 档 "重新拉取" 按钮藏掉 (manual 档不接平台), 也不建引用
   mCfgSrcHint: $('mCfgSrcHint'),
   mSelBaud: $('mSelBaud'), mInpRound: $('mInpRound'),
   mInpSlave: $('mInpSlave'), mInpTimeout: $('mInpTimeout'),
@@ -2243,10 +2244,11 @@ el.btnReadInfo.onclick = readInfo;
 // 拿到 tabPoll 内的, 切到 manual/platform tab 时点不到。querySelectorAll
 // 绑所有 3 份, 跟 btnMqttSave/Reconnect/Report 同一改法
 // Step 2e+: 平台档 "保存配置" (pBtnSaveCfg) + "新增寄存器" (pBtnAddReg)
-// 已注释掉 (HTML 注释), 浏览器不渲染, querySelectorAll 自然找不到
+// + manual 档 "重新拉取" (mBtnPullCfg) 已注释掉 (HTML 注释),
+// 浏览器不渲染, querySelectorAll 自然找不到
 document.querySelectorAll('#mBtnReadCfg, #pBtnReadCfg, #btnReadCfg').forEach(b => { b.onclick = readCfg; });
 document.querySelectorAll('#mBtnSaveCfg, #btnSaveCfg').forEach(b => { b.onclick = saveCfg; });
-document.querySelectorAll('#mBtnPullCfg, #pBtnPullCfg, #btnPullCfg').forEach(b => { b.onclick = pullCfg; });
+document.querySelectorAll('#pBtnPullCfg, #btnPullCfg').forEach(b => { b.onclick = pullCfg; });
 document.querySelectorAll('#mBtnAddReg, #btnAddReg').forEach(b => { b.onclick = addParamRow; });
 document.querySelectorAll('#mBtnReadVal, #pBtnReadVal, #btnReadVal').forEach(b => { b.onclick = readVal; });
 el.btnReadVal.onclick = readVal;

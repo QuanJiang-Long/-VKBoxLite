@@ -343,7 +343,10 @@ body.mq-manual .auto-only{display:none !important;}
                 <div class="serial-pane active" id="sp-m-s1">
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:4px 0;">
                     <button id="mBtnReadCfg">读取配置</button>
-                    <button id="mBtnPullCfg" title="从 MQTT 平台重新拉取 485 配置到「拉取配置」槽（ds_pull）">重新拉取</button>
+                    <!-- Step 2e+: manual 档 485 配置全手动填, "重新拉取" 没意义 (不
+                         从平台拉), 按钮藏掉, 跟 platform 档对称 (manual 没拉,
+                         platform 没保存) -->
+                    <!-- <button id="mBtnPullCfg" title="从 MQTT 平台重新拉取 485 配置到「拉取配置」槽（ds_pull）">重新拉取</button> -->
                     <span class="hint" id="mCfgSrcHint" hidden></span>
                     <div style="margin-left: auto;"></div>
                     <button id="mBtnSaveCfg" class="primary">保存配置</button>
