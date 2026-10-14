@@ -128,11 +128,13 @@ const el = new Proxy({
   // Step 2c/2d: 平台档删 6 字段 (user/pass/ClientId/Pub/Sub/AllowNoSn) + 1 按钮
   // (pBtnManualCfg) + pBtnMqttSave/pBtnMqttReset/pBtnMqttPassEye (平台档不能改/不需要)
   // — 这些引用也不建了, 业务用不到
-  pBtnReadCfg: $('pBtnReadCfg'), pBtnSaveCfg: $('pBtnSaveCfg'), pBtnPullCfg: $('pBtnPullCfg'),
+  // Step 2e+: 平台档 485 + 寄存器表 "保存配置" / "新增寄存器" 按钮藏掉
+  // (pBtnSaveCfg / pBtnAddReg) — 也不建引用, 业务用不到
+  pBtnReadCfg: $('pBtnReadCfg'), pBtnPullCfg: $('pBtnPullCfg'),
   pCfgSrcHint: $('pCfgSrcHint'),
   pSelBaud: $('pSelBaud'), pInpRound: $('pInpRound'),
   pInpSlave: $('pInpSlave'), pInpTimeout: $('pInpTimeout'),
-  pBtnReadVal: $('pBtnReadVal'), pBtnAddReg: $('pBtnAddReg'), pParamTbody: $('pParamTbody'),
+  pBtnReadVal: $('pBtnReadVal'), pParamTbody: $('pParamTbody'),
   pBtnMqttRefresh: $('pBtnMqttRefresh'),
   pBtnMqttReport: $('pBtnMqttReport'),
   pBtnMqttReconnect: $('pBtnMqttReconnect'),
@@ -2240,13 +2242,14 @@ el.btnReadInfo.onclick = readInfo;
 // Step 2e: 485 + 寄存器表 4 button 拆 tab 后 m/p 都有, 单绑 el.btnXxx 只
 // 拿到 tabPoll 内的, 切到 manual/platform tab 时点不到。querySelectorAll
 // 绑所有 3 份, 跟 btnMqttSave/Reconnect/Report 同一改法
+// Step 2e+: 平台档 "保存配置" (pBtnSaveCfg) + "新增寄存器" (pBtnAddReg)
+// 已注释掉 (HTML 注释), 浏览器不渲染, querySelectorAll 自然找不到
 document.querySelectorAll('#mBtnReadCfg, #pBtnReadCfg, #btnReadCfg').forEach(b => { b.onclick = readCfg; });
-document.querySelectorAll('#mBtnSaveCfg, #pBtnSaveCfg, #btnSaveCfg').forEach(b => { b.onclick = saveCfg; });
+document.querySelectorAll('#mBtnSaveCfg, #btnSaveCfg').forEach(b => { b.onclick = saveCfg; });
 document.querySelectorAll('#mBtnPullCfg, #pBtnPullCfg, #btnPullCfg').forEach(b => { b.onclick = pullCfg; });
-document.querySelectorAll('#mBtnAddReg, #pBtnAddReg, #btnAddReg').forEach(b => { b.onclick = addParamRow; });
+document.querySelectorAll('#mBtnAddReg, #btnAddReg').forEach(b => { b.onclick = addParamRow; });
 document.querySelectorAll('#mBtnReadVal, #pBtnReadVal, #btnReadVal').forEach(b => { b.onclick = readVal; });
 el.btnReadVal.onclick = readVal;
-el.btnAddReg.onclick = addParamRow;
 el.btnImport.onclick = importCfg;
 el.btnExport.onclick = exportCfg;
 el.comSel.onchange = () => { S.port = el.comSel.value; };

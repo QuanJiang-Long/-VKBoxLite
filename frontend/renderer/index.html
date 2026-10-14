@@ -526,8 +526,9 @@ body.mq-manual .auto-only{display:none !important;}
                     <button id="pBtnReadCfg">读取配置</button>
                     <button id="pBtnPullCfg" title="从 MQTT 平台重新拉取 485 配置到「拉取配置」槽（ds_pull）">重新拉取</button>
                     <span class="hint" id="pCfgSrcHint" hidden></span>
-                    <div style="margin-left: auto;"></div>
-                    <button id="pBtnSaveCfg" class="primary">保存配置</button>
+                    <!-- Step 2e+: 平台档 485 配置只做显示, "保存配置" 按钮藏掉,
+                         平台档由设备从 MQTT 平台拉取, 不允许用户手动保存 -->
+                    <!-- <button id="pBtnSaveCfg" class="primary">保存配置</button> -->
                 </div>
                 <div id="pPushBanner" class="push-banner" hidden>
                     <span id="pPushBannerText"></span>
@@ -580,7 +581,9 @@ body.mq-manual .auto-only{display:none !important;}
                     <div class="panel-title">参数列表
                         <div class="spacer"></div>
                         <button class="sm" id="pBtnReadVal">读实时值</button>
-                        <button class="sm" id="pBtnAddReg">新增寄存器</button>
+                        <!-- Step 2e+: 平台档寄存器表只做显示 (从平台拉来),
+                             "新增寄存器" 按钮藏掉, 不允许用户手动加 -->
+                        <!-- <button class="sm" id="pBtnAddReg">新增寄存器</button> -->
                     </div>
                     <table class="param-table">
                         <thead>
