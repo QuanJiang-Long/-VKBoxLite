@@ -257,6 +257,20 @@ function setKv(id, text, bad) {
   n.textContent = (text === null || text === undefined || text === '') ? '--' : String(text);
   n.className = bad ? 'bad' : '';
 }
+// Step 2b: 跟 setKv 一样, 但指定 m-/p- 前缀, 写对应 tab 内的元素
+function setKvPre(pre, id, text, bad) {
+  const fullId = pre ? (pre + id[0].toUpperCase() + id.slice(1)) : id;
+  const n = $(fullId);
+  if (!n) return;
+  n.textContent = (text === null || text === undefined || text === '') ? '--' : String(text);
+  n.className = bad ? 'bad' : '';
+}
+// 取当前档位对应的 prefix: 'm' (manual) / 'p' (platform) / '' (idle/sniff/未知)
+function mqttPrefix() {
+  if (isManual(S.mode)) return 'm';
+  if (isPlatform(S.mode)) return 'p';
+  return '';
+}
 // 回填输入框前的占位判断：这个值现在能不能写进去。
 // 焦点在它上面 → 不能（会冲掉正打的字）；
 // 它所在的标签页不可见 → 也不能（切走时浏览器已 blur，activeElement 不再是它，
@@ -1649,60 +1663,64 @@ async function readHome() {
 function renderMqtt() {
   const r = S.mqtt || {};
   const c = r.cfg || {};
+  // Step 2b: 取当前档位 prefix (m-/p-/), 业务用 E() 写对应 tab 内元素
+  const pre = mqttPrefix();
   if (c.host !== undefined) {
     // 正在输入的框不能抢：readMqtt 会在点"MQTT配置"子标签/刷新时触发，
     // 应答落地时把用户打到一半的字冲掉，表现为"输入框改不动"。
-    if (fillOk(el.mqHost)) el.mqHost.value = c.host || '';
-    if (fillOk(el.mqPort)) el.mqPort.value = c.port != null ? c.port : 1883;
-    el.mqSsl.checked = !!c.ssl;
-    if (fillOk(el.mqUser)) el.mqUser.value = c.user || '';
-    if (fillOk(el.mqPass)) el.mqPass.value = c.pass || '';
-    if (fillOk(el.mqClientId)) el.mqClientId.value = c.client_id || '';
+    if (fillOk(E(pre, 'mqHost'))) E(pre, 'mqHost').value = c.host || '';
+    if (fillOk(E(pre, 'mqPort'))) E(pre, 'mqPort').value = c.port != null ? c.port : 1883;
+    E(pre, 'mqSsl').checked = !!c.ssl;
+    if (fillOk(E(pre, 'mqUser'))) E(pre, 'mqUser').value = c.user || '';
+    if (fillOk(E(pre, 'mqPass'))) E(pre, 'mqPass').value = c.pass || '';
+    if (fillOk(E(pre, 'mqClientId'))) E(pre, 'mqClientId').value = c.client_id || '';
     // 发布/订阅 topic：手动档专属，自动档整行藏掉。留空 = 用设备默认模板
-    if (fillOk(el.mqPub)) el.mqPub.value = c.pub_topic || '';
-    if (fillOk(el.mqSub)) el.mqSub.value = c.sub_topic || '';
+    if (fillOk(E(pre, 'mqPub'))) E(pre, 'mqPub').value = c.pub_topic || '';
+    if (fillOk(E(pre, 'mqSub'))) E(pre, 'mqSub').value = c.sub_topic || '';
     // sniff 页面简版: 同步 broker 地址/端口 (只读) + 周期 (可编辑)
+    // snMqHost/Port/Interval 是 sniff 页面独立元素, 跟 m/p 无关
     if (fillOk(el.snMqHost)) el.snMqHost.value = c.host || '';
     if (fillOk(el.snMqPort)) el.snMqPort.value = c.port != null ? c.port : 1883;
     // user/client_id/topic 留空是故意的: 设备兜底填 SN 和默认模板, 所以这里
     // 显示空属正常。实际生效值看下面的连接状态面板。
-    if (fillOk(el.mqInterval)) el.mqInterval.value = c.interval_s != null ? c.interval_s : 120;
+    if (fillOk(E(pre, 'mqInterval'))) E(pre, 'mqInterval').value = c.interval_s != null ? c.interval_s : 120;
     if (fillOk(el.snMqInterval)) el.snMqInterval.value = c.interval_s != null ? c.interval_s : 120;
     // QoS 已从界面移除：设备端发布/订阅固定用 QoS 1，
     // 这里不再显示也不再下发（设备 normalize 会退回默认值 1）。
-    el.mqAllowNoSn.checked = !!c.allow_no_sn;
+    E(pre, 'mqAllowNoSn').checked = !!c.allow_no_sn;
     // MQTT 会话管理（select）：'1'=持久会话  '0'=离线自动销毁（默认）
-    el.mqKeepSession.value = c.keep_session ? '1' : '0';
+    E(pre, 'mqKeepSession').value = c.keep_session ? '1' : '0';
   }
   const s = r.stat || {};
-  setKv('mqStConn', s.connected ? '已连接' : (s.want_run ? '连接中/已断开' : '未启动'), !s.connected);
-  setKv('mqStClientId', s.client_id || s.device_id || s.sn || '');
-  setKv('mqStUser', s.user || s.device_id || s.sn || '');
-  setKv('mqStDevId', s.device_id || s.sn || '');
+  // Step 2b: 17 字段状态写 m/p 各自 tab
+  setKvPre(pre, 'mqStConn', s.connected ? '已连接' : (s.want_run ? '连接中/已断开' : '未启动'), !s.connected);
+  setKvPre(pre, 'mqStClientId', s.client_id || s.device_id || s.sn || '');
+  setKvPre(pre, 'mqStUser', s.user || s.device_id || s.sn || '');
+  setKvPre(pre, 'mqStDevId', s.device_id || s.sn || '');
   // 生效发布/生效订阅：当前档次实际在用的两条 topic 成品（{SN} 已代入）。
   // 手动档 = 本页填的模板代出来的；自动档 = PLATFORM_* 固定常量。
   // 只在连上后有值（未建连时 S.pub/S.sub 是 nil，profile 兜底算的那份要用
   // 设备号，没有 SN 时也是空）
-  setKv('mqStPub', s.pub || '未连接', !s.pub);
-  setKv('mqStSub', s.sub || '未连接', !s.sub);
+  setKvPre(pre, 'mqStPub', s.pub || '未连接', !s.pub);
+  setKvPre(pre, 'mqStSub', s.sub || '未连接', !s.sub);
   // 当前档次: 手动 = 用本页填的凭证；自动 = 首页那份凭证 + SN
-  setKv('mqStMode', c.manual_on ? '手动配置' : '自动（设备拼接）', !!c.manual_on);
-  setKv('mqStSubed', s.subscribed ? '是' : '否', !s.subscribed);
+  setKvPre(pre, 'mqStMode', c.manual_on ? '手动配置' : '自动（设备拼接）', !!c.manual_on);
+  setKvPre(pre, 'mqStSubed', s.subscribed ? '是' : '否', !s.subscribed);
   // 订阅Topic 全量：conack 时设备实际订到的每一条。只列 topic 不列数，
   // 现场直接照着对 broker 上有没有这条订阅。三档同一份（文档"下行 topic
   // 三路同"），所以不再按档位显隐
   const subs = Array.isArray(s.subs) ? s.subs : [];
-  setKv('mqStSubs', subs.length ? subs.join('\n') : '未连接', subs.length === 0);
+  setKvPre(pre, 'mqStSubs', subs.length ? subs.join('\n') : '未连接', subs.length === 0);
   // 配置回执：拉取配置成功后要点保存才会 +1，为 0 说明平台还在等核销
-  setKv('mqStReplied', s.replied ? s.replied + ' 次' : '0 次', !s.replied);
-  setKv('mqStPubed', s.published);
-  setKv('mqStFailed', s.failed, s.failed > 0);
-  setKv('mqStLast', s.last_pub ? new Date(s.last_pub * 1000).toLocaleTimeString() : '');
-  setKv('mqStBackoff', s.backoff != null ? s.backoff + ' s' : '');
-  setKv('mqStKeepSession',
+  setKvPre(pre, 'mqStReplied', s.replied ? s.replied + ' 次' : '0 次', !s.replied);
+  setKvPre(pre, 'mqStPubed', s.published);
+  setKvPre(pre, 'mqStFailed', s.failed, s.failed > 0);
+  setKvPre(pre, 'mqStLast', s.last_pub ? new Date(s.last_pub * 1000).toLocaleTimeString() : '');
+  setKvPre(pre, 'mqStBackoff', s.backoff != null ? s.backoff + ' s' : '');
+  setKvPre(pre, 'mqStKeepSession',
         s.keep_session == null ? '--' : (s.keep_session ? '持久会话' : '离线自动销毁'));
-  setKv('mqStErr', s.reject_reason || s.last_err || '', !!(s.reject_reason || s.last_err));
-  setKv('mqStSn', r.ready ? '已烧号' : (r.err || '未烧号'), !r.ready);
+  setKvPre(pre, 'mqStErr', s.reject_reason || s.last_err || '', !!(s.reject_reason || s.last_err));
+  setKvPre(pre, 'mqStSn', r.ready ? '已烧号' : (r.err || '未烧号'), !r.ready);
   renderHome();
   // 只在第一次渲染时套一次模式：只读属性/颜色/回显来源都要跟 S.mqManual 走。
   // 后面每次 readMqtt 都重套会覆盖用户在本次会话里点的「手动配置」
@@ -1732,23 +1750,25 @@ async function readMqtt(quiet) {
 }
 
 async function saveMqtt() {
-  const host = el.mqHost.value.trim();
+  // Step 2b: 用 E(pre) 读当前 tab 的 input, 不再固定 el.mqXxx
+  const pre = mqttPrefix();
+  const host = E(pre, 'mqHost').value.trim();
   if (!host) { toast('MQTT 服务器地址不能为空'); return; }
   const cfg = {
     host: host,
-    port: parseInt(el.mqPort.value, 10) || 1883,
-    ssl: el.mqSsl.checked,
-    user: el.mqUser.value.trim(),
-    pass: el.mqPass.value,
-    client_id: el.mqClientId.value.trim(),
+    port: parseInt(E(pre, 'mqPort').value, 10) || 1883,
+    ssl: E(pre, 'mqSsl').checked,
+    user: E(pre, 'mqUser').value.trim(),
+    pass: E(pre, 'mqPass').value,
+    client_id: E(pre, 'mqClientId').value.trim(),
     // 手动档专属。自动档下这两个键省掉不发，设备端 normalize 会退回默认模板
-    pub_topic: S.mqManual ? el.mqPub.value.trim() : undefined,
-    sub_topic: S.mqManual ? el.mqSub.value.trim() : undefined,
-    interval_s: parseInt(el.mqInterval.value, 10) || 0,
+    pub_topic: S.mqManual ? E(pre, 'mqPub').value.trim() : undefined,
+    sub_topic: S.mqManual ? E(pre, 'mqSub').value.trim() : undefined,
+    interval_s: parseInt(E(pre, 'mqInterval').value, 10) || 0,
     // QoS 界面已移除，不再下发；设备端固定用 QoS 1
-    allow_no_sn: el.mqAllowNoSn.checked,
+    allow_no_sn: E(pre, 'mqAllowNoSn').checked,
     // select: '1'=持久会话  '0'=离线自动销毁（默认）
-    keep_session: el.mqKeepSession.value === '1',
+    keep_session: E(pre, 'mqKeepSession').value === '1',
     // 当前档次。false 时设备端清空手动凭证和手动 topic，改回 SN 用户名
     // + 首页那份 MQTT凭证密码 + 默认模板
     manual_on: S.mqManual
