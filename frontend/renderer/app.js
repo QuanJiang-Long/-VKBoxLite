@@ -2501,11 +2501,12 @@ function startAutoRefresh() {
   if (S.mock) return;
   // Step 2c/2d fix: homeTimer 5s 跑 readHome + readMqtt, 让 manual/platform
   // tab 的 5 字段状态 / 17 字段状态都自动刷。之前只 readHome, mqtt 状态不更新
+  // Step 2l: 拿掉 readMqtt 5s 自动调。原因: 5s 一跑 renderMqtt 会把用户正填的
+  // 5 字段 (user/pass/clientId/pub/sub) 覆盖掉, fillOk 只跳过当前聚焦的 1 个,
+  // 其余 4 个会被冲掉, 体验差。MQTT 面板的"读全量"走 activateTab + 手动按钮。
   homeTimer = setInterval(async () => {
     if (S.pending) return;
     try { await readHome(); } catch (_) {}
-    if (S.pending) return;
-    try { await readMqtt(true); } catch (_) {}
   }, 5000);
   frameTimer = setInterval(() => {
     if (!S.pending && el.frameAuto.checked && S.mode === 'sniff') readFrames();
