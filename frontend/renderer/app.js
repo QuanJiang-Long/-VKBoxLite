@@ -249,12 +249,20 @@ function regErr(msg) {
   e.textContent = msg;
   e.style.display = 'block';
 }
-function radioVal(name) {
-  const r = document.querySelector('input[name="' + name + '"]:checked');
+// Step 2q: radioVal/setRadio 加 pre 参, manual/platform tab 的 radio name
+// 加 m-/p- 前缀 (HTML 同步改), 不再是 3 个 pane 共用同一组 name
+// 之前 3 pane 同名 (name="databits"), document.querySelector 永远拿第 1 个
+// (tabPoll), 切到 manual tab 看 radio 的 checked 状态是 tabPoll 的, 不是自己的
+function radioVal(name, pre) {
+  if (pre === undefined) pre = cfgPrefix();
+  const p = pre ? pre + '-' : '';
+  const r = document.querySelector('input[name="' + p + name + '"]:checked');
   return r ? r.value : '';
 }
-function setRadio(name, val) {
-  document.querySelectorAll('input[name="' + name + '"]').forEach(r => {
+function setRadio(name, val, pre) {
+  if (pre === undefined) pre = cfgPrefix();
+  const p = pre ? pre + '-' : '';
+  document.querySelectorAll('input[name="' + p + name + '"]').forEach(r => {
     r.checked = (r.value === String(val));
   });
 }
@@ -323,8 +331,8 @@ function cfgSnap(pre) {
     });
   }
   return JSON.stringify({
-    b: E(pre, 'selBaud').value, db: radioVal('databits'), p: radioVal('parity'),
-    sb: radioVal('stopbits'), sl: E(pre, 'inpSlave').value,
+    b: E(pre, 'selBaud').value, db: radioVal('databits', pre), p: radioVal('parity', pre),
+    sb: radioVal('stopbits', pre), sl: E(pre, 'inpSlave').value,
     iv: E(pre, 'inpRound').value, to: E(pre, 'inpTimeout').value, r: rows
   });
 }
@@ -765,9 +773,9 @@ async function readCfg(quiet) {
       // 正在编辑的表单项不能抢：用户可能在从站地址/间隔/超时里打字，
       // 读配置应答一到就把字冲掉，表现为"输入框改不动"。
       if (fillOk(E(pre, 'selBaud'))) E(pre, 'selBaud').value = String(c.baud || 9600);
-      setRadio('databits', String(c.databits || 8));
-      setRadio('parity', String(c.parity != null ? c.parity : 0));
-      setRadio('stopbits', String(c.stopbits || 1));
+      setRadio('databits', String(c.databits || 8), pre);
+      setRadio('parity', String(c.parity != null ? c.parity : 0), pre);
+      setRadio('stopbits', String(c.stopbits || 1), pre);
       // "485方向控制GPIO" 输入框已按需求移除。GPIO8 方向控制由设备端
       // 脚本固定处理（core/config.lua 的 UART_485_PIN），前端不再暴露。
       if (fillOk(E(pre, 'inpRound'))) E(pre, 'inpRound').value = c.interval_ms || 3000;
@@ -821,9 +829,9 @@ async function readCfgSilent() {
     if (c && typeof c === 'object') {
       S.cfg = c;
       if (fillOk(E(pre, 'selBaud'))) E(pre, 'selBaud').value = String(c.baud || 9600);
-      setRadio('databits', String(c.databits || 8));
-      setRadio('parity', String(c.parity != null ? c.parity : 0));
-      setRadio('stopbits', String(c.stopbits || 1));
+      setRadio('databits', String(c.databits || 8), pre);
+      setRadio('parity', String(c.parity != null ? c.parity : 0), pre);
+      setRadio('stopbits', String(c.stopbits || 1), pre);
       if (fillOk(E(pre, 'inpRound'))) E(pre, 'inpRound').value = c.interval_ms || 3000;
       if (fillOk(E(pre, 'inpSlave'))) E(pre, 'inpSlave').value = c.slave || 1;
       if (fillOk(E(pre, 'inpTimeout'))) E(pre, 'inpTimeout').value = (c.timeout_ms == null) ? '' : c.timeout_ms;
@@ -919,9 +927,9 @@ function fillFormFromPlatform(d, pre) {
   if (pre === undefined) pre = cfgPrefix();
   const p = d.poll || {};
   if (p.baud) E(pre, 'selBaud').value = String(p.baud);
-  if (p.databits) setRadio('databits', String(p.databits));
-  if (p.parity != null) setRadio('parity', String(p.parity));
-  if (p.stopbits) setRadio('stopbits', String(p.stopbits));
+  if (p.databits) setRadio('databits', String(p.databits), pre);
+  if (p.parity != null) setRadio('parity', String(p.parity), pre);
+  if (p.stopbits) setRadio('stopbits', String(p.stopbits), pre);
   if (p.slave) E(pre, 'inpSlave').value = p.slave;
   if (p.regs) {
     S.regs = toArr(p.regs);
@@ -938,9 +946,9 @@ function fillFormFromPlatform(d, pre) {
 function collectCfg(pre) {
   if (pre === undefined) pre = cfgPrefix();
   const baud      = parseInt(E(pre, 'selBaud').value, 10);
-  const databits  = parseInt(radioVal('databits'), 10);
-  const parity    = parseInt(radioVal('parity'), 10);
-  const stopbits  = parseInt(radioVal('stopbits'), 10);
+  const databits  = parseInt(radioVal('databits', pre), 10);
+  const parity    = parseInt(radioVal('parity', pre), 10);
+  const stopbits  = parseInt(radioVal('stopbits', pre), 10);
   const slave     = parseInt(E(pre, 'inpSlave').value, 10);
   const interval  = parseInt(E(pre, 'inpRound').value, 10);
   const timeout   = E(pre, 'inpTimeout').value.trim();
@@ -2338,9 +2346,9 @@ function downloadBlob(blob, name) {
 function applyParsedData(pre, d) {
   const c = d.serial || d.cfg || {};
   if (c.baud) E(pre, 'selBaud').value = String(c.baud);
-  if (c.databits) setRadio('databits', String(c.databits));
-  if (c.parity != null) setRadio('parity', String(c.parity));
-  if (c.stopbits) setRadio('stopbits', String(c.stopbits));
+  if (c.databits) setRadio('databits', String(c.databits), pre);
+  if (c.parity != null) setRadio('parity', String(c.parity), pre);
+  if (c.stopbits) setRadio('stopbits', String(c.stopbits), pre);
   if (c.interval_ms) E(pre, 'inpRound').value = c.interval_ms;
   if (c.slave) E(pre, 'inpSlave').value = c.slave;
   E(pre, 'inpTimeout').value = (c.timeout_ms == null || c.timeout_ms === '') ? '' : c.timeout_ms;
