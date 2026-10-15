@@ -1715,14 +1715,16 @@ function renderMqtt() {
     if (fillOk(E(pre, 'mqUser'))) E(pre, 'mqUser').value = c.user || '';
     if (fillOk(E(pre, 'mqPass'))) E(pre, 'mqPass').value = c.pass || '';
     if (fillOk(E(pre, 'mqClientId'))) E(pre, 'mqClientId').value = c.client_id || '';
-    // 发布/订阅 topic：手动档专属，自动档整行藏掉。留空 = 用设备默认模板
+    // Step 2k: pub_topic/sub_topic 留空 = 设备不订不发表头 (M.default 已删默认路径)
+    // 设备端 publish()/build_subs() 对空串各自有守卫, 这里直接照填 c.pub_topic
     if (fillOk(E(pre, 'mqPub'))) E(pre, 'mqPub').value = c.pub_topic || '';
     if (fillOk(E(pre, 'mqSub'))) E(pre, 'mqSub').value = c.sub_topic || '';
     // sniff 页面简版: 同步 broker 地址/端口 (只读) + 周期 (可编辑)
     // snMqHost/Port/Interval 是 sniff 页面独立元素, 跟 m/p 无关
     if (fillOk(el.snMqHost)) el.snMqHost.value = c.host || '';
     if (fillOk(el.snMqPort)) el.snMqPort.value = c.port != null ? c.port : 1883;
-    // user/client_id/topic 留空是故意的: 设备兜底填 SN 和默认模板, 所以这里
+    // user/client_id 留空是故意的: 设备兜底填 SN (user→SN, client_id→SN_)
+    // topic 留空也是故意的: Step 2k 起不再有默认路径, 设备不订不发
     // 显示空属正常。实际生效值看下面的连接状态面板。
     if (fillOk(E(pre, 'mqInterval'))) E(pre, 'mqInterval').value = c.interval_s != null ? c.interval_s : 120;
     if (fillOk(el.snMqInterval)) el.snMqInterval.value = c.interval_s != null ? c.interval_s : 120;
@@ -1800,7 +1802,8 @@ async function saveMqtt() {
     user: E(pre, 'mqUser').value.trim(),
     pass: E(pre, 'mqPass').value,
     client_id: E(pre, 'mqClientId').value.trim(),
-    // 手动档专属。自动档下这两个键省掉不发，设备端 normalize 会退回默认模板
+    // 手动档专属。自动档下这两个键省掉不发。
+    // Step 2k: 留空 = 设备不订不发 (M.default 已删默认路径)
     pub_topic: S.mqManual ? E(pre, 'mqPub').value.trim() : undefined,
     sub_topic: S.mqManual ? E(pre, 'mqSub').value.trim() : undefined,
     interval_s: parseInt(E(pre, 'mqInterval').value, 10) || 0,
@@ -1809,7 +1812,7 @@ async function saveMqtt() {
     // select: '1'=持久会话  '0'=离线自动销毁（默认）
     keep_session: E(pre, 'mqKeepSession').value === '1',
     // 当前档次。false 时设备端清空手动凭证和手动 topic，改回 SN 用户名
-    // + 首页那份 MQTT凭证密码 + 默认模板
+    // + 首页那份 MQTT凭证密码 (topic 由 PLATFORM_* 固定常量接管, 跟手动模板无关)
     manual_on: S.mqManual
   };
   // {SN} 占位符必须有 SN 才代得出来。填了 {SN} 但设备没烧号 = 保存一个
@@ -2636,7 +2639,7 @@ document.querySelectorAll('.mode-card').forEach(c => {
 el.btnMqttRefresh.onclick = readMqtt;
 // 立刻把手动档开关写给设备。读全量再合并: 共用字段(地址/端口/周期等)和
 // 两份凭证都不能被这次写入冲掉。manual_on=false 时设备端会清空手动档的
-// 凭证和 topic, 回落默认模板, 然后用 SN + 首页凭证密码重连
+// 凭证和 topic, 然后用 SN + 首页凭证密码重连 (topic 走 PLATFORM_* 固定常量)
 async function writeManualMode(on) {
   const r = await sendCmd(Protocol.Enc.mqtt(), 'MQTT', 4000);
   const c = (r.data && r.data.cfg) || {};
@@ -2830,7 +2833,7 @@ const MOCK = {
   cfg: JSON.parse(JSON.stringify(MOCK_CFG_DEFAULT)),
   // 手动档（MQTT 配置页）+ 自动档（首页）两份凭证
   mqtt: { host: 'dz.voltkun.com', port: 1883, user: '', pass: '', ssl: false,
-          // 手动档 topic 模板。{SN} 由设备代入；留空 = 用设备默认模板
+          // 手动档 topic 模板。{SN} 由设备代入；Step 2k 起留空 = 设备不订不发
           pub_topic: '/sys/thing/node/property/post/{SN}',
           sub_topic: '/sys/thing/gw/config/get/{SN}',
           interval_s: 120, allow_no_sn: false, keep_session: false,
@@ -2976,15 +2979,17 @@ function mockReply(line) {
     // 真设备切回空闲会复位配置并回报清了什么, 预览照样演一遍,
     // 否则"切回空闲会清空配置"这条链路在没接设备时看不到
     if (MOCK.mode === 'idle') {
-      // 手配寄存器表回到出厂值 + 手动档凭证/topic 回落默认模板,
+      // 手配寄存器表回到出厂值 + 手动档凭证清空,
       // 对应真设备的 cfgstore.reset_user() + mqttcfg.clear_manual()。
+      // Step 2k: 手动档 topic 不再有"默认模板", 切回 idle 留空 = 设备不订不发
       // 首页那份(host/port/ssl/auto.pass)按定义不动
       MOCK.cfg = JSON.parse(JSON.stringify(MOCK_CFG_DEFAULT));
       MOCK.mqtt.manual_on = false;
       MOCK.mqtt.user = ''; MOCK.mqtt.pass = '';
-      // topic 回落默认模板（设备端 norm_topic 见空串回退默认值）
-      MOCK.mqtt.pub_topic = '/sys/thing/node/property/post/{SN}';
-      MOCK.mqtt.sub_topic = '/sys/thing/gw/config/get/{SN}';
+      // Step 2k: 切回 idle 顺手清空手动档 topic (真设备 clear_manual 走 fskv 整段覆盖)
+      // 旧代码保留默认路径作为"恢复出厂"的语义, 现在没默认路径了, 留空即代表出厂态
+      MOCK.mqtt.pub_topic = '';
+      MOCK.mqtt.sub_topic = '';
       // 记录 3+A: cleared 用友好名 (跟设备端 cfg.lua RESET_SLOTS 对齐)
       resp = 'RET:MODE=OK;cleared:manual 配置+platform 配置';
     } else {

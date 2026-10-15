@@ -447,12 +447,12 @@ body.mq-manual .auto-only{display:none !important;}
                     </div>
                     <div class="form-row manual-only">
                         <label>用户名</label>
-                        <input id="mMqUser" type="text" placeholder="留空即用设备 SN">
+                        <input id="mMqUser" type="text" placeholder="输入用户名">
                     </div>
                     <div class="form-row manual-only">
                         <label>密码</label>
                         <span class="pw-wrap">
-                            <input id="mMqPass" type="password" placeholder="无则留空">
+                            <input id="mMqPass" type="password" placeholder="输入密码">
                             <button type="button" class="pw-eye" id="mBtnMqttPassEye" title="显示密码">
                                 <svg viewBox="0 0 16 16" aria-hidden="true">
                                     <path d="M8 2.5C4.4 2.5 1.4 5.6.3 8c1.1 2.4 4.1 5.5 7.7 5.5s6.6-3.1 7.7-5.5C14.6 5.6 11.6 2.5 8 2.5z"/>
@@ -464,15 +464,15 @@ body.mq-manual .auto-only{display:none !important;}
                     </div>
                     <div class="form-row manual-only">
                         <label>ClientID</label>
-                        <input id="mMqClientId" type="text" placeholder="留空即用设备 SN 加下划线，如 11802026092600016_">
+                        <input id="mMqClientId" type="text" placeholder="输入ClientID">
                     </div>
                     <div class="form-row manual-only">
                         <label>订阅Topic</label>
-                        <input id="mMqSub" type="text" placeholder="留空即用设备默认模板 /sys/thing/gw/config/get/{SN}">
+                        <input id="mMqSub" type="text" placeholder="/…/…/function/get or /sys/thing/gw/function/get/{sn}">
                     </div>
                     <div class="form-row manual-only">
                         <label>发布Topic</label>
-                        <input id="mMqPub" type="text" placeholder="留空即用设备默认模板 /sys/thing/node/property/post/{SN}">
+                        <input id="mMqPub" type="text" placeholder="/…/…/property/post or /sys/thing/gw/property/post/{sn}">
                     </div>
                     <!-- Step 2j: interval_s 是共用字段 (手动/自动档都用同一份),
                          之前 .auto-only 隐藏了, 手动档用户也调不了周期。改回无 class -->
@@ -781,12 +781,12 @@ body.mq-manual .auto-only{display:none !important;}
                     </div>
                     <div class="form-row manual-only">
                         <label>用户名</label>
-                        <input id="mqUser" type="text" placeholder="留空即用设备 SN">
+                        <input id="mqUser" type="text" placeholder="输入用户名">
                     </div>
                     <div class="form-row manual-only">
                         <label>密码</label>
                         <span class="pw-wrap">
-                            <input id="mqPass" type="password" placeholder="无则留空">
+                            <input id="mqPass" type="password" placeholder="输入密码">
                             <button type="button" class="pw-eye" id="btnMqttPassEye" title="显示密码">
                                 <svg viewBox="0 0 16 16" aria-hidden="true">
                                     <path d="M8 2.5C4.4 2.5 1.4 5.6.3 8c1.1 2.4 4.1 5.5 7.7 5.5s6.6-3.1 7.7-5.5C14.6 5.6 11.6 2.5 8 2.5z"/>
@@ -798,15 +798,15 @@ body.mq-manual .auto-only{display:none !important;}
                     </div>
                     <div class="form-row manual-only">
                         <label>ClientID</label>
-                        <input id="mqClientId" type="text" placeholder="留空即用设备 SN 加下划线，如 11802026092600016_">
+                        <input id="mqClientId" type="text" placeholder="输入ClientID">
                     </div>
                     <div class="form-row manual-only">
                         <label>发布Topic</label>
-                        <input id="mqPub" type="text" placeholder="留空即用设备默认模板 /sys/thing/node/property/post/{SN}">
+                        <input id="mqPub" type="text" placeholder="/…/…/property/post or /sys/thing/gw/property/post/{sn}">
                     </div>
                     <div class="form-row manual-only">
                         <label>订阅Topic</label>
-                        <input id="mqSub" type="text" placeholder="留空即用设备默认模板 /sys/thing/gw/config/get/{SN}">
+                        <input id="mqSub" type="text" placeholder="/…/…/function/get or /sys/thing/gw/function/get/{sn}">
                     </div>
                     <div class="form-row auto-only">
                         <label>上报周期(秒)</label>

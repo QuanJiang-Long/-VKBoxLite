@@ -15,15 +15,21 @@ local K_CFG = "mqtt_cfg"
 -- 那套: 用户名留空(iot 兜底填 SN) + 首页那份 MQTT凭证密码。client_id 也归
 -- 入手动档: 自动档始终走 SN_ 兜底(did.."_"), 退出 poll 时清空恢复兜底。
 -- pub_topic/sub_topic 同理: 手动档连的是用户自己的 broker 和自己的 topic 命名,
--- 这两条由用户填。自动档不用它们, 直接走 core/config.lua 的 PLATFORM_* 固定
--- 常量(见 profile)。
+-- 这两条由用户填。**Step 2k 改**: 不再预置默认路径, 留空 = 设备不订不发表头。
+-- publish()/build_subs() 对空串各自有守卫 (publish line 262 / build_subs line 657),
+-- 所以 norm_topic 第二参保持空串即可, profile() 拿到空串也照常走 (gsub 无害)。
+-- 自动档不用它们, 直接走 core/config.lua 的 PLATFORM_* 固定 常量(见 profile)。
 M.default = {
     host = "dz.voltkun.com",
     port = 1883,
     user = "",
     pass = "",
-    pub_topic = "/sys/thing/node/property/post/{sn}",
-    sub_topic = "/sys/thing/gw/config/get/{sn}",
+    -- Step 2k: 删默认路径。手动档留空 = 设备既不发布也不订阅 (走 "" 安全回退)。
+    -- 旧值 (留作历史参考, 不再用):
+    --   pub_topic = "/sys/thing/node/property/post/{sn}"
+    --   sub_topic = "/sys/thing/gw/config/get/{sn}"
+    pub_topic = "",
+    sub_topic = "",
     ssl = false,
     client_id = "",
     interval_s = cfg.MQTT_INTERVAL_S,
@@ -42,7 +48,9 @@ local function num(v, d)
     return tonumber(v) or d
 end
 
--- topic 模板: 截断 128, 去首尾空格, {sn} 由 profile() 代, 空串用默认
+-- topic 模板: 截断 128, 去首尾空格, {sn} 由 profile() 代, 空串回退 d
+-- Step 2k: d 现在是空串 (M.default 已删默认路径), 空串回退仍为空串
+-- = 设备不发布不订阅 (publish/build_subs 各自守卫)
 local function norm_topic(v, d)
     if type(v) ~= "string" then return d end
     v = v:gsub("^%s*(.-)%s*$", "%1")
