@@ -2676,6 +2676,10 @@ const pInp = $('pMqInterval');
 if (pInp) pInp.onclick = editPlatformInterval;
 // Step 2c/2d: 拆 tab 后 m-/p- 各有 button, 单绑 el.btnXxx 只拿到第一个 = tabPoll 内的
 // 切到 manual/platform tab 时点不到。改用 querySelectorAll 绑所有 3 份
+// Step 2m: 把 Save + Refresh 也加进来, 之前只绑了 Report/Reconnect/PassEye,
+// manual tab 的 mBtnMqttSave / mBtnMqttRefresh 漏了, 点上去什么都不发生
+document.querySelectorAll('#mBtnMqttSave, #btnMqttSave').forEach(b => { b.onclick = saveMqtt; });
+document.querySelectorAll('#mBtnMqttRefresh, #btnMqttRefresh').forEach(b => { b.onclick = readMqtt; });
 document.querySelectorAll('#mBtnMqttReport, #pBtnMqttReport, #btnMqttReport').forEach(b => { b.onclick = reportNow; });
 document.querySelectorAll('#mBtnMqttReconnect, #pBtnMqttReconnect, #btnMqttReconnect').forEach(b => { b.onclick = mqttReconnect; });
 // 密码眼按钮 manual 档有, 平台档没 (Step 2c 删了), tabPoll 仍保留
