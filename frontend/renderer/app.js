@@ -371,16 +371,22 @@ async function guardUnsaved(dirty, what, btn, clear) {
 //   可以放心用快照比对。首页那 2 个 MQTT 输入框会被 renderHome 每 5s 回填，
 //   所以在 fillMqHome 里额外加一道"脏了就不覆盖"，否则用户改了一半的
 //   地址/端口会被设备旧值冲掉且毫无提示。
+// Step 2n: 改用 E(pre, 'mqXxx') 而不是 el.mqXxx, 档位决定取哪个 input:
+//   manual 档读 mMqXxx, platform 档读 pMqXxx, poll 档读 mqXxx (=el.mqXxx)
+// 之前只读 el.mqXxx (=tabPoll), 切到 manual/platform tab 改了 5 字段
+// 也不会被 dirty 识别, 保存按钮不变色
 //---------------------------------------------------------------------
 function mqSnap() {
   const g = e => (e ? e.value : '');
   const c = e => (e ? e.checked : false);
+  const pre = mqttPrefix();
+  const E_ = id => E(pre, id);
   return JSON.stringify({
-    host: g(el.mqHost), port: g(el.mqPort), ssl: c(el.mqSsl),
-    user: g(el.mqUser), pass: g(el.mqPass), cid: g(el.mqClientId),
-    pub: g(el.mqPub), sub: g(el.mqSub),
-    iv: g(el.mqInterval), snIv: g(el.snMqInterval),
-    noSn: c(el.mqAllowNoSn), keep: g(el.mqKeepSession),
+    host: g(E_('mqHost')), port: g(E_('mqPort')), ssl: c(E_('mqSsl')),
+    user: g(E_('mqUser')), pass: g(E_('mqPass')), cid: g(E_('mqClientId')),
+    pub: g(E_('mqPub')), sub: g(E_('mqSub')),
+    iv: g(E_('mqInterval')), snIv: g(el.snMqInterval),
+    noSn: c(E_('mqAllowNoSn')), keep: g(E_('mqKeepSession')),
     hHost: g(el.hMqHost), hPort: g(el.hMqPort), hPass: g(el.hMqPass),
     hCid: g(el.hMqClientId)
   });
@@ -436,8 +442,14 @@ function refreshMqDirty() {
   if (d === S.mqDirty) return;
   S.mqDirty = d;
   // MQTT 页和首页各有一个保存按钮，两边都要显示未保存标记
+  // Step 2n: manual tab 的 mBtnMqttSave 也加上, 之前只切了 tabPoll 的
+  // (Step 2a 拆 tab 时漏了, 跟 2m 的 btn 绑定漏是同根问题)
   el.btnMqttSave.textContent = d ? '保存 *' : '保存';
   el.btnMqttSave.classList.toggle('dirty', d);
+  if (el.mBtnMqttSave) {
+    el.mBtnMqttSave.textContent = d ? '保存 *' : '保存';
+    el.mBtnMqttSave.classList.toggle('dirty', d);
+  }
   if (el.btnHomeMqttSave) {
     el.btnHomeMqttSave.textContent = d ? '保存并重连 *' : '保存并重连';
     el.btnHomeMqttSave.classList.toggle('dirty', d);
@@ -2744,6 +2756,10 @@ function activateTab(tabId) {
   if ((tabId === 'tabManual' || tabId === 'tabPlatform') && S.open) {
     if (isPlatform(S.mode)) readCfgSilent();
   }
+  // Step 2n: 切 tab 时重取 mqSnap 基线。理由: mqSnap 走 E(pre, 'mqXxx'),
+  // 不同档位取不同 input, 切档时新旧基线如果不重取会误报 dirty
+  // (例 manual 填 5 字段 → 切 poll → 切回 manual → 5 字段值还在但 baseline 是 poll 的空值)
+  snapMqClean();
 }
 
 const tabItems = document.querySelectorAll('.tab-header .tab-item');
