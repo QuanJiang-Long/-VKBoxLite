@@ -344,6 +344,12 @@ function refreshCfgDirty(pre) {
   // cfgSnap 还是 null 说明从没读过配置，没有可比基线，不算脏
   if (pre === undefined) pre = cfgPrefix();
   const d = S.cfgSnap !== null && cfgSnap(pre) !== S.cfgSnap;
+  // Step 2r: 加 debug log 排查 dirty 改回原值不恢复问题
+  if (window.console && window.console.log) {
+    const cur = S.cfgSnap !== null ? cfgSnap(pre) : '(null)';
+    const bas = S.cfgSnap !== null ? S.cfgSnap : '(null)';
+    window.console.log('[cfgDirty]', JSON.stringify({pre: pre, dirty_now: S.cfgDirty, dirty_new: d, cur: cur, base: bas}));
+  }
   if (d === S.cfgDirty) return;
   const wasDirty = S.cfgDirty;
   S.cfgDirty = d;
