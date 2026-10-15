@@ -341,6 +341,12 @@ function refreshCfgDirty(pre) {
   S.cfgDirty = d;
   el.btnSaveCfg.textContent = d ? '保存配置 *' : '保存配置';
   el.btnSaveCfg.classList.toggle('dirty', d);
+  // Step 2p: manual tab 的 mBtnSaveCfg 也加 dirty 切换
+  // 平台档没保存按钮 (pBtnSaveCfg 已注释, 平台档只读), 不切
+  if (el.mBtnSaveCfg) {
+    el.mBtnSaveCfg.textContent = d ? '保存配置 *' : '保存配置';
+    el.mBtnSaveCfg.classList.toggle('dirty', d);
+  }
   if (d) status('有未保存的更改，点「保存配置」生效', false);
   // 由脏变干净时要清掉 status —— 程序填表 (readCfg/readCfgSilent/
   // pullCfg 内的 fillFormFromPlatform) 会先填成"脏"再 snapClean, 不清就
@@ -1096,7 +1102,11 @@ async function readVal() {
       if (it.addr != null) byAddr[String(it.addr)] = it;
     });
     let hit = 0, total = 0;
-    el.paramTbody.querySelectorAll('tr').forEach(tr => {
+    // Step 2p: 改用 E(pre, 'paramTbody') 走档位取 tbody, 跟 cfgSnap 一致
+    // 之前走 el.paramTbody (= tabPoll 的), manual tab 读了会显示"参数列表为空"
+    // 因为手动档的寄存器行都在 mParamTbody 里, 不在 tabPoll 的 paramTbody
+    const valTbody = E(cfgPrefix(), 'paramTbody');
+    valTbody.querySelectorAll('tr').forEach(tr => {
       // 空表提示行没有这些 class，必须先判空。
       // 少了这道判断，占位行会让 querySelector(...).value 抛 TypeError，
       // 被下面的 catch 吞成一句英文 "Cannot read properties of null"
@@ -2565,9 +2575,13 @@ if (el.btnPushIgnore) el.btnPushIgnore.onclick = () => {
 // （波特率/从站/间隔/超时 4 个输入框 + 3 组 radio + 参数表每行 5 个可编辑单元格），
 // 比逐个控件挂监听省事，新增控件也不会漏。
 // 增行/删行走 DOM 操作，不触发这两个事件，已在 addRegRow/deleteRow 里手动标脏
+// Step 2p: 拆 m/p 后, manual/platform tab 的 485 面板 (sp-m-s1 / sp-p-s1)
+// 也要挂上, 跟 2m/2n/2o 同根问题 (Step 2a 拆 tab 时漏)
 ['input', 'change'].forEach(ev => {
-  const pane = $('sp-s1');
-  if (pane) pane.addEventListener(ev, refreshCfgDirty);
+  ['sp-s1', 'sp-m-s1', 'sp-p-s1'].forEach(id => {
+    const pane = $(id);
+    if (pane) pane.addEventListener(ev, refreshCfgDirty);
+  });
 });
 
 // MQTT 未保存检测：MQTT 页(#sp-s2) + 首页 MQTT 那一栏(#tab0)分属两个容器，
