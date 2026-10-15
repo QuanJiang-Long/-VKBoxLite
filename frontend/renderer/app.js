@@ -2574,8 +2574,18 @@ if (el.btnPushIgnore) el.btnPushIgnore.onclick = () => {
 // 用事件代理得挂到 body 上，反而绕。这里直接把可编辑字段逐个挂监听，
 // 一目了然，新增字段时漏不了（编译器不会提醒，但列表就摆在眼前）。
 // 程序回填(renderMqtt/fillMqHome 赋 .value)不触发这两个事件，不会误标脏
+// Step 2o: 把 manual/platform tab 的 5 字段也加进来, 跟 Step 2a 拆 tab 时漏的
+// 按钮绑定 (2m)、dirty 切换 (2n) 同根问题 — 当时只挂了一份 tabPoll 的 input
+// 监听, manual/platform tab 改了字段不会触发 refreshMqDirty
+//   manual 档 9 字段: mMqHost/Port/Ssl/User/Pass/Cid/Pub/Sub/Interval
+//   platform 档 5 字段: pMqHost/Port/Ssl/Interval/KeepSession
+//   tabPoll 还差 2: mqPub/Sub (之前漏了, 5 字段只有 user/pass/cid 被监听了)
 [el.mqHost, el.mqPort, el.mqSsl, el.mqUser, el.mqPass, el.mqClientId,
+ el.mqPub, el.mqSub,
  el.mqInterval, el.mqKeepSession, el.mqAllowNoSn,
+ el.mMqHost, el.mMqPort, el.mMqSsl, el.mMqUser, el.mMqPass, el.mMqClientId,
+ el.mMqPub, el.mMqSub, el.mMqInterval, el.mMqAllowNoSn, el.mMqKeepSession,
+ el.pMqHost, el.pMqPort, el.pMqSsl, el.pMqInterval, el.pMqKeepSession,
  el.hMqHost, el.hMqPort, el.hMqPass, el.hMqClientId].forEach(e => {
   if (!e) return;
   e.addEventListener('input', refreshMqDirty);
