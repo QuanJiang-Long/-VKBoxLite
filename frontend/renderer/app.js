@@ -2370,6 +2370,68 @@ function askExportFormat() {
   });
 }
 
+// Step 2j: 平台档点击 pMqInterval 弹窗修改上报周期
+// 走问询弹窗 (单 input + 确认/取消), 返回输入的秒数 (number) 或 null (取消)
+// 参考 askExportFormat 风**格**, 复用 .modal.modal-open class
+function askEditInterval(cur) {
+  return new Promise(resolve => {
+    const modal = document.createElement('div');
+    modal.className = 'modal modal-open';
+    modal.innerHTML = `
+      <div class="modal-content" style="text-align:center;width:320px;">
+        <h3 style="margin:0 0 14px 0;">修改上报周期</h3>
+        <div style="margin-bottom:8px;font-size:13px;color:#666;">当前值: <b style="color:#0a7d2c;">${cur} 秒</b></div>
+        <div style="margin-bottom:14px;display:flex;align-items:center;justify-content:center;gap:6px;">
+          <input id="askIntervalInp" type="number" min="120" max="86400" value="${cur}" style="width:140px;padding:8px;font-size:14px;">
+          <span style="color:#666;">秒</span>
+        </div>
+        <div style="font-size:12px;color:#999;margin-bottom:12px;">范围 120 ~ 86400 秒 (2 分钟 ~ 1 天)</div>
+        <div style="display:flex;gap:10px;">
+          <button data-act="ok" class="primary" style="flex:1;padding:10px;">确认</button>
+          <button data-act="cancel" style="flex:1;padding:10px;">取消</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const inp = modal.querySelector('#askIntervalInp');
+    setTimeout(() => { inp.focus(); inp.select(); }, 50);
+    const close = v => { document.body.removeChild(modal); resolve(v); };
+    modal.addEventListener('click', e => {
+      if (e.target === modal) return close(null);
+      const act = e.target && e.target.dataset && e.target.dataset.act;
+      if (act === 'cancel') return close(null);
+      if (act === 'ok') {
+        const v = parseInt(inp.value, 10);
+        if (!v || v < 120 || v > 86400) { toast('请输入 120~86400 之间的整数'); return; }
+        return close(v);
+      }
+    });
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); modal.querySelector('[data-act=ok]').click(); }
+      else if (e.key === 'Escape') { e.preventDefault(); close(null); }
+    });
+  });
+}
+
+// 平台档 pMqInterval 只读但允许"点击弹窗修改", 输入新值后走 saveMqtt
+async function editPlatformInterval() {
+  const elInp = E('p', 'mqInterval');
+  if (!elInp) return;
+  const cur = parseInt(elInp.value, 10) || 120;
+  const v = await askEditInterval(cur);
+  if (v == null || v === cur) return;
+  // 改 input.value (让 saveMqtt 走 E('p', 'mqInterval').value 拿到新值)
+  elInp.value = String(v);
+  status('正在保存上报周期 ' + v + ' 秒…', true);
+  try {
+    await saveMqtt();
+    status('已保存上报周期 ' + v + ' 秒', true);
+    toast('上报周期已改为 ' + v + ' 秒');
+  } catch (e) {
+    status('保存失败：' + e.message, false);
+    toast('保存失败：' + e.message);
+  }
+}
+
 // 2h exportCfg: 弹窗选 json/csv, dispatch 到对应导出函数
 async function exportCfg(pre) {
   if (pre === undefined) pre = cfgPrefix();
@@ -2603,6 +2665,11 @@ async function writeManualMode(on) {
 // Step 2i: 删 btnManualCfg.onclick — 整**个**按**钮**已**从** HTML 移**除**(本面板就**是**手**动**配**置**)
 // 档**位**切**换**走**保**存**时**的** saveMqtt / writeManualMode 配**合**完**成**, 不**再**单**独**有**"开/关"按**钮**
 el.btnMqttSave.onclick = saveMqtt;
+// Step 2j: 平台档 pMqInterval 只读但允许"点击弹窗修改"
+// el Proxy lazy lookup: 第一次 el.pMqInterval 触发 $(pMqInterval) 拿到 DOM
+// 只有 platform tab 有这元素, manual/tabPoll 的 mMqInterval / mqInterval 是可输入的 (无 .ro-clickable)
+const pInp = $('pMqInterval');
+if (pInp) pInp.onclick = editPlatformInterval;
 // Step 2c/2d: 拆 tab 后 m-/p- 各有 button, 单绑 el.btnXxx 只拿到第一个 = tabPoll 内的
 // 切到 manual/platform tab 时点不到。改用 querySelectorAll 绑所有 3 份
 document.querySelectorAll('#mBtnMqttReport, #pBtnMqttReport, #btnMqttReport').forEach(b => { b.onclick = reportNow; });

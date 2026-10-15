@@ -51,7 +51,9 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
    JS 只切这个 class，不写 style.display，避免和 .form-row 的 flex 打架 */
 body:not(.mq-manual) .manual-only{display:none !important;}
 /* 「自动档」专属 (platform/sniff), manual 档整行藏掉 (跟 .manual-only 互补).
-   上报周期 manual 走用户 pub_topic 不节流, 这项只对自动档 (U2-m/U3/U4) 有意义 */
+   当前没有 .auto-only 元素了 —— 上报周期 interval_s 是 manual/platform 共用
+   (见 lua/iot/mqttcfg.lua "host/port/ssl/interval_s/... 是【共用】参数"),
+   之前误把上报周期归到 .auto-only 导致手动档无法调周期, Step 2j 修 */
 body.mq-manual .auto-only{display:none !important;}
 /* ⚠️ 排除 .switch：开关本身也是 <label>，会被这条规则撑到 150px 宽，
    视觉上滑块右侧拖一条大空白，整行显得被拉长。开关只该有它自己的 42px。 */
@@ -94,6 +96,9 @@ body.mq-manual .auto-only{display:none !important;}
    灰底+绿字, 一眼看出"这是平台下发的, 设备那边说了算"。input 加 readonly,
    select/checkbox 加 disabled, 这里只管外观 */
 .ro-val{background:#f4f6f9 !important;color:#0a7d2c !important;cursor:not-allowed !important;font-weight:bold !important;border-color:#dde2ea !important;}
+/* Step 2j: 5 字段中 mqInterval 可"点击弹窗修改", 覆写 cursor 为 pointer
+   其他 4 字段 (host/port/ssl/keepSession) 不加这 class, 仍是 not-allowed */
+.ro-clickable{cursor:pointer !important;}
 .ro-wrap{padding:6px 10px;background:#f4f6f9;border:1px solid #dde2ea;border-radius:3px;color:#0a7d2c;font-weight:bold;display:inline-block;min-width:60px;}
 /* 串口子标签 */
 .serial-tabs{display:flex;border-bottom:1px solid #ddd;margin-bottom:10px;}
@@ -462,14 +467,16 @@ body.mq-manual .auto-only{display:none !important;}
                         <input id="mMqClientId" type="text" placeholder="留空即用设备 SN 加下划线，如 11802026092600016_">
                     </div>
                     <div class="form-row manual-only">
-                        <label>发布Topic</label>
-                        <input id="mMqPub" type="text" placeholder="留空即用设备默认模板 /sys/thing/node/property/post/{SN}">
-                    </div>
-                    <div class="form-row manual-only">
                         <label>订阅Topic</label>
                         <input id="mMqSub" type="text" placeholder="留空即用设备默认模板 /sys/thing/gw/config/get/{SN}">
                     </div>
-                    <div class="form-row auto-only">
+                    <div class="form-row manual-only">
+                        <label>发布Topic</label>
+                        <input id="mMqPub" type="text" placeholder="留空即用设备默认模板 /sys/thing/node/property/post/{SN}">
+                    </div>
+                    <!-- Step 2j: interval_s 是共用字段 (手动/自动档都用同一份),
+                         之前 .auto-only 隐藏了, 手动档用户也调不了周期。改回无 class -->
+                    <div class="form-row">
                         <label>上报周期(秒)</label>
                         <input id="mMqInterval" type="number" value="120" min="120" max="86400" style="max-width:140px;">
                     </div>
@@ -620,9 +627,13 @@ body.mq-manual .auto-only{display:none !important;}
                         <label style="margin-left:16px;">TLS/SSL</label>
                         <label class="switch"><input id="pMqSsl" type="checkbox" disabled><span class="sl"></span></label>
                     </div>
-                    <div class="form-row auto-only">
+                    <div class="form-row">
                         <label>上报周期(秒)</label>
-                        <input id="pMqInterval" type="number" value="120" min="120" max="86400" style="max-width:140px;" class="ro-val" readonly>
+                        <!-- Step 2j: 平台档只读, 但允许点击弹窗修改
+                             .ro-clickable 让 input 显示 pointer 鼠标 + 锁图标
+                             onclick 绑到 editPlatformInterval, 弹模态输入新值后调 saveMqtt -->
+                        <input id="pMqInterval" type="number" value="120" min="120" max="86400" style="max-width:140px;" class="ro-val ro-clickable" readonly>
+                        <span class="hint" style="margin-left:8px;">🔒 点击修改</span>
                     </div>
                     <div class="form-row" style="align-items:flex-start;">
                         <label style="padding-top:5px;">MQTT 会话管理</label>
