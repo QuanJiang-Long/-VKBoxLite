@@ -1350,6 +1350,15 @@ function syncTabs() {
     const t = document.querySelector('.tab-header .tab-item[data-tab="' + id + '"]');
     if (t) t.style.display = show[id] ? '' : 'none';
   });
+  // 2h fix: 平台档配置从平台拉, 不允许手动导入, 按钮直接禁用
+  // (之前 importCfg 起头 toast 拦截被用户否决, 改为 UI 层禁用,
+  //  平台档点 "导入" 按钮没反应, 一看就懂)
+  if (el.btnImport) {
+    el.btnImport.disabled = isPlatform(mode);
+    el.btnImport.title = isPlatform(mode)
+        ? '平台档配置从 MQTT 平台拉取，不能导入'
+        : '导入配置文件 (.json / .csv)';
+  }
   // 当前停留的栏目被藏掉时，落到首页 —— 否则界面会变成一片空白，
   // 用户以为程序卡死了（实际只是没有 active 的 tab-pane）
   const active = document.querySelector('.tab-header .tab-item.active');
@@ -2297,7 +2306,9 @@ function exportCfgAsCsv(pre) {
   });
   // 头部注释: 手动档额外字段
   const headerNote = '# manual_on=' + S.mqManual + ', allow_no_sn=' + m.allow_no_sn + ', keep_session=' + m.keep_session + '\n';
-  const blob = new Blob([headerNote + csv], { type: 'text/csv' });
+  // 2h fix: 加 UTF-8 BOM (\uFEFF), Excel 看到 BOM 自动用 UTF-8 解码, 中文不乱码
+  // type 也加 charset=utf-8, 让其他工具 (LibreOffice/VSCode) 也能正确识别
+  const blob = new Blob(['\uFEFF' + headerNote + csv], { type: 'text/csv;charset=utf-8' });
   downloadBlob(blob, 'vkbox_config_' + new Date().toISOString().slice(0, 10) + '.csv');
   toast('配置已导出为 CSV');
 }
@@ -2380,13 +2391,9 @@ async function exportCfg(pre) {
 }
 
 // 2h importCfg: 文件选择框 (filter .json,.csv), 选完按扩展名 dispatch
+// 平台档已被 syncTabs 禁用 btnImport, 此处不需再检查 isPlatform
 async function importCfg(pre) {
   if (pre === undefined) pre = cfgPrefix();
-  // 平台档配置从平台拉取, 不允许用户手动导入 (导入会被 5s 后 readCfg 顶掉)
-  if (isPlatform(S.mode)) {
-    toast('平台档配置从 MQTT 平台拉取，不能导入。如需修改请联系平台');
-    return;
-  }
   // 先问再弹文件选择框：顺序反了的话用户选完文件才被告知会丢改动，白选一趟
   if (!await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
   const inp = document.createElement('input');
