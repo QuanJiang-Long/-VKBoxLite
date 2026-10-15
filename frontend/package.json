@@ -8,6 +8,7 @@
     "start": "electron .",
     "dist": "electron-builder --win --x64",
     "dist:portable": "electron-builder --win portable --x64",
+    "test": "node tests/run.js",
     "postinstall": "node -e \"try{require('electron')}catch(e){console.log('electron binary pending, run: npx electron-rebuild or re-install')}\""
   },
   "build": {
