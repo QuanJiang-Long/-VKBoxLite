@@ -344,12 +344,6 @@ function refreshCfgDirty(pre) {
   // cfgSnap 还是 null 说明从没读过配置，没有可比基线，不算脏
   if (pre === undefined) pre = cfgPrefix();
   const d = S.cfgSnap !== null && cfgSnap(pre) !== S.cfgSnap;
-  // Step 2r: 加 debug log 排查 dirty 改回原值不恢复问题
-  if (window.console && window.console.log) {
-    const cur = S.cfgSnap !== null ? cfgSnap(pre) : '(null)';
-    const bas = S.cfgSnap !== null ? S.cfgSnap : '(null)';
-    window.console.log('[cfgDirty]', JSON.stringify({pre: pre, dirty_now: S.cfgDirty, dirty_new: d, cur: cur, base: bas}));
-  }
   if (d === S.cfgDirty) return;
   const wasDirty = S.cfgDirty;
   S.cfgDirty = d;
@@ -2591,10 +2585,14 @@ if (el.btnPushIgnore) el.btnPushIgnore.onclick = () => {
 // 增行/删行走 DOM 操作，不触发这两个事件，已在 addRegRow/deleteRow 里手动标脏
 // Step 2p: 拆 m/p 后, manual/platform tab 的 485 面板 (sp-m-s1 / sp-p-s1)
 // 也要挂上, 跟 2m/2n/2o 同根问题 (Step 2a 拆 tab 时漏)
+// Step 2s: 用箭头函数包装, 不传事件对象给 refreshCfgDirty, 否则第一个参数
+// 是 Event 对象 (有 isTrusted 等属性), 会被当作 pre 档位参数传给 cfgSnap,
+// cfgSnap 走 E(事**件**对**象**, ...) 因**为**事**件**对**象**是** truthy 走** _nullStub 分**支**,
+// 所**有**字**段**返**回**空**字**符**串**, dirty 判**定**失**效**
 ['input', 'change'].forEach(ev => {
   ['sp-s1', 'sp-m-s1', 'sp-p-s1'].forEach(id => {
     const pane = $(id);
-    if (pane) pane.addEventListener(ev, refreshCfgDirty);
+    if (pane) pane.addEventListener(ev, () => refreshCfgDirty());
   });
 });
 
