@@ -98,9 +98,9 @@ const el = new Proxy({
   selBaud: $('selBaud'), inpRound: $('inpRound'),
   inpSlave: $('inpSlave'), inpTimeout: $('inpTimeout'),
   btnReadVal: $('btnReadVal'), btnAddReg: $('btnAddReg'), paramTbody: $('paramTbody'),
-  btnManualCfg: $('btnManualCfg'),
+  // Step 2i: 删 btnManualCfg / btnMqttReset (本面板就是手动配置, 有刷新了)
   btnMqttRefresh: $('btnMqttRefresh'), btnMqttSave: $('btnMqttSave'),
-  btnMqttReport: $('btnMqttReport'), btnMqttReset: $('btnMqttReset'),
+  btnMqttReport: $('btnMqttReport'),
   mqHost: $('mqHost'), mqPort: $('mqPort'), mqSsl: $('mqSsl'), mqUser: $('mqUser'),
   mqPass: $('mqPass'), mqClientId: $('mqClientId'),
   btnMqttPassEye: $('btnMqttPassEye'),
@@ -422,11 +422,7 @@ function setManualMode(on, opts) {
   // 驱动（CSS 里 body:not(.mq-manual) .manual-only），比逐个写
   // style.display 干净：.form-row 的 flex 不会被内联样式盖掉
   document.body.classList.toggle('mq-manual', S.mqManual);
-  el.btnManualCfg.textContent = S.mqManual ? '关闭手动配置' : '手动配置';
-  el.btnManualCfg.classList.toggle('on', S.mqManual);
-  el.btnManualCfg.title = S.mqManual
-      ? '关闭后设备改用 SN + 首页凭证密码'
-      : '手动配置：用本页填的用户名/密码建连';
+  // Step 2i: 删 btnManualCfg (冗余), 不再有"开/关手动配置"按钮, 档位切**换**走**保**存**时**一**起**做
   syncPullCfgBtn();
   // 关档时把手动档那几项整行藏掉。留着已填的值不清 —— R:MQTT 回来会按
   // manual_on 重填，期间留着只是看不见，不会误发
@@ -1754,21 +1750,14 @@ function renderMqtt() {
   // 当前档次: 手动 = 用本页填的凭证；自动 = 首页那份凭证 + SN
   setKvPre(pre, 'mqStMode', c.manual_on ? '手动配置' : '自动（设备拼接）', !!c.manual_on);
   setKvPre(pre, 'mqStSubed', s.subscribed ? '是' : '否', !s.subscribed);
-  // 订阅Topic 全量：conack 时设备实际订到的每一条。只列 topic 不列数，
-  // 现场直接照着对 broker 上有没有这条订阅。三档同一份（文档"下行 topic
-  // 三路同"），所以不再按档位显隐
-  const subs = Array.isArray(s.subs) ? s.subs : [];
-  setKvPre(pre, 'mqStSubs', subs.length ? subs.join('\n') : '未连接', subs.length === 0);
-  // 配置回执：拉取配置成功后要点保存才会 +1，为 0 说明平台还在等核销
-  setKvPre(pre, 'mqStReplied', s.replied ? s.replied + ' 次' : '0 次', !s.replied);
-  setKvPre(pre, 'mqStPubed', s.published);
-  setKvPre(pre, 'mqStFailed', s.failed, s.failed > 0);
-  setKvPre(pre, 'mqStLast', s.last_pub ? new Date(s.last_pub * 1000).toLocaleTimeString() : '');
-  setKvPre(pre, 'mqStBackoff', s.backoff != null ? s.backoff + ' s' : '');
+  // Step 2i: 17 字段 → 9 字段, 删 8 个 setKvPre (面板也对应删了):
+  //  - mqStSubs 订阅Topic / mqStReplied 配置回执 / mqStPubed 已上报条数
+  //  - mqStFailed 失败次数 / mqStLast 最近上报 / mqStBackoff 重连退避
+  //  - mqStErr 最近错误 (走 status 底**部**条**) / mqStSn SN 状**态** (设**备**编**号**就**是** SN)
+  // 保留: mqStConn / mqStClientId / mqStUser / mqStDevId / mqStMode /
+  //        mqStPub / mqStSub / mqStSubed / mqStKeepSession
   setKvPre(pre, 'mqStKeepSession',
         s.keep_session == null ? '--' : (s.keep_session ? '持久会话' : '离线自动销毁'));
-  setKvPre(pre, 'mqStErr', s.reject_reason || s.last_err || '', !!(s.reject_reason || s.last_err));
-  setKvPre(pre, 'mqStSn', r.ready ? '已烧号' : (r.err || '未烧号'), !r.ready);
   renderHome();
   // 只在第一次渲染时套一次模式：只读属性/颜色/回显来源都要跟 S.mqManual 走。
   // 后面每次 readMqtt 都重套会覆盖用户在本次会话里点的「手动配置」
@@ -1793,10 +1782,9 @@ async function readMqtt(quiet) {
     }
     snapMqClean();                 // 读完了，当前表单就是干净基线
   } catch (e) {
-    // Step 2c/2d fix: 失败也写到当前 tab 内的 mqStErr (mMqStErr/pMqStErr),
-    // 否则切到 manual/platform tab 时 17 字段状态全 "--" 但 mqStErr 错误
-    // 信息仍写 tabPoll 内的, 用户看不到
-    setKvPre(mqttPrefix(), 'mqStErr', '读取失败：' + e.message, true);
+    // Step 2i fix: 之前 setKvPre(mqttPrefix(), 'mqStErr', ...), 但 mqStErr
+    // 字段已从面板删除, 改成走 status 底部条 (用户看得到, 又不依赖字段)
+    status('读取 MQTT 状态失败：' + e.message, false);
   }
 }
 
@@ -2612,38 +2600,8 @@ async function writeManualMode(on) {
   await sendCmd(Protocol.Enc.writeMqtt(Object.assign({}, c, patch)), 'MQTT', 5000);
 }
 
-// 「手动配置」切的是建连档位：
-//   点开(蓝)=手动，用户名/密码/ClientID/发布/订阅 Topic 显示出来自己填，
-//             保存后设备先清掉自动拼的那套，再按这套建连上报
-//   点关(灰)=那几项藏掉，设备改用 SN + 首页凭证密码。
-//             关档是当场生效：屏幕上那几个手动档的值会被自动档顶掉，
-//             所以必须自己把指令发下去，否则用户看到的和设备不一致
-el.btnManualCfg.onclick = async () => {
-  if (!S.mqManual) {
-    // 开手动：可能有未保存改动，开着会丢
-    if (!await guardUnsaved(S.mqDirty, 'MQTT', '保存', () => { S.mqSnap = null; })) return;
-    setManualMode(true);
-    status('已开启手动配置，可填用户名/密码/Topic，记得保存', true);
-  } else {
-    // 关手动：屏幕上那几个手动档的值会被自动档顶掉，同样要先问
-    if (!await guardUnsaved(S.mqDirty, 'MQTT', '保存', () => { S.mqSnap = null; })) return;
-    status('正在关闭手动配置并重连…', true);
-    try {
-      await writeManualMode(false);
-      // setManualMode 内部的 snapMqClean 会把"刚写下去的档位"设为干净基线，
-      // 这样关档不会留下一个永远消不掉的「未保存」标记
-      setManualMode(false);
-      status('已关闭手动配置，设备改用 SN + 首页凭证密码', true);
-      toast('已切回自动档，设备重连中');
-      await new Promise(res => setTimeout(res, 1500));
-      await readMqtt(true);
-      readHome();
-    } catch (e) {
-      status('切换失败：' + e.message, false);
-      toast('切换失败：' + e.message);
-    }
-  }
-};
+// Step 2i: 删 btnManualCfg.onclick — 整**个**按**钮**已**从** HTML 移**除**(本面板就**是**手**动**配**置**)
+// 档**位**切**换**走**保**存**时**的** saveMqtt / writeManualMode 配**合**完**成**, 不**再**单**独**有**"开/关"按**钮**
 el.btnMqttSave.onclick = saveMqtt;
 // Step 2c/2d: 拆 tab 后 m-/p- 各有 button, 单绑 el.btnXxx 只拿到第一个 = tabPoll 内的
 // 切到 manual/platform tab 时点不到。改用 querySelectorAll 绑所有 3 份
@@ -2664,53 +2622,8 @@ if (el.btnSnMqttSave) el.btnSnMqttSave.onclick = async () => {
   }
 };
 if (el.btnHomeMqttPassEye) el.btnHomeMqttPassEye.onclick = togglePassEye;
-el.btnMqttReset.onclick = async () => {
-  if (!await guardUnsaved(S.mqDirty, 'MQTT', '保存', () => { S.mqSnap = null; })) return;
-  if (!await askConfirm('确定恢复 MQTT 默认配置？', '恢复默认配置')) return;
-  // 恢复默认 = 回到自动档。但默认模板要下发就必须先切手动（自动模式下
-  // saveMqtt 把 topic 从 payload 里省掉），所以这里借用一下手动档把默认值
-  // 写下去，写完立刻调 writeManualMode(false) 让设备清掉手动档内容，
-  // 正好回到"SN + 首页凭证密码 + 默认模板"
-  if (!S.mqManual) setManualMode(true, { snap: false });
-  // 与设备端 mqttcfg.default 保持一致(见 lua/iot/mqttcfg.lua 的注释):
-  // 默认指向本项目 V3 平台, 不是 mosquitto 测试盘
-  el.mqHost.value = 'dz.voltkun.com';
-  el.mqPort.value = 1883;
-  el.mqSsl.checked = false;
-  // username/clientId 都留空即由设备兜底: 自动档 username 用裸 SN,
-  // clientId 用 SN 加下划线(平台 B 模型)
-  el.mqUser.value = '';
-  // 两档凭证密码都恢复产品级默认值, 首页那个框一起复位,
-  // 否则恢复后两页显示不一致
-  el.mqPass.value = 'VKBOXGW2026KEY';
-  if (el.hMqPass) el.hMqPass.value = 'VKBOXGW2026KEY';
-  el.mqClientId.value = '';
-  // topic 恢复默认模板。留空 = 用设备默认模板(normalize 见空串回退),
-  // 与设备端 mqttcfg.default 的 pub_topic/sub_topic 一致
-  el.mqPub.value = '';
-  el.mqSub.value = '';
-  el.mqInterval.value = 60;
-  el.mqAllowNoSn.checked = false;
-  el.mqKeepSession.value = '0';     // 离线自动销毁（与设备默认一致）
-  // 首页 ClientID 一起清空 (清空 = 交还设备自动用 SN 拼)
-  if (el.hMqClientId) el.hMqClientId.value = '';
-  try {
-    // 借手动档把默认凭证写下去
-    await saveMqtt();
-    // 再显式关回自动档: 上面那下 manual_on 还是 true(借来的),
-    // 不补这一下设备就停在手动档了
-    await writeManualMode(false);
-    setManualMode(false);
-    status('已恢复默认配置，设备正在重连', true);
-    toast('已恢复默认');
-    await new Promise(res => setTimeout(res, 1500));
-    await readMqtt(true);
-    readHome();
-  } catch (e) {
-    status('恢复默认失败：' + e.message, false);
-    toast('恢复默认失败：' + e.message);
-  }
-};
+// Step 2i: 删 btnMqttReset.onclick — 整**个**按**钮**已**从** HTML 移**除**(有**刷**新**了**, 按**钮**冗**余**)
+// 如**果**用**户**需**要**重**置**配**置**, 手**动**改**每**一**项** (有**填**的**就**清**空**) + 走**保**存**即**可**
 
 // 报文页
 el.btnFrameRefresh.onclick = readFrames;

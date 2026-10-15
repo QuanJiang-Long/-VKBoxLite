@@ -426,7 +426,7 @@ body.mq-manual .auto-only{display:none !important;}
                 <div class="serial-pane" id="sp-m-s2">
                 <div class="panel">
                     <div class="panel-title">MQTT 连接
-                        <button class="sm" id="mBtnManualCfg" title="关闭时：用户名/密码/ClientID/Topic 由设备自动拼接；打开后：这几项自己填，保存生效">手动配置</button>
+                        <!-- Step 2i: 删 mBtnManualCfg (本面板就是手动配置, 按钮冗余) -->
                         <div class="spacer"></div>
                         <button class="sm" id="mBtnMqttRefresh">刷新</button>
                     </div>
@@ -486,7 +486,7 @@ body.mq-manual .auto-only{display:none !important;}
                         <span class="hint">默认关闭：防止多台未烧号设备撞同一 topic</span>
                     </div>
                     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;">
-                        <button id="mBtnMqttReset" class="danger">恢复默认</button>
+                        <!-- Step 2i: 删 mBtnMqttReset (有刷新了, 按钮冗余) -->
                         <button id="mBtnMqttReport">立即上报一次</button>
                         <div style="margin-left:auto;"></div>
                         <button id="mBtnMqttReconnect">重连</button>
@@ -496,6 +496,11 @@ body.mq-manual .auto-only{display:none !important;}
                 <div class="panel">
                     <div class="panel-title">连接与上报状态</div>
                     <div class="kv-grid">
+                        <!-- Step 2i: 连接与上报状态从 17 字段砍到 9 字段
+                             删: 订阅Topic / 配置回执 / 已上报条数 / 失败次数 / 最近上报 /
+                             重连退避 / 最近错误 / SN 状态 (设备编号就是 SN, 同一字段)
+                             保: 连接状态 / ClientID / 用户名 / 设备编号 / 当前档次 /
+                             生效发布 / 生效订阅 / 已订阅 / 会话管理 -->
                         <div class="kv"><b>连接状态</b><span id="mMqStConn">--</span></div>
                         <div class="kv"><b>ClientID</b><span id="mMqStClientId">--</span></div>
                         <div class="kv"><b>用户名</b><span id="mMqStUser">--</span></div>
@@ -504,15 +509,7 @@ body.mq-manual .auto-only{display:none !important;}
                         <div class="kv"><b>生效发布</b><span id="mMqStPub">--</span></div>
                         <div class="kv"><b>生效订阅</b><span id="mMqStSub">--</span></div>
                         <div class="kv"><b>已订阅</b><span id="mMqStSubed">--</span></div>
-                        <div class="kv"><b>订阅Topic</b><span id="mMqStSubs">--</span></div>
-                        <div class="kv"><b>配置回执</b><span id="mMqStReplied">--</span></div>
-                        <div class="kv"><b>已上报条数</b><span id="mMqStPubed">--</span></div>
-                        <div class="kv"><b>失败次数</b><span id="mMqStFailed">--</span></div>
-                        <div class="kv"><b>最近上报</b><span id="mMqStLast">--</span></div>
-                        <div class="kv"><b>重连退避</b><span id="mMqStBackoff">--</span></div>
                         <div class="kv"><b>会话管理</b><span id="mMqStKeepSession">--</span></div>
-                        <div class="kv"><b>最近错误</b><span id="mMqStErr">--</span></div>
-                        <div class="kv"><b>SN 状态</b><span id="mMqStSn">--</span></div>
                     </div>
                 </div>
                 </div>
@@ -643,6 +640,7 @@ body.mq-manual .auto-only{display:none !important;}
                 <div class="panel">
                     <div class="panel-title">连接与上报状态</div>
                     <div class="kv-grid">
+                        <!-- Step 2i: 同 manual tab, 17 字段砍到 9 -->
                         <div class="kv"><b>连接状态</b><span id="pMqStConn">--</span></div>
                         <div class="kv"><b>ClientID</b><span id="pMqStClientId">--</span></div>
                         <div class="kv"><b>用户名</b><span id="pMqStUser">--</span></div>
@@ -651,15 +649,7 @@ body.mq-manual .auto-only{display:none !important;}
                         <div class="kv"><b>生效发布</b><span id="pMqStPub">--</span></div>
                         <div class="kv"><b>生效订阅</b><span id="pMqStSub">--</span></div>
                         <div class="kv"><b>已订阅</b><span id="pMqStSubed">--</span></div>
-                        <div class="kv"><b>订阅Topic</b><span id="pMqStSubs">--</span></div>
-                        <div class="kv"><b>配置回执</b><span id="pMqStReplied">--</span></div>
-                        <div class="kv"><b>已上报条数</b><span id="pMqStPubed">--</span></div>
-                        <div class="kv"><b>失败次数</b><span id="pMqStFailed">--</span></div>
-                        <div class="kv"><b>最近上报</b><span id="pMqStLast">--</span></div>
-                        <div class="kv"><b>重连退避</b><span id="pMqStBackoff">--</span></div>
                         <div class="kv"><b>会话管理</b><span id="pMqStKeepSession">--</span></div>
-                        <div class="kv"><b>最近错误</b><span id="pMqStErr">--</span></div>
-                        <div class="kv"><b>SN 状态</b><span id="pMqStSn">--</span></div>
                     </div>
                 </div>
                 </div>
@@ -764,7 +754,7 @@ body.mq-manual .auto-only{display:none !important;}
                 <div class="serial-pane" id="sp-s2">
                 <div class="panel">
                     <div class="panel-title">MQTT 连接
-                        <button class="sm" id="btnManualCfg" title="关闭时：用户名/密码/ClientID/Topic 由设备自动拼接；打开后：这几项自己填，保存生效">手动配置</button>
+                        <!-- Step 2i: 删 btnManualCfg (本面板就是手动配置) -->
                         <div class="spacer"></div>
                         <button class="sm" id="btnMqttRefresh">刷新</button>
                     </div>
@@ -824,7 +814,7 @@ body.mq-manual .auto-only{display:none !important;}
                         <span class="hint">默认关闭：防止多台未烧号设备撞同一 topic</span>
                     </div>
                     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;">
-                        <button id="btnMqttReset" class="danger">恢复默认</button>
+                        <!-- Step 2i: 删 btnMqttReset (有刷新了) -->
                         <button id="btnMqttReport">立即上报一次</button>
                         <div style="margin-left:auto;"></div>
                         <button id="btnMqttReconnect">重连</button>
@@ -834,6 +824,7 @@ body.mq-manual .auto-only{display:none !important;}
                 <div class="panel">
                     <div class="panel-title">连接与上报状态</div>
                     <div class="kv-grid">
+                        <!-- Step 2i: 同 manual/platform, 17 字段砍到 9 -->
                         <div class="kv"><b>连接状态</b><span id="mqStConn">--</span></div>
                         <div class="kv"><b>ClientID</b><span id="mqStClientId">--</span></div>
                         <div class="kv"><b>用户名</b><span id="mqStUser">--</span></div>
@@ -842,15 +833,7 @@ body.mq-manual .auto-only{display:none !important;}
                         <div class="kv"><b>生效发布</b><span id="mqStPub">--</span></div>
                         <div class="kv"><b>生效订阅</b><span id="mqStSub">--</span></div>
                         <div class="kv"><b>已订阅</b><span id="mqStSubed">--</span></div>
-                        <div class="kv"><b>订阅Topic</b><span id="mqStSubs">--</span></div>
-                        <div class="kv"><b>配置回执</b><span id="mqStReplied">--</span></div>
-                        <div class="kv"><b>已上报条数</b><span id="mqStPubed">--</span></div>
-                        <div class="kv"><b>失败次数</b><span id="mqStFailed">--</span></div>
-                        <div class="kv"><b>最近上报</b><span id="mqStLast">--</span></div>
-                        <div class="kv"><b>重连退避</b><span id="mqStBackoff">--</span></div>
                         <div class="kv"><b>会话管理</b><span id="mqStKeepSession">--</span></div>
-                        <div class="kv"><b>最近错误</b><span id="mqStErr">--</span></div>
-                        <div class="kv"><b>SN 状态</b><span id="mqStSn">--</span></div>
                     </div>
                 </div>
                 </div>
