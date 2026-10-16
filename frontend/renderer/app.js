@@ -1795,8 +1795,11 @@ function activateTab(tabId) {
   // renderPushBanner. applyMode 钩子已删除 (窄), 这个钩子宽
   if (tabId === 'tabPoll' && isPlatform(S.mode)) readCfgSilent();
   // Step 1b fix: 同样, manual/platform tab 静默读一次配置
+  // 26-fix: 之前只判 isPlatform, 手动档 (S.mode='manual') 进 manual tab
+  //   时不读 ds_poll, 点表信息一直是空的。手动档是本地配 (ds_poll),
+  //   一样需要 activateTab 时读一次填表单
   if ((tabId === 'tabManual' || tabId === 'tabPlatform') && S.open) {
-    if (isPlatform(S.mode)) readCfgSilent();
+    if (isManual(S.mode) || isPlatform(S.mode)) readCfgSilent();
   }
   // Step 2n: 切 tab 时重取 mqSnap 基线。理由: mqSnap 走 E(pre, 'mqXxx'),
   // 不同档位取不同 input, 切档时新旧基线如果不重取会误报 dirty
@@ -1838,7 +1841,8 @@ serialTabs.forEach(tab => {
     // pollpull 档: 切回 485 总线面板 时再读一次 ds_pull, 覆盖"在 poll tab
     // 里从 MQTT 切回 485" 的场景 (activateTab 已经读过一次了, 重复读也
     // 没成本, 而且能赶上这中间平台 push 的内容)
-    if (key === 's1' && isPlatform(S.mode)) readCfgSilent();
+    // 26-fix: 同样, 手动档切到 s1 (485 总线) 时也读一次 ds_poll
+    if (key === 's1' && (isManual(S.mode) || isPlatform(S.mode))) readCfgSilent();
   };
 });
 
