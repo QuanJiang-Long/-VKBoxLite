@@ -131,13 +131,17 @@ local function do_transaction(frame, timeout_ms, exp_slave, exp_fc)
     -- 15-fix: 合宙分析, 之前 hold=14/64ms 期间 DE=1 还在占线, 把自动方向从机(SIT3088E模块)的
     --   响应压住了. 改用 uart.wait485 精确等 tx-done 中断 (微秒级), 立刻释放 DE.
     --   CT 142 也能照常工作 (本来 DE 拉低时机对它没影响).
-    if not pcall(uart.wait485, mbus.UART_ID) then
+    local hold_method, hold_ms
+    if pcall(uart.wait485, mbus.UART_ID) then
+        hold_method, hold_ms = "wait485", 0
+    else
         -- 降级路径: 老的 sys.wait + calc_de_hold_ms (兼容没内核 485 的旧固件)
-        local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD) + (cfg.DE_HOLD_MS or 0)
-        if sys then sys.wait(hold) end
+        hold_ms = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD) + (cfg.DE_HOLD_MS or 0)
+        hold_method = "sys.wait"
+        if sys then sys.wait(hold_ms) end
     end
     de_low()
-    log.debug("poll", string.format("de_low, hold=%dms, 等待响应 timeout=%d", hold, timeout_ms))  -- 7-fix 诊断
+    log.debug("poll", string.format("de_low, method=%s hold=%dms, 等待响应 timeout=%d", hold_method, hold_ms, timeout_ms))  -- 15-fix: method 区分 wait485 / sys.wait
     local waited = 0
     while waited < timeout_ms do
         local f = try_resp()
@@ -326,9 +330,13 @@ local function raw_tx(frame, timeout_ms, extra)
     txok = txok and true or false
     de_high()
     -- 15-fix: 用 uart.wait485 精确定位 tx-done, 见上
-    if not pcall(uart.wait485, mbus.UART_ID) then
-        local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD) + (cfg.DE_HOLD_MS or 0)
-        if sys then sys.wait(hold) end
+    local hold_method, hold_ms
+    if pcall(uart.wait485, mbus.UART_ID) then
+        hold_method, hold_ms = "wait485", 0
+    else
+        hold_ms = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD) + (cfg.DE_HOLD_MS or 0)
+        hold_method = "sys.wait"
+        if sys then sys.wait(hold_ms) end
     end
     de_low()
     timeout_ms = timeout_ms or (lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS)
