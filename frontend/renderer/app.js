@@ -529,7 +529,7 @@ async function readInfo() {
     el.fCsq.value   = d.csq != null ? d.csq : (d.rsrp != null ? 'rsrp ' + d.rsrp : '');
     el.fVer.value   = d.version || d.fw || '';
     el.fProj.value  = d.project || '';
-    el.fUrl.textContent = d.server || d.url || el.fUrl.textContent;
+    el.fUrl.value = d.server || d.url || el.fUrl.value;
     el.stSn.textContent = d.sn || '--';
     el.stDev.textContent = (d.project || '--') + ' / ' + (d.version || d.fw || '--');
     status('设备信息已读取', true);
@@ -1399,7 +1399,7 @@ function applyParsedData(pre, d) {
   if (c.interval_ms) E(pre, 'inpRound').value = c.interval_ms;
   if (c.slave) E(pre, 'inpSlave').value = c.slave;
   E(pre, 'inpTimeout').value = (c.timeout_ms == null || c.timeout_ms === '') ? '' : c.timeout_ms;
-  if (c.server) el.fUrl.textContent = c.server;
+  if (c.server) el.fUrl.value = c.server;
   const regs = d.registers || d.regs || [];
   S.regs = toArr(regs);
   renderRegTable(pre);

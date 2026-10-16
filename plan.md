@@ -590,6 +590,14 @@
     6. **保**留** applyMode **的** `!S.open` **兜**底** - **万**一**有**别**的**入**口**绕**过** .locked, **也**会**被**拦**截** + toast
   - **测**试**:**新**增** `test_29_furl_mode_locked.js`**:**7 **个**测**试**点** (fUrl **是** span / 不**是** input / **有** ro-val / **没**有** title / JS **不**用** .value / **用** .textContent / **CSS** .mode-card.locked / setPortState **切**换** locked / btnExport **加**入** / applyMode **兜**底** / 29-fix **注**释**)** 
 - **29-fix 19/19 npm test **全**过**!
+- **29-fix-2 修**正** fUrl **为** `<input readonly>` (和** SN/IMEI/ICCID/GSM/版**本**/项**目**名**同**一**种**样**式**)**:
+  - **错**误**:**之**前**把** fUrl **改**为** `<span class="ro-val">` - **绿**色**粗**体**背**景**更**深** (ro-val 的 #f4f6f9 背**景**), **和**上**面**的** `<input readonly>` **绿**色**粗**体**背**景** `#fafafa` **不**一**样**, **用**户**不**满**意** 
+  - **正**确**:**回**到** `<input type="text" readonly>`, **和** SN/IMEI/ICCID/GSM/版**本**/项**目**名**同**一**种**样**式** (CSS `.left-panel input[readonly]`**:**`color:#0a7d2c;font-weight:bold;`**)** 
+  - **修**改**:
+    1. HTML: `<span id="fUrl" class="ro-val">` → `<input id="fUrl" type="text" readonly title="只读显示, 配置服务器地址">` 
+    2. JS (2 **处**): `el.fUrl.textContent` → `el.fUrl.value` (回**到** input **的** API**)** 
+  - **测**试** 29-fix-2 **修**改** test_29: **验**证** fUrl **是** input **且**有** readonly**, **没**有** "**可**修**改**"** title; **JS **仍**用** .value **而**不**是** .textContent** 
+- **29-fix-2 19/19 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**

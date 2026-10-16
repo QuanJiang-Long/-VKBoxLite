@@ -18,22 +18,22 @@ const indexHtml = fs.readFileSync(
   'utf8'
 );
 
-// 测 1: fUrl 在 HTML 中是 span, 不是 input
+// 测 1: fUrl 在 HTML 中是 input readonly, 和 SN/IMEI 等同模式
 const fUrlInHtml = indexHtml.match(/<[^>]*id="fUrl"[^>]*>/);
 assertEq(!!fUrlInHtml, true, '能找到 fUrl 元素');
 if (fUrlInHtml) {
   const tag = fUrlInHtml[0];
-  assertEq(/^<span/.test(tag), true, 'fUrl 是 span 标签');
-  assertEq(/^<input/.test(tag), false, 'fUrl 不是 input 标签');
-  assertEq(/class="ro-val"/.test(tag), true, 'fUrl 有 ro-val class');
-  assertEq(/title="配置服务器地址，可修改"/.test(tag), false, 'fUrl 没有 "可修改" title');
+  assertEq(/^<input/.test(tag), true, 'fUrl 是 input 标签 (和 SN/IMEI 等同模式)');
+  assertEq(/readonly/.test(tag), true, 'fUrl 有 readonly 属性');
+  assertEq(/^<span/.test(tag), false, 'fUrl 不是 span 标签');
+  assertEq(/可修改/.test(tag), false, 'fUrl 没有 "可修改" title (29-fix-2 修正)');
 }
 
-// 测 2: fUrl.value 改成 fUrl.textContent
+// 测 2: fUrl 仍用 .value (因为是 input)
 const hasValue = /el\.fUrl\.value\s*=/.test(appJs);
-assertEq(hasValue, false, 'JS 中不再用 el.fUrl.value (应该用 textContent)');
+assertEq(hasValue, true, 'JS 中仍用 el.fUrl.value (input 元素)');
 const hasTextContent = /el\.fUrl\.textContent\s*=/.test(appJs);
-assertEq(hasTextContent, true, 'JS 中使用 el.fUrl.textContent');
+assertEq(hasTextContent, false, 'JS 中不再用 el.fUrl.textContent (29-fix-2 修正)');
 
 // 测 3: .mode-card.locked CSS 存在
 const hasLockedCss = /\.mode-card\.locked\s*\{[^}]*opacity\s*:\s*\.5/.test(indexHtml);
