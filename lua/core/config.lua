@@ -16,8 +16,9 @@ M.MAX_REGS = 128
 -- 14-fix: DE_PIN 保持时间额外余量 (ms)
 --   6-fix calc_de_hold_ms 已经 +5ms 基础余量, 这里再加 N ms
 --   解决 SIT3088E 等"自动收发"模块的时序兼容问题 (自动切换有延迟)
---   默认 50ms 测出 14-fix 的兼容性, 验证后可调回 0
-M.DE_HOLD_MS = 50
+--   14-fix 验证失败 (hold=64ms 还是 100% timeout) -> 不是 DE 时序问题
+--   改回 0, 留这个配置位是为了以后排查其他兼容性问题
+M.DE_HOLD_MS = 0
 
 -- 看门狗与监控
 M.WDT_TIMEOUT = 9000
