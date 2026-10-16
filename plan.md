@@ -557,6 +557,15 @@
   - **修**改**:`activateTab` **和** serial-tab **钩**子**从** `isPlatform(S.mode)` **改**为** `isManual(S.mode) || isPlatform(S.mode)`** - **两**档**都**能**刷**新** 
   - **测**试**:**新**增** `test_26_manual_tab_refresh.js`**:**正**则**匹**配** 4 **个**测**试**点** (activateTab 钩**子** / serial-tab 钩**子** / 26-fix **注**释** / **没**有**残**留**)** 
 - **26-fix 16/16 npm test **全**过**!
+- **27-fix readCfgSilent **去**掉** src=default **早** return**:
+  - **问**题**:**26-fix **后**, **手**动**档**点** manual tab / s1 sub-tab **调** `readCfgSilent()`**。**但**如**果**设**备** ds_poll **是**空** (src=default**), `readCfgSilent()` **会**早** return**, **不**读** REG**!** **点**表**还**是**上**次**的**缓**存**, **必**须**手**动**点**「**读**取**配**置**」**才**会**刷**新**!** 
+  - **原**因**:**readCfgSilent` (cfg.js:220**)** **有** `if (S.cfgSrc === 'default') { renderCfgSrcHint('default'); return; }`** - **早** return** 
+  - **对**比** `readCfg()` (手**动**按**钮**调**)**:**没**有** early return**, **只**是**弹** toast**, **会**继**续**读** REG**
+  - **修**改**:**删**掉** early return**, **让** readCfgSilent **和** readCfg **行**为**对**齐** (**都**读** REG**), **只**是**错**误**处**理**静**默**:** - **加** `// 设备端 regs 为空时回 {}` **的**空**数**据**处**理** (和** readCfg **对**齐**)** 
+    - `renderCfgSrcHint(S.cfgSrc || 'pull')` - **不**再** early return**
+    - `if (Array.isArray(d) || (d && typeof d === 'object'))` - **空**数**据**也**会** renderRegTable
+  - **测**试**:**新**增** `test_27_readcfg_default.js`**:**5 **个**测**试**点** (**函**数**存**在** / **没**有**早** return / W:REG **被**调**用** / renderRegTable **被**调**用** / 27-fix **注**释** / readCfg **仍**保**留** default toast**)**
+- **27-fix 17/17 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**

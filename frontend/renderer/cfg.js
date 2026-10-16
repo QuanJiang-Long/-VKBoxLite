@@ -224,10 +224,10 @@ async function readCfgSilent() {
     const payload = rc.data;
     S.cfgSrc = payload && payload.src || null;
     const c = (payload && payload.cfg) ? payload.cfg : payload;
-    if (S.cfgSrc === 'default') {
-      renderCfgSrcHint('default');
-      return;
-    }
+    // 27-fix: 之前 src='default' 时早 return, 不读 REG, 导致设备配置为空时
+    //   切 manual tab / s1 sub-tab 看到的还是上次的缓存点表, 必须手动
+    //   点「读取配置」才会刷新. 改成和 readCfg 行为对齐: 继续读 REG,
+    //   静默路径不再早 return, 但仍不弹 toast (避免自动路径刷屏)
     if (c && typeof c === 'object') {
       S.cfg = c;
       if (fillOk(E(pre, 'selBaud'))) E(pre, 'selBaud').value = String(c.baud || 9600);
@@ -238,14 +238,18 @@ async function readCfgSilent() {
       if (fillOk(E(pre, 'inpSlave'))) E(pre, 'inpSlave').value = c.slave || 1;
       if (fillOk(E(pre, 'inpTimeout'))) E(pre, 'inpTimeout').value = (c.timeout_ms == null) ? '' : c.timeout_ms;
     }
+    // src hint 还是要根据 src 渲染, 但不再据此 early return
+    renderCfgSrcHint(S.cfgSrc || 'pull');
     const rr = await sendCmd(Protocol.Enc.reg(), 'REG', 3000);
+    // 设备端 regs 为空时回 {} (Lua 空表编码成对象而非数组),
+    // 不能只判 Array.isArray, 否则空配置时 renderRegTable 不会被调用,
+    // 参数表停留在上一次的内容/占位行上
     const d = rr.data;
     if (Array.isArray(d) || (d && typeof d === 'object')) {
       S.regs = toArr(d);
       renderRegTable(pre);
     }
     snapClean(pre);
-    renderCfgSrcHint('pull');
   } catch (e) { /* 静默: 失败不打扰, 下次再试 */ }
 }
 
