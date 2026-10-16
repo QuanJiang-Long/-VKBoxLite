@@ -429,8 +429,29 @@ function setPortState(open, path) {
   el.btnOpen.textContent = open ? '关闭串口' : '打开串口';
   el.stPort.textContent = open ? (path || S.port) : '未连接';
   el.stPort.style.color = open ? '#0a7d2c' : '#666';
+  // 28-fix: 串口未连接时禁用首页 + 运行模式面板的功能按钮 + 顶部栏导入.
+  //   设备没连, 按钮触发的命令要么发不出去, 要么发出去没意义, 灰掉避免误点.
+  //   导出 (btnExport) 暂不在此列: 它读的是本地配置快照, 不依赖设备, 后面单独讨论
+  //   selBootMode 是 select, disabled 对 select 也有效
+  //   注: btnImport 在 syncTabs 里另有一道 platform 档的守卫, 二者取或:
+  //        串口未连 → 一定灰; 平台档 → 一定灰; 其他情况由 syncTabs 控制
   [el.btnReadInfo, el.btnReadCfg, el.btnPullCfg, el.btnSaveCfg, el.btnReadVal,
-   el.btnHomeMqttSave].forEach(b => b.disabled = !open);
+   el.btnHomeMqttSave,
+   // 28-fix 新增 (5 个):
+   el.btnImport,           // 顶部栏 导入
+   el.btnHomeRefresh,      // 首页 状态总览 刷新
+   el.btnModeRefresh,      // 运行模式 刷新状态
+   el.selBootMode,         // 运行模式 开机默认模式 下拉
+   el.btnSaveBoot          // 运行模式 开机默认模式 保存
+  ].forEach(b => { if (b) b.disabled = !open; });
+  // btnImport 的 platform 档守卫要在 setPortState 之后跑, 否则会被覆盖
+  // (syncTabs 现在是 mode 切换时调, 不是 port 切换时调, 所以这里手动补一下)
+  if (el.btnImport) {
+    const blocked = !open || isPlatform(S.mode);
+    el.btnImport.disabled = blocked;
+    el.btnImport.title = !open ? '请先连接串口' :
+      isPlatform(S.mode) ? '平台档配置从 MQTT 平台拉取，不能导入' : '导入配置文件 (.json / .csv)';
+  }
   syncPullCfgBtn();
 }
 
@@ -639,11 +660,13 @@ function syncTabs() {
   // 2h fix: 平台档配置从平台拉, 不允许手动导入, 按钮直接禁用
   // (之前 importCfg 起头 toast 拦截被用户否决, 改为 UI 层禁用,
   //  平台档点 "导入" 按钮没反应, 一看就懂)
+  // 28-fix: 加一层 "串口未连接" 守卫. setPortState 已经把 btnImport 灰了,
+  //   这里 mode 切换时也要保持灰 (避免 mode 切换把 setPortState 的灰给覆盖掉)
   if (el.btnImport) {
-    el.btnImport.disabled = isPlatform(mode);
-    el.btnImport.title = isPlatform(mode)
-        ? '平台档配置从 MQTT 平台拉取，不能导入'
-        : '导入配置文件 (.json / .csv)';
+    const blocked = !S.open || isPlatform(mode);
+    el.btnImport.disabled = blocked;
+    el.btnImport.title = !S.open ? '请先连接串口' :
+      isPlatform(mode) ? '平台档配置从 MQTT 平台拉取，不能导入' : '导入配置文件 (.json / .csv)';
   }
   // 当前停留的栏目被藏掉时，落到首页 —— 否则界面会变成一片空白，
   // 用户以为程序卡死了（实际只是没有 active 的 tab-pane）
@@ -700,6 +723,12 @@ async function readMode() {
 async function applyMode(mode) {
   // 切换进行中再点，忽略（避免连点把设备和 UI 搞乱）
   if (S.modeSwitching) return;
+  // 28-fix: 串口未连接时禁止切档. 4 个 mode-card (mcIdle/mcPoll/mcPollpull/mcSniff)
+  //   都走 applyMode, 在这里统一拦截 + toast 提示
+  if (!S.open) {
+    toast('请先连接串口');
+    return;
+  }
   // platform → manual 切档提示: 当前显示的是平台那份(ds_pull), 切过去
   // 后会清掉显示内容, 用户得自己点「读取配置」读 ds_poll 那份
   // "manual"/"platform" 是当前 mode 名; "poll"/"pollpull" 是历史别名
