@@ -1694,6 +1694,10 @@ function M.status()
         user = S.user or ((prof and prof.user ~= "" and prof.user) or device_id()),
         pub = S.pub or (prof and prof.pub),
         sub = S.sub or (prof and prof.sub),
+        -- 32-fix: 设备实际发送的 topic 列表 (平台档带 -N 后缀). 前端只显示
+        --   这个, 不做本地构造. 老设备 (无 pub_topics 字段) 时为 nil, 前端
+        --   会回退到 s.pub
+        pub_topics = prof and prof.pub_topics,
         keep_session = c.keep_session,
         manual_on = c.manual_on,
         host = c.host,

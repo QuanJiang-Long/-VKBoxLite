@@ -1990,6 +1990,8 @@ function mockReply(line) {
         skipped: [],
         mqtt: {
           pub: '/sys/thing/node/property/post/' + (MOCK.sn || '11802026092600016') + '-1',
+          // 32-fix: 实际发送的 topic 列表 (和设备 profile().pub_topics 对齐)
+          pub_topics: ['/sys/thing/node/property/post/' + (MOCK.sn || '11802026092600016') + '-1'],
           sub: '/sys/thing/gw/function/get/' + (MOCK.sn || '11802026092600016')
         }
       });
@@ -2007,6 +2009,8 @@ function mockReply(line) {
             user: 'VK20260925001', client_id: 'VK20260925001_',
             // 生效发布/生效订阅：当前档次实际在用的两条成品 topic
             pub: '/sys/thing/node/property/post/VK20260925001-1',
+            // 32-fix: 实际发送的 topic 列表 (和设备 M.status().pub_topics 对齐)
+            pub_topics: ['/sys/thing/node/property/post/VK20260925001-1'],
             sub: '/sys/thing/gw/config/get/VK20260925001',
             subs: ['/sys/thing/gw/config/get/VK20260925001',
                    '/sys/thing/gw/function/get/VK20260925001',

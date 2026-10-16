@@ -231,7 +231,15 @@ function renderMqtt() {
   // 手动档 = 本页填的模板代出来的；自动档 = PLATFORM_* 固定常量。
   // 只在连上后有值（未建连时 S.pub/S.sub 是 nil，profile 兜底算的那份要用
   // 设备号，没有 SN 时也是空）
-  setKvPre(pre, 'mqStPub', s.pub || '未连接', !s.pub);
+  //
+  // 32-fix: 优先用 s.pub_topics (设备返回的实际发送 topic 列表, 平台档带
+  //   -{n} 后缀). 老设备没这个字段时回退到 s.pub (向后兼容).
+  // 设备只告诉前端 "我发这些", 前端不构造
+  const pubTopics = (s.pub_topics && s.pub_topics.length)
+    ? s.pub_topics
+    : (s.pub ? [s.pub] : []);
+  const pubText = pubTopics.length ? pubTopics.join('\n') : '未连接';
+  setKvPre(pre, 'mqStPub', pubText, pubTopics.length === 0);
   setKvPre(pre, 'mqStSub', s.sub || '未连接', !s.sub);
   // 22-fix: 手动档额外生效的 topic (U1 hello + U2 meta).
   // 24-fix: 平台档也加 (U1/U2/U3/U5/U6/U7 + D2/D3/D4, 共 9 条).

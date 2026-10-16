@@ -195,16 +195,24 @@ end
 function M.profile(did)
     local c = M.load()
     if c.manual_on then
+        local p = resolve(c.pub_topic, did)
         return {
             user = c.user, pass = c.pass,
-            pub = resolve(c.pub_topic, did),
+            pub = p,
             sub = resolve(c.sub_topic, did),
+            -- 32-fix: 实际发送的 topic 列表. 手动档原样 (1 个, 无后缀)
+            pub_topics = p and { p } or {},
         }
     end
+    local pub = fmt_const(cfg.PLATFORM_PUB_TOPIC, did)
     return {
         user = "", pass = c.auto.pass,
-        pub = fmt_const(cfg.PLATFORM_PUB_TOPIC, did),
+        pub = pub,
         sub = fmt_const(cfg.PLATFORM_GET_TOPIC, did),
+        -- 32-fix: 实际发送的 topic 列表. 平台档按 V3 契约拼 -{n}.
+        -- 常见 1 个子设备 (cfg.regs 只有 1 slave), 故固定 -1. sniff 档多从机
+        -- 以后扩展. publish() 里 iot.lua:267 也是这个规律
+        pub_topics = pub and { pub .. "-1" } or {},
     }
 end
 
