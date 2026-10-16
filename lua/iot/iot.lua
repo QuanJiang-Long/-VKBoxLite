@@ -442,6 +442,9 @@ end
 -- 不带 nodes 的那帧: 网关元数据。字段名/类型照平台 V3 文档示例, 一个不多一个
 -- 不少 —— 少字段平台解析不出, 多字段可能按未知字段整包拒收。
 -- 无源的字段(imei/iccid/longitude/latitude)按注释留空或整项不发, 不编假值
+-- 19-fix: deviceName 字段按 mode 分流:
+--   manual/platform 模式: 留空字符串 (用户决策 2026-10-16)
+--   sniff 模式: 不动, 仍用 "VKBOX-" .. did
 local function send_meta()
     local did = cur_did()
     if not did then return false, "无 SN" end
@@ -458,7 +461,13 @@ local function send_meta()
     p[#p + 1] = string.format('"firmwareVersion":%d', fw_num())
     p[#p + 1] = string.format('"hw":%s', MqttUtil.jstr(cfg.PLATFORM_MODEL))
     p[#p + 1] = string.format('"capabilities":[%s]', '"modbus","mqtt"')
-    p[#p + 1] = string.format('"deviceName":%s', MqttUtil.jstr("VKBOX-" .. did))
+    -- 19-fix: deviceName 按 mode 分流
+    local mode = get_mode()
+    if mode == "manual" or mode == "platform" then
+        p[#p + 1] = string.format('"deviceName":%s', MqttUtil.jstr(""))
+    else
+        p[#p + 1] = string.format('"deviceName":%s', MqttUtil.jstr("VKBOX-" .. did))
+    end
     p[#p + 1] = string.format('"serialNumber":%s', MqttUtil.jstr(did))
     if csq then p[#p + 1] = string.format('"csq":%d', csq) end
     p[#p + 1] = string.format('"netRegister":%s', tostring(net_registered(csq)))
