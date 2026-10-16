@@ -233,6 +233,24 @@ function renderMqtt() {
   // 设备号，没有 SN 时也是空）
   setKvPre(pre, 'mqStPub', s.pub || '未连接', !s.pub);
   setKvPre(pre, 'mqStSub', s.sub || '未连接', !s.sub);
+  // 22-fix: 手动档额外生效的 topic (U1 hello + U2 meta).
+  //   走 topics.js 的 VKBoxTopics.manualExtraTopics(sn) 拼.
+  //   只对 manual tab 显示 (platform/sniff 还有 U3/U5/U7 等, 一栏放不下,
+  //   等后续单独讨论). 用 id 后缀 'ExtraTopics' 区分 manual tab 的 mMqStExtraTopics
+  //   (m- 前缀) vs 未来其他 tab.
+  //   注: setKvPre 会把 className 整个重置, 会冲掉 <pre> 的 .kv-pre 样式,
+  //   所以这里直接拿 el 操作, 保留 .kv-pre class.
+  if (window.VKBoxTopics) {
+    const did = s.device_id || s.sn || '';
+    const extras = VKBoxTopics.manualExtraTopics(did);
+    const txt = extras.length ? VKBoxTopics.formatListAsLines(extras) : '（手动档无额外生效 topic）';
+    const fullId = pre ? (pre + 'mqStExtraTopics'[0].toUpperCase() + 'mqStExtraTopics'.slice(1)) : 'mqStExtraTopics';
+    const n = document.getElementById(fullId);
+    if (n) {
+      n.textContent = txt;
+      n.classList.toggle('bad', !extras.length);
+    }
+  }
   // 当前档次: 手动 = 用本页填的凭证；自动 = 首页那份凭证 + SN
   setKvPre(pre, 'mqStMode', c.manual_on ? '手动配置' : '自动（设备拼接）', !!c.manual_on);
   setKvPre(pre, 'mqStSubed', s.subscribed ? '是' : '否', !s.subscribed);

@@ -123,6 +123,7 @@ const el = new Proxy({
   mMqPub: $('mMqPub'), mMqSub: $('mMqSub'),
   mMqInterval: $('mMqInterval'),
   mMqKeepSession: $('mMqKeepSession'),
+  mMqStExtraTopics: $('mMqStExtraTopics'),  // 22-fix: 手动档额外生效 topic (U1/U2)
   // ====== Step 2a: tabPlatform 内的 p- 前缀引用 ======
   // Step 2c/2d: 平台档删 6 字段 (user/pass/ClientId/Pub/Sub) + 1 按钮
   // (pBtnManualCfg) + pBtnMqttSave/pBtnMqttReset/pBtnMqttPassEye (平台档不能改/不需要)

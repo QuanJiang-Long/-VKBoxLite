@@ -481,6 +481,28 @@
     - **说**明** manual **进** mode **时** MQTT **没**连**上**的**场**景**: hello **不**会**重**发** (但** ctrl **注**释**说**明** manual **失**败**不**回**滚**, **平**台**看**不**到**不**影**响**采**集**)** 
     - **修**正** 20-fix **的**错**误**描**述**:**task_main **这**个** if **确**实**只**对**非** idle **且**非** manual **档** (进**口** 1 **不**算**)** 
 - **21-fix 14/14 npm test **全**过**!
+- **22-fix 添**加** "**其**他**生**效** Topic**"** **栏**位** (manual tab **专**用**)**:
+  - **问**题**:**手**动**档**除**了**用**户**自**填**的** pub_topic/sub_topic **之**外**, **还**会**发** U1 hello **和** U2 meta, **但**软**件**面**板**只**显**示** 2 **个** (mqStPub/mqStSub**)
+  - **解**法**:**纯**前**端**解**决**, **不**动**设**备**! (因**为** topic **模**板**已**经**在** lua/core/config.lua **定**义**, **SN **在** stat **段**回**传**了**)** 
+  - **新**建** `frontend/renderer/topics.js`**:
+    - **统**一**管**理** 11 **个** PLATFORM_* topic **常**量** (U1~U7 + D1~D4**)** - **为**以**后** platform/sniff **扩**展**做**准**备**
+    - `format(tpl, sn)` - **替**换** `{sn}` **占**位**符**
+    - `manualExtraTopics(sn)` - **返**回** manual **档**的** 2 **个**额**外** topic**
+    - `formatListAsLines(items)` - **多**行**字**符**串**化**
+    - **双**支**持** window **全**局** + CommonJS **模**块** (供**测**试**用**)** 
+  - **修**改** `frontend/renderer/mqtt.js`**:**在** setKvPre **后**调**用** VKBoxTopics.manualExtraTopics(did**)** 拼**接**显**示**
+    - **不**用** setKvPre** (因**为**它**会**冲**掉** `<pre>` **的** .kv-pre class**), **直**接**用** getElementById
+  - **修**改** `frontend/renderer/index.html`**:
+    - **加** `<script src="topics.js">`
+    - **在** manual tab **的** "**连**接**与**上**报**状**态**"** **卡**片** mqStSub **后**添**加** `<pre id="mMqStExtraTopics">`
+    - **加** CSS: `.kv-wide` (跨**整**行**) + `.kv-pre` (等**宽**字**体** + 灰**底**)** 
+  - **新**增** `frontend/tests/test_22_topics.js`**:**5 **类** 12 **个**测**试**点** (11 **个**常**量** / format / manualExtraTopics / formatListAsLines**)** 
+  - **当**前**显**示**格**式**:
+    ```
+    U1 (hello): /sys/thing/gw/config/hello/{sn}
+    U2 (meta):  /sys/thing/gw/info/post/{sn}
+    ```
+- **22-fix 15/15 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**
