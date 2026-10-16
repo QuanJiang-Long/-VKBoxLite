@@ -709,6 +709,30 @@ async function applyMode(mode) {
       '切换运行模式');
     if (!ok) return;
   }
+  // 25-fix: 切到 platform 前预检 MQTT 连接状态
+  //   避免"切进去没拉取到配置但用户不知道原因"的问题
+  //   设备端 (ctrl.lua) 也会做同样检查, 这里前端先一步拦截, 给出跳转入口
+  if (isPlatform(mode) && (!S.mqtt || !S.mqtt.stat || !S.mqtt.stat.connected)) {
+    const goConfig = await askConfirm(
+      'MQTT 未连接, 进入 platform 模式后无法拉取配置.\n' +
+      '建议先在「platform 模式」标签页的 MQTT 配置子段检查 host/port.\n\n' +
+      '点"确定"跳到 platform 模式的 MQTT 配置子段\n' +
+      '点"取消"继续 (会收到设备端的明确错误提示)',
+      '切到 platform 模式');
+    if (goConfig) {
+      // 跳到 tabPlatform 的 s2 (MQTT 配置) sub-tab
+      activateTab('tabPlatform');
+      const s1 = document.getElementById('sp-p-s1');
+      const s2 = document.getElementById('sp-p-s2');
+      if (s1) s1.classList.remove('active');
+      if (s2) s2.classList.add('active');
+      document.querySelectorAll('#tabPlatform .serial-tab').forEach(t => {
+        t.classList.toggle('active', t.getAttribute('data-serial') === 's2');
+      });
+      return;
+    }
+    // 选"取消" - 照常发 W:MODE=platform (设备端会返回清晰错误)
+  }
   S.modeSwitching = true;
   S.modePending = mode;          // 先记下用户所选，防止 5s 定时刷新把高亮打回旧模式
   renderMode();

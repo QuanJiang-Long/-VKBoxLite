@@ -1659,6 +1659,10 @@ end
 
 function M.is_running() return S.want_run end
 
+-- 25-fix: 暴露 MQTT 当前连接状态 (S.connected 是 local, 外部读不到)
+--   ctrl.lua 在切 platform 档时用它做前置检查
+function M.is_connected() return S.connected == true end
+
 function M.report_now()
     return publish()
 end

@@ -28,7 +28,11 @@ local function switch_delay()
     end)
 end
 
-function M.switch_mode(mode)
+function M.switch_mode(mode, from_boot)
+    -- 25-fix: from_boot 默认 false, 开机自启路径 (main.lua 的 boot_mode) 传 true
+    --   跳过 platform 的 MQTT 连接前置检查 —— 开机时 iot.start 还没跑, MQTT
+    --   还没连, 但 boot 路径应该正常进入, 连上后自动拉取
+    from_boot = from_boot or false
     if type(mode) ~= "string" then
         return false, "FAIL unknown mode (use manual/platform/sniff/idle)"
     end
@@ -41,6 +45,14 @@ function M.switch_mode(mode)
         return false, "BUSY: 正在识别通讯参数, 完成后自动开始旁听(或先 W:MODE=idle 放弃)"
     end
     if mode == "manual" or mode == "platform" then
+        -- 25-fix: platform 必须 MQTT 已连接才能进入 (前端手动切换路径)
+        --   避免"切进去没拉取到配置但用户不知道原因"的问题
+        --   开机路径 (from_boot=true) 跳过, iot.start 跑完连上后会自动拉取
+        if mode == "platform" and not from_boot then
+            if not (iot and iot.is_connected and iot.is_connected()) then
+                return false, "FAIL platform: MQTT 未连接, 请先在 MQTT 配置页确认 host/port (看状态卡片'连接状态'), 等连上后再切"
+            end
+        end
         if mon.is_running() then
             mon.stop()
             switch_delay()

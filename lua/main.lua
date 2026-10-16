@@ -113,7 +113,10 @@ if ctrl then
     -- 开机路径漏了一处, 设备启动时 fskv 读到 "manual"/"platform" 走 else,
     -- 用户看到的现象是 W:BOOTMODE=manual 重启后不进 manual。
     if boot == "manual" or boot == "platform" or boot == "sniff" then
-        local ok, msg = ctrl.switch_mode(boot)
+        -- 25-fix: 开机路径传 from_boot=true, 跳过 platform 的 MQTT 连接前置检查
+        --   (此时 iot.start 还没跑, MQTT 没连, 但 boot 应该正常进入,
+        --    连上后由 iot.task_main 自动拉取配置)
+        local ok, msg = ctrl.switch_mode(boot, true)
         log.info("main", "  boot_mode=" .. boot .. " -> " .. tostring(msg))
     else
         log.info("main", "  boot_mode=" .. tostring(boot) .. " (485 idle, 等前端命令 W:MODE=manual|platform|sniff|stop)")
