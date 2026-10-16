@@ -25,7 +25,7 @@ function mqSnap() {
     user: g(E_('mqUser')), pass: g(E_('mqPass')), cid: g(E_('mqClientId')),
     pub: g(E_('mqPub')), sub: g(E_('mqSub')),
     iv: g(E_('mqInterval')), snIv: g(el.snMqInterval),
-    noSn: c(E_('mqAllowNoSn')), keep: g(E_('mqKeepSession')),
+    keep: g(E_('mqKeepSession')),
     hHost: g(el.hMqHost), hPort: g(el.hMqPort), hPass: g(el.hMqPass),
     hCid: g(el.hMqClientId)
   });
@@ -53,7 +53,7 @@ function refillManual() {
 //   自动（默认）：用户名/密码/ClientID/发布Topic/订阅Topic 全部归设备管 ——
 //              用户名固定 SN、密码用首页那份 MQTT凭证密码、topic 用默认
 //              模板。这几项整行藏掉（.manual-only），但「保存」按钮两档都
-//              在：自动档还有地址/端口/SSL/周期/会话/no_SN 可改。
+//              在：自动档还有地址/端口/SSL/周期/会话 可改。
 //   手动：      那几项显示出来，保存时连用户名/密码/topic 一起下发，设备
 //              先清掉自动拼的那套再写这套，然后按这套建连上报。
 // 注意：开手动档是保存时才生效（用户填完再点「保存」）；
@@ -165,11 +165,10 @@ async function saveHomeMqtt() {
       auto_pass: pass,
       manual_on: c.manual_on,
       // 共用字段也从表单带一份: 自动档下 MQTT 页的「保存」按钮是藏掉的，
-      // 用户在那边改的上报周期/会话管理/no_SN 只能靠首页这下保存带走。
+      // 用户在那边改的上报周期/会话管理只能靠首页这下保存带走。
       // 不带的话表单值会被 c(设备现值)覆盖, 用户等于白改
       ssl: el.mqSsl.checked,
       interval_s: parseInt(el.mqInterval.value, 10) || 0,
-      allow_no_sn: el.mqAllowNoSn.checked,
       keep_session: el.mqKeepSession.value === '1'
     })), 'MQTT', 5000);
     // 刚存进去的凭证密码/ClientID 不动 MQTT 页那两个框: 它们是另一份值
@@ -218,10 +217,7 @@ function renderMqtt() {
     if (fillOk(el.snMqInterval)) el.snMqInterval.value = c.interval_s != null ? c.interval_s : 120;
     // QoS 已从界面移除：设备端发布/订阅固定用 QoS 1，
     // 这里不再显示也不再下发（设备 normalize 会退回默认值 1）。
-    // Step 2c 删了 platform tab 的 pMqAllowNoSn/mqKeepSession 等, E() 返 null
-    // 跳空, 不再触发 "Cannot set properties of null" 错误 (该错误会让整个
-    // renderMqtt 抛错, 17 字段 setKvPre 后续全跑不到)
-    const allowEl = E(pre, 'mqAllowNoSn'); if (allowEl) allowEl.checked = !!c.allow_no_sn;
+    // 18-fix: 删除 no_SN 建连 字段后, 也不再有 allow_no_sn 下发
     // MQTT 会话管理（select）：'1'=持久会话  '0'=离线自动销毁（默认）
     const keepEl = E(pre, 'mqKeepSession'); if (keepEl) keepEl.value = c.keep_session ? '1' : '0';
   }
@@ -296,7 +292,6 @@ async function saveMqtt() {
     sub_topic: S.mqManual ? E(pre, 'mqSub').value.trim() : undefined,
     interval_s: parseInt(E(pre, 'mqInterval').value, 10) || 0,
     // QoS 界面已移除，不再下发；设备端固定用 QoS 1
-    allow_no_sn: E(pre, 'mqAllowNoSn').checked,
     // select: '1'=持久会话  '0'=离线自动销毁（默认）
     keep_session: E(pre, 'mqKeepSession').value === '1',
     // 当前档次。false 时设备端清空手动凭证和手动 topic，改回 SN 用户名

@@ -487,11 +487,7 @@ body.mq-manual .auto-only{display:none !important;}
                             <option value="1">持久会话</option>
                         </select>
                     </div>
-                    <div class="form-row">
-                        <label>no_SN 建连</label>
-                        <label class="switch"><input id="mMqAllowNoSn" type="checkbox"><span class="sl"></span></label>
-                        <span class="hint">默认关闭：防止多台未烧号设备撞同一 topic</span>
-                    </div>
+                    <!-- 18-fix: 删除 no_SN 建连 字段 (决定必须先烧 SN 再连) -->
                     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;">
                         <!-- Step 2i: 删 mBtnMqttReset (有刷新了, 按钮冗余) -->
                         <button id="mBtnMqttReport">立即上报一次</button>
@@ -819,11 +815,7 @@ body.mq-manual .auto-only{display:none !important;}
                             <option value="1">持久会话</option>
                         </select>
                     </div>
-                    <div class="form-row">
-                        <label>no_SN 建连</label>
-                        <label class="switch"><input id="mqAllowNoSn" type="checkbox"><span class="sl"></span></label>
-                        <span class="hint">默认关闭：防止多台未烧号设备撞同一 topic</span>
-                    </div>
+                    <!-- 18-fix: 删除 no_SN 建连 字段 (决定必须先烧 SN 再连) -->
                     <div style="margin-top:14px;display:flex;gap:8px;align-items:center;">
                         <!-- Step 2i: 删 btnMqttReset (有刷新了) -->
                         <button id="btnMqttReport">立即上报一次</button>

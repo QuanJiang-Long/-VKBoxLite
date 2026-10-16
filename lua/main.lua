@@ -129,7 +129,8 @@ if iot then
     if sn and #tostring(sn) > 0 then
         pcall(iot.start)
     else
-        log.warn("main", "  未烧 SN, MQTT 不建连")
+        -- 18-fix: 决定必须先烧 SN 再连 MQTT, "no_SN 建连" 字段已删除
+        log.warn("main", "  未烧 SN, MQTT 不建连 (烧 SN 后能建连)")
     end
 end
 if snc and type(snc.start_warn_monitor) == "function" then

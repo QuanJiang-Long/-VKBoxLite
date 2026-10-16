@@ -36,7 +36,7 @@ M.SN_WARN_PERIOD_S = 600
 -- MQTT
 M.MQTT_INTERVAL_S = 120  -- 默认 2min, U2-m (兜底) / U3 res / U4 prop 共享
 M.MQTT_QOS = 1
-M.MQTT_ALLOW_NO_SN = false
+-- 18-fix: 决定必须先烧 SN 再连 MQTT, 删除 MQTT_ALLOW_NO_SN 配置项
 
 -- 平台配置拉取(W:PULLCFG)
 M.PLATFORM_VENDOR = "VKBoxLite"

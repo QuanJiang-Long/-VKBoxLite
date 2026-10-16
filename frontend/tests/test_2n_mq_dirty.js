@@ -18,9 +18,9 @@ const vm = require('vm');
 // 简化测 5 个核心字段 + 几个
 const ids = makeIds([
   'mqHost', 'mqPort', 'mqSsl', 'mqUser', 'mqPass',
-  'mqClientId', 'mqPub', 'mqSub', 'mqInterval', 'mqAllowNoSn', 'mqKeepSession',
+  'mqClientId', 'mqPub', 'mqSub', 'mqInterval', 'mqKeepSession',
   'mMqHost', 'mMqPort', 'mMqSsl', 'mMqUser', 'mMqPass',
-  'mMqClientId', 'mMqPub', 'mMqSub', 'mMqInterval', 'mMqAllowNoSn', 'mMqKeepSession',
+  'mMqClientId', 'mMqPub', 'mMqSub', 'mMqInterval', 'mMqKeepSession',
   'pMqHost', 'pMqPort', 'pMqSsl', 'pMqInterval', 'pMqKeepSession',
   'hMqHost', 'hMqPort', 'hMqPass', 'hMqClientId',
   'mBtnMqttSave', 'btnMqttSave', 'pBtnMqttSave', 'hBtnMqttSave',
@@ -65,7 +65,6 @@ function mqSnap() {
     pub: E(pre, 'mqPub').value,
     sub: E(pre, 'mqSub').value,
     iv: E(pre, 'mqInterval').value,
-    ans: E(pre, 'mqAllowNoSn').value,
     ks: E(pre, 'mqKeepSession').value,
   });
 }

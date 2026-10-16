@@ -253,7 +253,7 @@ MQTT 按"首页写入的算连接参数、MQTT 页写入的算手动档凭证"�
 |---|---|---|
 | `host` `port` `ssl` `client_id` | 保留 | 首页「MQTT 服务器」面板可改。⚠️ `ssl` **必须和 host/port 一起保**：同一个 host 的 1883 明文和 8883 TLS 是两条路，只保地址不保 ssl 会把走 TLS 的用户打回明文，表现是"切回来就连不上了" |
 | `auto.pass` | 保留 | 首页填的 MQTT凭证密码，与手动档那个 `pass` 是两份独立的值 |
-| `interval_s` `qos` `allow_no_sn` `keep_session` | 保留 | 共用字段，首页「保存」会一并带走，算"首页写入的内容" |
+| `interval_s` `qos` `keep_session` | 保留 | 共用字段，首页「保存」会一并带走，算"首页写入的内容" |
 | `user` `pass` | 清空 | 手动档凭证 |
 | `manual_on` | 强制置 `false` | ⚠️ **必须和清值在同一个 `save()` 里完成**。`normalize` 在 `manual_on=true` 时**使用** user/pass，只清值不换档的话设备会拿空凭证匿名连平台——表现是"切回 idle 后再没连上过 MQTT"，且前端 MQTT 页显示成手动档。拆成两次 save，中间任何一次失败都会把设备留在那个失联状态 |
 
@@ -768,7 +768,7 @@ handle_downlink
 >
 > | 分组 | 字段 | 说明 |
 > |---|---|---|
-> | 共用 | `host` `port` `ssl` `client_id` `interval_s` `qos` `allow_no_sn` `keep_session` | 自动档和手动档建连都读这份 |
+> | 共用 | `host` `port` `ssl` `client_id` `interval_s` `qos` `keep_session` | 自动档和手动档建连都读这份 |
 > | 手动档 | `user` `pass` `pub_topic` `sub_topic` | 只有 `manual_on` 为真时才用。置假时 `normalize` 会把它们清空 |
 > | 自动档 | `auto.pass` | 首页「MQTT凭证密码」。`profile()` 里用户名固定留空 → `try_connect` 兜底填 SN |
 > | 开关 | `manual_on` | 当前档位。`W:MQTT` 下发；`R:MQTT` 的 `manual_on` / `auto_pass` 给前端回显 |
@@ -827,8 +827,8 @@ handle_downlink
 #### SN 归属过滤（`iot.claim_ok()`）
 
 同 broker 上多台网关时，别人网关的下行也会被 EMQX 送过来。`handle_downlink` 入口按
-「topic 末段 == 本机 SN 或 `{gwSn}-{n}`」判定，不是自己的直接丢弃。两条例外：
-无 SN（`allow_no_sn`）和非 `/sys/thing/` 命名空间（用户自配 topic）都放行，
+「topic 末段 == 本机 SN 或 `{gwSn}-{n}`」判定，不是自己的直接丢弃。一条例外：
+非 `/sys/thing/` 命名空间（用户自配 topic）放行，
 否则改了 `sub_topic` 会静默收不到指令。
 
 ### 字段提取（`lua/iot/pullcfg.lua`）

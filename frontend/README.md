@@ -80,7 +80,7 @@ mklink /J D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules D:\VKBox_Lite\VKBo
 | poll模式有"读取配置"和"拉取配置"两个按钮 | 「读取配置」= R:CFG + R:REG 回填表单；「拉取配置」= 通过 MQTT 从平台拉配置，**回填表单并自动落盘生效、自动回执平台**，不需要再点「保存配置」（需先配好 MQTT 服务器地址和端口） |
 | poll模式表单在哪些档可编辑 | **只有「poll（手动配置）」档可编辑**。pollpull（拉取）/ idle / sniff 档下：所有 input 加 readonly、select/radio disabled、「保存配置」/「新增寄存器」/每行「删除」全藏，cfgSrcHint 显示"配置由 xxx 来源"提醒。pollpull → poll 切档会弹确认（"会清掉显示内容"），cancel 留在 pollpull |
 | 点「拉取配置」提示"请先配置 MQTT 服务器地址/端口" | 拉取走 MQTT。先在首页或「MQTT配置」子标签填好服务器地址和端口并保存，再点拉取 |
-| 首页的 MQTT 地址端口和「MQTT配置」页是什么关系 | **两份独立的凭证 + 一份共用连接参数**。首页「MQTT 服务器」面板管**自动档**：只读用户名（= SN）+ **MQTT凭证密码** + 地址/端口/ClientID。自动档用于自动拉取配置、sniff 模式上报，以及关闭手动配置后的默认建连。MQTT配置页管**手动档**：用户名/密码/发布Topic/订阅Topic自己填（**这几项和「保存」按钮只在打开「手动配置」时才显示**），另外还管与首页共用的地址/端口/SSL/ClientID/上报周期/会话管理/no_SN。**两个密码是两份独立的值**，改互不影响。首页**故意不放用户名输入框**：自动档用户名固定是 SN；首页的「用户名」是只读回显。首页 ClientID 可手输覆盖，留空 = 设备用 SN 加下划线自动拼 |
+| 首页的 MQTT 地址端口和「MQTT配置」页是什么关系 | **两份独立的凭证 + 一份共用连接参数**。首页「MQTT 服务器」面板管**自动档**：只读用户名（= SN）+ **MQTT凭证密码** + 地址/端口/ClientID。自动档用于自动拉取配置、sniff 模式上报，以及关闭手动配置后的默认建连。MQTT配置页管**手动档**：用户名/密码/发布Topic/订阅Topic自己填（**这几项和「保存」按钮只在打开「手动配置」时才显示**），另外还管与首页共用的地址/端口/SSL/ClientID/上报周期/会话管理。**两个密码是两份独立的值**，改互不影响。首页**故意不放用户名输入框**：自动档用户名固定是 SN；首页的「用户名」是只读回显。首页 ClientID 可手输覆盖，留空 = 设备用 SN 加下划线自动拼 |
 | MQTT 显示"平台拒绝连接(CONACK 0x05 未授权)" | 本平台是 B 模型鉴权：`clientId`=`设备SN_`（SN 加下划线，尾部空）、`username`=设备SN、`password`=平台签发的凭证密码（默认 `VKBOXGW2026KEY`）。先看首页「用户名/ClientID」两行和「连接与上报状态」的 **ClientID/用户名** 两栏确认发出去的是什么，再确认该 SN 在平台侧凭证是「生效中」。详见 `../lua/README.md` 的「MQTT 连不上排查」 |
 | 点「拉取配置」提示"平台未下发配置(超时)" | 设备已连上 MQTT 并发过 hello，但平台 15s 内没回。检查平台是否在线、topic 是否匹配、SN 是否已烧 |
 | 拉取成功了但平台还在反复推配置 | 不正常。回执 U6 由设备在自动落盘成功后自动发；平台还在推说明回执没成功（MQTT 断开/无 SN/msgId 不匹配），或仍在重推上一份。「连接与上报状态」的 **配置回执** 显示次数，为 0 = 尚未回执 |
@@ -344,7 +344,7 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 | 用户名 | 设备 SN（固定，不可配） | MQTT配置页「用户名」框自己填 |
 | 密码 | 首页「MQTT凭证密码」那一份 | MQTT配置页「密码」框自己填 |
 | Topic | 默认模板，设备自动拼 | 「发布Topic」/「订阅Topic」两个框自己填 |
-| 地址/端口/TLS/ClientID/周期/会话/no_SN | 共用，两档都读同一份 | 同左 |
+| 地址/端口/TLS/ClientID/周期/会话 | 共用，两档都读同一份 | 同左 |
 
 **两个密码框是两份独立的值**，改互不影响：首页那个只管自动档，MQTT 页那个只管手动档。
 
@@ -395,7 +395,7 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
 > 用户没有任何保存入口，所以关档这个动作本身就必须把指令发下去
 > （`writeManualMode(false)`）。否则设备永远停在手动档，刷新一下又变回手动档。
 
-> **自动档下「上报周期 / 会话管理 / no_SN 建连」改完直接点 MQTT 页的「保存」**即可，也可以从首页的「保存并重连」保存（`saveHomeMqtt` 会把这三个共用字段一起带走）。
+> **自动档下「上报周期 / 会话管理」改完直接点 MQTT 页的「保存」**即可，也可以从首页的「保存并重连」保存（`saveHomeMqtt` 会把这两个共用字段一起带走）。
 
 #### 保存时的设备行为
 
@@ -496,7 +496,7 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
 
 > **deviceId 用 SN**：topic 里的 `{sn}` 占位符会被替换成设备 SN（`{id}` 为旧写法，仍兼容）。
 > 多台设备共用不含 SN 占位符的 topic 会导致数据互相覆盖，前端保存时会弹窗警告。
-> 未烧 SN 时设备默认**拒绝建连**（`allow_no_sn=false`），可在配置里打开调试后门。
+> 未烧 SN 时设备**拒绝建连**（必须先烧 SN 才能连 MQTT）。
 
 ### sniff / 总线诊断
 
@@ -550,7 +550,7 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
 | `lua/bus/mbus_ctrl.lua` | 模式仲裁：poll/sniff/stop 互斥切换，开机默认 idle |
 | `lua/bus/collector.lua` | 纯数据层：dataCache / 帧缓存 / ring buffer / on_update + on_store 回调 |
 | `lua/cfg/cfg_store.lua` | 统一配置中心：poll / sniff / sys 三类配置的 fskv 持久化 + 校验规范化 |
-| `lua/iot/mqttcfg.lua` | MQTT 配置持久化 + `{sn}`/`{id}` 占位符解析 + allow_no_sn 开关 + 自动/手动两档凭证 |
+| `lua/iot/mqttcfg.lua` | MQTT 配置持久化 + `{sn}`/`{id}` 占位符解析 + 自动/手动两档凭证 |
 | `lua/iot/iot_manager.lua` | MQTT 编排：指数退避重连、订阅、值变化驱动上报、下行 REPORT/WRITE |
 | `lua/svc/vcom.lua` | 前端指令层（全部 R:/W: 指令注册） |
 | `lua/main.lua` | 启动编排 8 个 stage（顶部含 require 兼容层） |
@@ -586,7 +586,7 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
    左上角「手动配置」，那几项出现且 Topic 可编辑，保存后连用户名/密码一起下发，设备按这套建连，
     **在 4 条 gw 平台前缀之外再多订一条「订阅Topic」填的那条**；关掉「手动配置」再保存，
     设备回到 SN + 首页凭证密码，订阅回到 4 条平台前缀；
-    发布/订阅 Topic、上报周期、会话管理、no_SN 建连已在「MQTT 连接」面板给输入框；hello/服务调用/属性设置/属性查询 4 条已删除，设备走固定平台常量；
+    发布/订阅 Topic、上报周期、会话管理已在「MQTT 连接」面板给输入框；hello/服务调用/属性设置/属性查询 4 条已删除，设备走固定平台常量；
 8. **拉配置**：点「拉取配置」→ 状态走完显示"设备已自动保存并生效、已回执平台"，
    「订阅Topic」应出 4 条（config/get + function/get + property/set + property/get），
    「配置回执」次数 +1；断电重启后 485 参数表应是平台给的那套；

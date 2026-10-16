@@ -9,7 +9,7 @@ local M = {}
 
 local K_CFG = "mqtt_cfg"
 
--- host/port/ssl/interval_s/qos/allow_no_sn/keep_session 是【共用】参数,
+-- host/port/ssl/interval_s/qos/keep_session 是【共用】参数,
 -- 自动档和手动档建连都读这份。user/pass/client_id/pub_topic/sub_topic 是
 -- 【手动档】独有, 只有 manual_on 为真时才用。manual_on 为假时改用下面 auto
 -- 那套: 用户名留空(iot 兜底填 SN) + 首页那份 MQTT凭证密码。client_id 也归
@@ -34,7 +34,6 @@ M.default = {
     client_id = "",
     interval_s = cfg.MQTT_INTERVAL_S,
     qos = cfg.MQTT_QOS,
-    allow_no_sn = cfg.MQTT_ALLOW_NO_SN,
     keep_session = false,
     -- 【自动档】首页「MQTT 服务器」面板: 用户名列只读显示 SN, 密码框就是
     -- 这里这个 pass。它与手动档那个密码是两份独立的值, 互不影响。
@@ -103,7 +102,6 @@ function M.normalize(c)
         client_id = cid,
         interval_s = math.floor(num(c.interval_s, d.interval_s)),
         qos = math.floor(num(c.qos, d.qos)),
-        allow_no_sn = c.allow_no_sn and true or false,
         keep_session = c.keep_session and true or false,
         auto = norm_auto(c, d),
         manual_on = c.manual_on and true or false,
@@ -223,7 +221,7 @@ end
 -- 切回 idle 时的 MQTT 复位: 只清手动档, 首页配好的平台连接原样留着。
 --
 -- 保留(首页「MQTT 服务器」面板能改的, 属"首页写入的内容"):
---   host / port / ssl / interval_s / qos / allow_no_sn / keep_session
+--   host / port / ssl / interval_s / qos / keep_session
 --   以及 auto.pass(首页那份 MQTT凭证密码, 与手动档的 pass 是两份独立的值)
 --   ⚠️ ssl 尤其必须留: 同一个 host 的 1883 明文和 8883 TLS 是两条路, 只保
 --      host+port 不保 ssl 会把走 TLS 的用户打回明文, 表现是"切回来就连不上了"

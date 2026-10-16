@@ -794,10 +794,8 @@ local function try_connect()
     if type(mqtt.create) ~= "function" then return false, "mqtt.create 不可用" end
     local c = mqttcfg.load()
     local did = device_id()
-    if not did or did == "" then
-        if not c.allow_no_sn then return false, "no sn" end
-        did = "unknown"
-    end
+    -- 18-fix: 必须有 SN 才能建连, 不再有 allow_no_sn 旁路
+    if not did or did == "" then return false, "no sn" end
     S.device_id = did
     -- 凭证和 topic 都按 manual_on 取: 手动档用前端填的 user/pass/pub_topic/
     -- sub_topic, 自动档用户名留空(iot 兜底填 SN) + 首页那份 MQTT凭证密码,
@@ -957,9 +955,8 @@ end
 -- SN 归属过滤（文档"订阅关系" + "{targetSN} = 网关 SN 或其子设备 SN"）：
 -- 下行 topic 末段必须等于本机 SN 或 {gwSn}-{n}。
 -- 同 broker 上多台网关时会收到别人的指令，不过滤就是拿别人的指令写本地寄存器。
--- 两条例外，都会导致合法下行被静默丢弃，必须放行：
---   ① 无 SN：无从判断（allow_no_sn 模式下设备本来就不带 SN）
---   ② 非 /sys/thing/ 命名空间：用户自己配的订阅 topic，不在 V3 契约内
+-- 一条例外，会导致合法下行被静默丢弃，必须放行：
+--   非 /sys/thing/ 命名空间：用户自己配的订阅 topic，不在 V3 契约内
 local function claim_ok(topic)
     if type(topic) ~= "string" then return true end
     if topic:sub(1, 11) ~= "/sys/thing/" then return true end

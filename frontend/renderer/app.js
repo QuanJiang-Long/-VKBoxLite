@@ -106,7 +106,6 @@ const el = new Proxy({
   btnMqttPassEye: $('btnMqttPassEye'),
   mqPub: $('mqPub'), mqSub: $('mqSub'),
   mqInterval: $('mqInterval'),
-  mqAllowNoSn: $('mqAllowNoSn'),
   mqKeepSession: $('mqKeepSession'),
   // ====== Step 2a: tabManual 内的 m- 前缀引用 ======
   mBtnReadCfg: $('mBtnReadCfg'), mBtnSaveCfg: $('mBtnSaveCfg'),
@@ -123,10 +122,9 @@ const el = new Proxy({
   mBtnMqttPassEye: $('mBtnMqttPassEye'),
   mMqPub: $('mMqPub'), mMqSub: $('mMqSub'),
   mMqInterval: $('mMqInterval'),
-  mMqAllowNoSn: $('mMqAllowNoSn'),
   mMqKeepSession: $('mMqKeepSession'),
   // ====== Step 2a: tabPlatform 内的 p- 前缀引用 ======
-  // Step 2c/2d: 平台档删 6 字段 (user/pass/ClientId/Pub/Sub/AllowNoSn) + 1 按钮
+  // Step 2c/2d: 平台档删 6 字段 (user/pass/ClientId/Pub/Sub) + 1 按钮
   // (pBtnManualCfg) + pBtnMqttSave/pBtnMqttReset/pBtnMqttPassEye (平台档不能改/不需要)
   // — 这些引用也不建了, 业务用不到
   // Step 2e+: 平台档 485 + 寄存器表 "保存配置" / "新增寄存器" 按钮藏掉
@@ -182,7 +180,7 @@ const el = new Proxy({
 //   const h = E(isManual(S.mode) ? 'm' : (isPlatform(S.mode) ? 'p' : ''), 'mqHost');
 // Step 2b 开始在 readMqtt/renderMqtt 用上
 // Step 2c 修: 元素不存在时返 null-stub (所有属性写都吞掉, 业务不用 if 保护)
-// 否则 renderMqtt 内部 E('p','mqAllowNoSn').checked = ... 会让整个 renderMqtt 抛错,
+// 否则 renderMqtt 内部 E('p',...).checked = ... 会让整个 renderMqtt 抛错,
 // 后续 17 字段 setKvPre 全跑不到
 const _nullStub = { value: '', textContent: '', checked: false, className: '', hidden: false, addEventListener: () => {} };
 function E(prefix, id) {
@@ -1277,7 +1275,6 @@ function exportCfgAsJson(pre) {
       pub_topic: E(pre, 'mqPub').value.trim(),
       sub_topic: E(pre, 'mqSub').value.trim(),
       interval_s: parseInt(E(pre, 'mqInterval').value, 10) || 0,
-      allow_no_sn: E(pre, 'mqAllowNoSn').checked,
       keep_session: E(pre, 'mqKeepSession').value === '1',
       auto: { pass: (S.mqtt && S.mqtt.auto_pass) || '' },
       manual_on: S.mqManual
@@ -1303,17 +1300,16 @@ function exportCfgAsCsv(pre) {
     pub_topic: E(pre, 'mqPub').value.trim(),
     sub_topic: E(pre, 'mqSub').value.trim(),
     interval_s: parseInt(E(pre, 'mqInterval').value, 10) || 0,
-    allow_no_sn: E(pre, 'mqAllowNoSn').checked,
     keep_session: E(pre, 'mqKeepSession').value === '1'
   };
-  // CSV 不存 allow_no_sn / keep_session / auto.pass / manual_on, 注释里说明
+  // CSV 不存 keep_session / auto.pass / manual_on, 注释里说明
   const csv = toCsv({
     serial: c.cfg,
     registers: collectRegs(pre),
     mqtt: m
   });
   // 头部注释: 手动档额外字段
-  const headerNote = '# manual_on=' + S.mqManual + ', allow_no_sn=' + m.allow_no_sn + ', keep_session=' + m.keep_session + '\n';
+  const headerNote = '# manual_on=' + S.mqManual + ', keep_session=' + m.keep_session + '\n';
   // 2h fix: 加 UTF-8 BOM (\uFEFF), Excel 看到 BOM 自动用 UTF-8 解码, 中文不乱码
   // type 也加 charset=utf-8, 让其他工具 (LibreOffice/VSCode) 也能正确识别
   const blob = new Blob(['\uFEFF' + headerNote + csv], { type: 'text/csv;charset=utf-8' });
@@ -1354,7 +1350,6 @@ function applyParsedData(pre, d) {
     E(pre, 'mqPub').value = d.mqtt.pub_topic || '';
     E(pre, 'mqSub').value = d.mqtt.sub_topic || '';
     E(pre, 'mqInterval').value = d.mqtt.interval_s != null ? d.mqtt.interval_s : 120;
-    E(pre, 'mqAllowNoSn').checked = !!d.mqtt.allow_no_sn;
     E(pre, 'mqKeepSession').value = d.mqtt.keep_session ? '1' : '0';
     // 自动档凭证密码回首页那个框；档次按钮按导入的 manual_on 切
     if (el.hMqPass && d.mqtt.auto) el.hMqPass.value = d.mqtt.auto.pass || '';
@@ -1595,9 +1590,9 @@ if (el.btnPushIgnore) el.btnPushIgnore.onclick = () => {
 //   tabPoll 还差 2: mqPub/Sub (之前漏了, 5 字段只有 user/pass/cid 被监听了)
 [el.mqHost, el.mqPort, el.mqSsl, el.mqUser, el.mqPass, el.mqClientId,
  el.mqPub, el.mqSub,
- el.mqInterval, el.mqKeepSession, el.mqAllowNoSn,
+ el.mqInterval, el.mqKeepSession,
  el.mMqHost, el.mMqPort, el.mMqSsl, el.mMqUser, el.mMqPass, el.mMqClientId,
- el.mMqPub, el.mMqSub, el.mMqInterval, el.mMqAllowNoSn, el.mMqKeepSession,
+ el.mMqPub, el.mMqSub, el.mMqInterval, el.mMqKeepSession,
  el.pMqHost, el.pMqPort, el.pMqSsl, el.pMqInterval, el.pMqKeepSession,
  el.hMqHost, el.hMqPort, el.hMqPass, el.hMqClientId].forEach(e => {
   if (!e) return;
@@ -1685,7 +1680,6 @@ async function writeManualMode(on) {
     // 改的这几个值只能靠这次写入带走, 否则会被 c(设备现值)覆盖等于白改
     ssl: el.mqSsl.checked,
     interval_s: parseInt(el.mqInterval.value, 10) || 0,
-    allow_no_sn: el.mqAllowNoSn.checked,
     keep_session: el.mqKeepSession.value === '1',
     manual_on: on,
   };
@@ -1880,7 +1874,7 @@ const MOCK = {
           // 手动档 topic 模板。{SN} 由设备代入；Step 2k 起留空 = 设备不订不发
           pub_topic: '/sys/thing/node/property/post/{SN}',
           sub_topic: '/sys/thing/gw/config/get/{SN}',
-          interval_s: 120, allow_no_sn: false, keep_session: false,
+          interval_s: 120, keep_session: false,
           auto: { pass: 'VKBOXGW2026KEY' }, manual_on: false },
   published: 0
 };
