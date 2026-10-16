@@ -137,6 +137,15 @@ local function hexs(s)
     return #s > 0 and (s:gsub(".", function(c) return string.format("%02x", c:byte()) end)) or "-"
 end
 
+-- 同 hexs, 但字节间加空格便于肉眼看.
+-- 加 n= 是排查用: 单看 raw 分不清 "0200017984" 是 5 字节还是
+-- 10 个 hex 字符模糊拼起来. 排查 Rx timeout 时 n 是关键信息
+-- (用 sscom 抓包对照, n 决定到底缺了几字节)
+local function hexspaced(s)
+    if not s or #s == 0 then return "-" end
+    return (s:gsub(".", function(c) return string.format("%02x ", c:byte()) end)):gsub(" $", "")
+end
+
 local function poll_reg(reg)
     local slave = lastCfg.slave or cfg.SLAVE_ADDR
     local cnt = reg.count or 1
@@ -150,7 +159,14 @@ local function poll_reg(reg)
     local f = do_transaction(frame, lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS, slave, 3)
     if not f then
         stat.timeout = stat.timeout + 1
-        log.warn("poll", string.format("Rx timeout addr=%d %s rx=%s", reg.addr, alias, hexs(respData or "")))
+        -- 排查: Tx raw + Rx n + Rx raw 都打, 跟 sscom 抓包对比
+        -- - Tx raw 不对: build_read 出错 (极罕见, build fail 已拦)
+        -- - Rx n=0: DE 没切到收, 或仪表没响应
+        -- - Rx n 缺前几字节 (1~3): DE 拉低太慢, 响应首字节丢了
+        -- - Rx n 缺后几字节 (1~2): timeout 到了, CRC 没收完 (3.5 字符间隔超时)
+        -- - Rx n 含乱字节 (如 f8): 总线噪声, AB 接反, 或 DE 切换时毛刺
+        log.warn("poll", string.format("Rx timeout addr=%d %s Tx raw=[%s] Rx n=%d raw=[%s]",
+            reg.addr, alias, hexspaced(frame), #(respData or ""), hexspaced(respData or "")))
         return
     end
     if f.err then
