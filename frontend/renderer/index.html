@@ -932,20 +932,6 @@ body.mq-manual .auto-only{display:none !important;}
                         <span class="hint" id="snMqttHint"></span>
                     </div>
                 </div>
-                <div class="panel">
-                    <div class="panel-title">总线诊断</div>
-                    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                        <button id="btnBusSniff">静默侦听总线</button>
-                        <input id="busSniffMs" type="number" value="3000" min="500" max="15000" step="500" style="width:110px;padding:3px 6px;border:1px solid #ccc;">
-                        <span class="hint">毫秒；不切换模式，纯收听 485 总线，返回收到几帧</span>
-                    </div>
-                    <div class="form-row" style="margin-top:12px;">
-                        <label>手动发帧</label>
-                        <input id="txHex" type="text" placeholder="01 03 00 00 00 0A C5 CD" style="font-family:Consolas,monospace;">
-                        <button id="btnTx">发送</button>
-                        <span class="hint">会临时占用总线发一帧，用于验证发送链路（DE 自动切换）</span>
-                    </div>
-                </div>
             </div>
         </div>
     </div>

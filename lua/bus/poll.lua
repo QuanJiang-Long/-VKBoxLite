@@ -364,22 +364,6 @@ function M.probe_raw(slave, addr, qty, timeout_ms)
     return raw_tx(frame, timeout_ms, { slave = slave, addr = addr, qty = qty })
 end
 
--- 裸发一串 hex 字节(前端 W:TX), 抓回原始响应, 返回 rx_len/rx_hex/parsed
-function M.tx_raw(hex, timeout_ms)
-    if type(hex) ~= "string" then return nil, "bad hex" end
-    local bytes = {}
-    for h in hex:gmatch("%x%x") do
-        local v = tonumber(h, 16)
-        if not v then return nil, "bad hex" end
-        bytes[#bytes + 1] = string.char(v)
-    end
-    if #bytes == 0 then return nil, "empty hex" end
-    local r, err = raw_tx(table.concat(bytes), timeout_ms)
-    if not r then return nil, err end
-    r.tx_hex = hex        -- 原样回显前端发的串, 免得 format 后再解析对不上
-    return r
-end
-
 function M.reload_cfg(src)
     -- src="pull" 读平台 ds_pull, 其他读手配 ds_poll。两槽同构, 只换 load
     local c = (src == "pull") and cfgstore.load_pull() or cfgstore.load_poll()

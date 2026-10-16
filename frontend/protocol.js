@@ -51,10 +51,6 @@
     frames:  (n)  => 'R:FRAMES' + (n ? '=' + n : ''),   // 最近解译帧
     infer:   ()   => 'R:INFER',                          // 推断轮询表+从机列表（只读参考，不写配置）
     autoDetect: () => 'R:AUTODETECT',                    // 识别 baud/parity（只用于本次 sniff 会话）
-
-    // ---- 总线诊断 ----
-    sniffBus: (ms) => 'R:SNIFF=' + (ms || 3000),         // 静默侦听总线
-    txHex:    (hex) => 'W:TX=' + hex,                    // 手动发原始帧
   };
 
   // ---------- 解码：设备 -> 前端 ----------

@@ -166,9 +166,7 @@ const el = new Proxy({
   frameFilter: $('frameFilter'), frameAuto: $('frameAuto'), frameLog: $('frameLog'),
   btnInfer: $('btnInfer'), inferTbody: $('inferTbody'),
   inferHint: $('inferHint'),
-  btnAutoDetect: $('btnAutoDetect'), detectHint: $('detectHint'),
-  btnBusSniff: $('btnBusSniff'), busSniffMs: $('busSniffMs'),
-  txHex: $('txHex'), btnTx: $('btnTx')
+  btnAutoDetect: $('btnAutoDetect'), detectHint: $('detectHint')
 }, {
   // 未在表里列出的 id 走 $() 现取（如只读展示字段），
   // 取不到返回 null，由调用方判空
@@ -1184,36 +1182,6 @@ function renderDetecting(st) {
     '，最坏 21 秒，完成后自动开始旁听）';
 }
 
-async function busSniff() {
-  const ms = parseInt(el.busSniffMs.value, 10) || 3000;
-  try {
-    status('正在静默侦听总线 ' + ms + 'ms …', true);
-    const r = await sendCmd(Protocol.Enc.sniffBus(ms), 'SNIFF', ms + 4000);
-    const n = parseInt(r.data, 10);
-    status('侦听完成：收到 ' + n + ' 帧', n > 0);
-    toast('收到 ' + n + ' 帧' + (n > 0 ? '（DE 收发切换与发送链路正常）' : '（总线上无数据）'));
-  } catch (e) {
-    status('侦听失败：' + e.message, false);
-    toast('侦听失败：' + e.message);
-  }
-}
-
-async function txHex() {
-  const hex = el.txHex.value.trim();
-  if (!hex) { toast('请输入要发送的十六进制字节，如 01 03 00 00 00 0A C5 CD'); return; }
-  if (!/^([0-9A-Fa-f]{2}\s*)+$/.test(hex)) { toast('格式错误：只能含十六进制字节，用空格分隔'); return; }
-  try {
-    status('正在发送 ' + hex + ' …', true);
-    await sendCmd(Protocol.Enc.txHex(hex), 'TX', 3000);
-    status('已发送（DE 自动切换）', true);
-    toast('发送成功');
-    setTimeout(readFrames, 300);
-  } catch (e) {
-    status('发送失败：' + e.message, false);
-    toast('发送失败：' + e.message);
-  }
-}
-
 //---------------------------------------------------------------------
 // 导入 / 导出配置（JSON / CSV 两种格式）
 // 2h: 加 CSV 支持, 中文列名 (Excel 直接打开), 用扩展名/弹窗选 走对应格式
@@ -1811,8 +1779,6 @@ el.btnFrameClear.onclick = () => { S.frames = []; renderFrames(); renderDetected
 el.frameFilter.onchange = renderFrames;
 el.btnInfer.onclick = doInfer;
 el.btnAutoDetect.onclick = autoDetect;
-el.btnBusSniff.onclick = busSniff;
-el.btnTx.onclick = txHex;
 
 // 主标签页切换。抽成 activateTab 是给 syncTabs 复用：栏目被模式藏掉时
 // 也要走同一条路切回去，两处各写一份必然走偏
@@ -2078,8 +2044,6 @@ function mockReply(line) {
   }
   else if (line === 'R:AUTODETECT') resp = 'RET:AUTODETECT=' + JSON.stringify(
     { baud: 9600, databits: 8, stopbits: 1, parity: 0 });
-  else if (line.indexOf('R:SNIFF=') === 0) resp = 'RET:SNIFF=3';
-  else if (line.indexOf('W:TX=') === 0) resp = 'RET:TX=OK';
   else if (line.indexOf('W:BOOTMODE=') === 0) {
     MOCK.bootMode = line.slice(11);
     resp = 'RET:BOOTMODE=OK';

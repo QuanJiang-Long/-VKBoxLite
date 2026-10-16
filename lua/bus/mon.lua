@@ -397,23 +397,6 @@ function M.infer()
     }
 end
 
-function M.sniff_count(ms)
-    ms = ms or 3000
-    if ms < 100 then ms = 100 end
-    if ms > 30000 then ms = 30000 end
-    if not running then
-        local ok = M.start()
-        if not ok then return 0 end
-    end
-    local before = stat.frames
-    local waited = 0
-    while waited < ms do
-        if sys then sys.wait(100) end
-        waited = waited + 100
-    end
-    return math.max(0, stat.frames - before)
-end
-
 function M.start(c)
     if running then return true end
     -- 没有 sniff 持久槽: 参数由 auto_detect() 试出来只存本次会话;

@@ -99,8 +99,6 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20） |
 | R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits}], slaves, stat}`（**只读参考**，不写任何配置） |
 | R:AUTODETECT | 识别 sniff 通讯参数 `{baud,databits,stopbits,parity}`（**只用于本次会话**，不写 fskv）。**非阻塞**：回 `BUSY` / 参数 / `RET:FAIL:not in sniff mode`，由前端轮询 |
-| R:SNIFF=ms | 静默侦听总线 ms 毫秒（100~30000），返回帧数 |
-| W:TX=hex | 裸发一串字节（总线诊断），回显 rx_len/parsed/rx（识别中回 BUSY） |
 | W:MODE=poll\|pollpull\|sniff\|idle | 切换 485 运行模式。`sniff` 会**自动起一轮识别**（非阻塞），立即回 OK；`pollpull` 会自动 hello 拉平台配置 |
 | W:BOOTMODE=idle\|poll\|pollpull\|sniff | 开机默认模式（大小写不敏感）。`sniff` 同样自动识别，但不堵开机流程 |
 | R:SN / R:ID / W:SN=xxx[,FORCE] / C:SN / LOCK:SN / UNLOCK:SN / R:SNEN / W:SNEN=n,0\|1[,P] | SN 产线指令（VUART_0 通道） |
@@ -335,7 +333,7 @@ for parity in {N, E, O}:        # 8N1 占现场绝大多数，先整个扫完
 
 | 命令 | 识别期间 |
 |---|---|
-| `W:CFG` / `W:TX` / `W:RAWTEST` | ❌ `RET:FAIL:<cmd>:BUSY:...` |
+| `W:CFG` / `W:RAWTEST` | ❌ `RET:FAIL:<cmd>:BUSY:...` |
 | `W:MODE=poll` / `sniff` | ❌ BUSY（闸门在 `ctrl.switch_mode` 里） |
 | `W:MODE=idle` / `stop` | ✅ 放行——用户主动放弃的唯一逃生口 |
 | `R:` 全部只读命令 | ✅ 放行（进度就靠 `R:MODE` 的 `mon.detecting` 看） |

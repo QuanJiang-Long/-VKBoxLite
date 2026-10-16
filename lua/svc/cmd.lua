@@ -337,27 +337,6 @@ local function reg_debug_cmds()
         M.reply("RET:AUTODETECT=BUSY")
     end)
 
-    -- R:SNIFF=ms: 静默侦听总线 ms 毫秒, 返回帧数
-    M.reg("R:SNIFF", function(arg)
-        local ms = 3000
-        if arg then
-            local v = tonumber(arg)
-            if v then ms = math.floor(v) end
-        end
-        local n = mon.sniff_count(ms)
-        M.reply("RET:SNIFF=" .. tostring(n))
-    end)
-
-    -- W:TX=hex: 裸发一串字节
-    M.reg("W:TX", function(arg)
-        if blocked_while_detecting("TX") then return end
-        if not arg or arg == "" then return M.reply("RET:FAIL:TX:empty hex") end
-        local r, err = poll.tx_raw(arg)
-        if not r then return M.reply("RET:FAIL:TX:" .. tostring(err)) end
-        M.reply(string.format("RET:TX=OK tx_ok=%s rx_len=%d parsed=%s rx=%s",
-            tostring(r.tx_ok), r.rx_len, tostring(r.parsed),
-            r.rx_hex == "" and "(空)" or r.rx_hex))
-    end)
 end
 
 function M.handle(line)
