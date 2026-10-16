@@ -17,7 +17,7 @@ M.MAX_REGS = 128
 --   6-fix calc_de_hold_ms 已经 +5ms 基础余量, 这里再加 N ms
 --   解决 SIT3088E 等"自动收发"模块的时序兼容问题 (自动切换有延迟)
 --   14-fix 验证失败 (hold=64ms 还是 100% timeout) -> 不是 DE 时序问题
---   改回 0, 留这个配置位是为了以后排查其他兼容性问题
+--   15-fix: 改用 uart.wait485 精确等 tx-done, 这个配置位默认 0 不再需要
 M.DE_HOLD_MS = 0
 
 -- 看门狗与监控

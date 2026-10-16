@@ -128,8 +128,14 @@ local function do_transaction(frame, timeout_ms, exp_slave, exp_fc)
     de_high()
     log.debug("poll", string.format("de_high+write n=%d", #frame))  -- 7-fix 诊断: DE 拉高 + uart.write
     pcall(uart.write, mbus.UART_ID, frame)
-    local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD) + (cfg.DE_HOLD_MS or 50)  -- 14-fix: cfg.DE_HOLD_MS 可配, 默认 +50ms 测 SIT3088E 自动收发兼容
-    if sys then sys.wait(hold) end
+    -- 15-fix: 合宙分析, 之前 hold=14/64ms 期间 DE=1 还在占线, 把自动方向从机(SIT3088E模块)的
+    --   响应压住了. 改用 uart.wait485 精确等 tx-done 中断 (微秒级), 立刻释放 DE.
+    --   CT 142 也能照常工作 (本来 DE 拉低时机对它没影响).
+    if not pcall(uart.wait485, mbus.UART_ID) then
+        -- 降级路径: 老的 sys.wait + calc_de_hold_ms (兼容没内核 485 的旧固件)
+        local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD) + (cfg.DE_HOLD_MS or 0)
+        if sys then sys.wait(hold) end
+    end
     de_low()
     log.debug("poll", string.format("de_low, hold=%dms, 等待响应 timeout=%d", hold, timeout_ms))  -- 7-fix 诊断
     local waited = 0
@@ -319,8 +325,11 @@ local function raw_tx(frame, timeout_ms, extra)
     local txok, txerr = pcall(uart.write, mbus.UART_ID, frame)
     txok = txok and true or false
     de_high()
-    local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD) + (cfg.DE_HOLD_MS or 50)  -- 14-fix: cfg.DE_HOLD_MS 可配, 默认 +50ms 测 SIT3088E 自动收发兼容
-    if sys then sys.wait(hold) end
+    -- 15-fix: 用 uart.wait485 精确定位 tx-done, 见上
+    if not pcall(uart.wait485, mbus.UART_ID) then
+        local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD) + (cfg.DE_HOLD_MS or 0)
+        if sys then sys.wait(hold) end
+    end
     de_low()
     timeout_ms = timeout_ms or (lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS)
     local waited = 0
