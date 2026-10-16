@@ -431,7 +431,9 @@ function setPortState(open, path) {
   el.stPort.style.color = open ? '#0a7d2c' : '#666';
   // 28-fix: 串口未连接时禁用首页 + 运行模式面板的功能按钮 + 顶部栏导入.
   //   设备没连, 按钮触发的命令要么发不出去, 要么发出去没意义, 灰掉避免误点.
-  //   导出 (btnExport) 暂不在此列: 它读的是本地配置快照, 不依赖设备, 后面单独讨论
+  // 29-fix: 顶部栏导出 (btnExport) 也加入 (之前漏了).
+  //   理由: 导出也是发设备命令 R:CFG + R:REG 把设备当前配置拉下来打包,
+  //   没设备连就发不出去, 跟导入/读设备信息一类, 一并灰掉
   //   selBootMode 是 select, disabled 对 select 也有效
   //   注: btnImport 在 syncTabs 里另有一道 platform 档的守卫, 二者取或:
   //        串口未连 → 一定灰; 平台档 → 一定灰; 其他情况由 syncTabs 控制
@@ -442,7 +444,9 @@ function setPortState(open, path) {
    el.btnHomeRefresh,      // 首页 状态总览 刷新
    el.btnModeRefresh,      // 运行模式 刷新状态
    el.selBootMode,         // 运行模式 开机默认模式 下拉
-   el.btnSaveBoot          // 运行模式 开机默认模式 保存
+   el.btnSaveBoot,         // 运行模式 开机默认模式 保存
+   // 29-fix 新增 (1 个):
+   el.btnExport            // 顶部栏 导出
   ].forEach(b => { if (b) b.disabled = !open; });
   // btnImport 的 platform 档守卫要在 setPortState 之后跑, 否则会被覆盖
   // (syncTabs 现在是 mode 切换时调, 不是 port 切换时调, 所以这里手动补一下)
@@ -452,6 +456,12 @@ function setPortState(open, path) {
     el.btnImport.title = !open ? '请先连接串口' :
       isPlatform(S.mode) ? '平台档配置从 MQTT 平台拉取，不能导入' : '导入配置文件 (.json / .csv)';
   }
+  // 29-fix: 4 个 mode-card (mcIdle/mcPoll/mcPollpull/mcSniff) 变灰
+  //   28-fix 用 applyMode 拦截 + toast, 但用户希望视觉上就灰
+  //   (toast 是兜底, 万一有别的入口绕过 .locked class 也能拦)
+  document.querySelectorAll('.mode-card').forEach(c => {
+    c.classList.toggle('locked', !open);
+  });
   syncPullCfgBtn();
 }
 
@@ -519,7 +529,7 @@ async function readInfo() {
     el.fCsq.value   = d.csq != null ? d.csq : (d.rsrp != null ? 'rsrp ' + d.rsrp : '');
     el.fVer.value   = d.version || d.fw || '';
     el.fProj.value  = d.project || '';
-    el.fUrl.value   = d.server || d.url || el.fUrl.value;
+    el.fUrl.textContent = d.server || d.url || el.fUrl.textContent;
     el.stSn.textContent = d.sn || '--';
     el.stDev.textContent = (d.project || '--') + ' / ' + (d.version || d.fw || '--');
     status('设备信息已读取', true);
@@ -1389,7 +1399,7 @@ function applyParsedData(pre, d) {
   if (c.interval_ms) E(pre, 'inpRound').value = c.interval_ms;
   if (c.slave) E(pre, 'inpSlave').value = c.slave;
   E(pre, 'inpTimeout').value = (c.timeout_ms == null || c.timeout_ms === '') ? '' : c.timeout_ms;
-  if (c.server) el.fUrl.value = c.server;
+  if (c.server) el.fUrl.textContent = c.server;
   const regs = d.registers || d.regs || [];
   S.regs = toArr(regs);
   renderRegTable(pre);

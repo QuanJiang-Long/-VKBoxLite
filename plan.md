@@ -580,6 +580,16 @@
   - **未**做**的**:**MQTT **服**务**器**卡**片**的** input** - **用**户**认**为** btnHomeMqttSave **已**经**有**守**卫**了**, **不**需**要** input readonly**; btnExport **也**没**加** (读**本**地**配**置**快**照**, **不**依**赖**设**备**)** 
   - **测**试**:**新**增** `test_28_port_state_guards.js`**:**5 **个**测**试**点** (setPortState 5 **个**新**按**钮** / **旧** 6 **个**仍**在** / btnImport OR **守**卫** / syncTabs OR **守**卫** / applyMode **开**头**拦**截** + toast / 28-fix **注**释**)** 
 - **28-fix 18/18 npm test **全**过**!
+- **29-fix 3 **项**补**充** (fUrl / mode-card / btnExport**)**:
+  - **修**改**:
+    1. `fUrl` **从** `<input>` **改**为** `<span class="ro-val">` - **只**读**显**示**。**去**掉** "**可**修**改**"** title (只**读**了**, **这**个**提**示**就**没**意**义**了**)** 
+    2. `el.fUrl.value` **改**为** `el.fUrl.textContent` (2 **处**) 
+    3. CSS: **加** `.mode-card.locked { opacity: .5; cursor: not-allowed; }` - **视**觉**变**灰**, **不**是**只**点**击**拦**截** 
+    4. `setPortState()` **加** btnExport **到**守**卫**列**表** (之**前**漏**了**)** 
+    5. `setPortState()` **加** `document.querySelectorAll('.mode-card').forEach(c => c.classList.toggle('locked', !open))` - **串**口**开**/关**时**切**换** .locked class** 
+    6. **保**留** applyMode **的** `!S.open` **兜**底** - **万**一**有**别**的**入**口**绕**过** .locked, **也**会**被**拦**截** + toast
+  - **测**试**:**新**增** `test_29_furl_mode_locked.js`**:**7 **个**测**试**点** (fUrl **是** span / 不**是** input / **有** ro-val / **没**有** title / JS **不**用** .value / **用** .textContent / **CSS** .mode-card.locked / setPortState **切**换** locked / btnExport **加**入** / applyMode **兜**底** / 29-fix **注**释**)** 
+- **29-fix 19/19 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**

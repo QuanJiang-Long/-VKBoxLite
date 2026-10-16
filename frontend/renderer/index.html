@@ -129,6 +129,10 @@ body.mq-manual .auto-only{display:none !important;}
 .mode-card .m-state.pending{color:#e67e22;}
 /* 切换进行中：禁手型，提示别再点 */
 .mode-card.switching{cursor:progress;opacity:.75;}
+/* 29-fix: 串口未连接时 4 个 mode-card 整体变灰 + 不可点
+   (overlay 之前的 28-fix 是点击拦截 + toast, 现在改成视觉上就灰了) */
+.mode-card.locked{opacity:.5;cursor:not-allowed;}
+.mode-card.locked:hover{border-color:#dde2ea;}
 /* 状态网格 */
 .kv-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px 16px;}
 .kv-grid .kv{display:flex;gap:6px;font-size:13px;}
@@ -230,7 +234,7 @@ body.mq-manual .auto-only{display:none !important;}
         <div class="item"><label>GSM信号强度</label><input id="fCsq" type="text" readonly title="CSQ 信号强度"></div>
         <div class="item"><label>版本号</label><input id="fVer" type="text" readonly title="固件版本"></div>
         <div class="item"><label>项目名称</label><input id="fProj" type="text" readonly title="项目标识"></div>
-        <div class="item"><label>配置服务器url</label><input id="fUrl" type="text" title="配置服务器地址，可修改"></div>
+        <div class="item"><label>配置服务器url</label><span id="fUrl" class="ro-val">--</span></div>
     </div>
 
     <!-- 主区域 -->
