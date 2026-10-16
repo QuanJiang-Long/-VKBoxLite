@@ -75,9 +75,8 @@
 
 - **发现时间**: 2g-1 (1c87a03) 烧测时, 2026-10-15
 - **症状**: 点 "显示密码" 按钮, mqtt 页密码框没反应 (首页那个可能也没切换?)
-- **可能原因**: togglePassEye 函数的 onclick 绑定漏了, 或者绑错按钮 id
+- **根因** (4-fix 时找到): `togglePassEye()` 只切 mqPass (tabPoll) + hMqPass (Home), 漏了 mMqPass (manual). 同样漏了 mBtnMqttPassEye (manual 的眼睛按钮). Step 2a 拆 tab 时漏的, 跟 2m/2n/2o/2p/2q 同根问题.
+- **状态**: ✅ done (4-fix commit, 加上 mMqPass + mBtnMqttPassEye, 加了 test_4_passeye.js)
 - **2g-1 测试没覆盖**: test_2g1_mqtt_module 只测 14 个函数存在, 没测 onclick 绑定
-- **优先级**: 低 (小 UI 问题, 用户有别的办法看密码, e.g. 复制)
-- **修复建议**: 后续统一在 2g-2 阶段给所有 mqtt 按钮加 onclick 测试, 同时排查这个
-- **不阻塞**: 2g-1 (commit 1c87a03) 已通过, 不影响 mqtt.js 拆分继续往下走
+- **修复**: togglePassEye 改成切 3 个密码框 + 3 个眼睛按钮
 

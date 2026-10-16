@@ -344,13 +344,17 @@ async function reportNow() {
 // 也不抢输入框焦点（按钮是独立的 type="button"，点了焦点还在输入框）。
 // 首页和 MQTT 配置页各有一个密码框，两个一起切才一致 ——
 // 只切其中一个，另一页还掩着，看着像按钮坏了
+// 4-fix: 加上 mMqPass (manual) 和 mBtnMqttPassEye (manual 的眼睛按钮).
+//   原代码只切 mqPass + hMqPass + btnMqttPassEye + btnHomeMqttPassEye,
+//   manual tab 的 mMqPass 密码框 + 眼睛按钮漏了 (Step 2a 拆 tab 时漏,
+//   跟 2m/2n/2o/2p/2q 同根). 烧测时发现, 计划.md "小问题清单" 记的.
 function togglePassEye() {
   const show = el.mqPass.type === 'password';
-  [el.mqPass, el.hMqPass].forEach(inp => {
+  [el.mqPass, el.mMqPass, el.hMqPass].forEach(inp => {
     if (!inp) return;
     inp.type = show ? 'text' : 'password';
   });
-  [el.btnMqttPassEye, el.btnHomeMqttPassEye].forEach(btn => {
+  [el.btnMqttPassEye, el.mBtnMqttPassEye, el.btnHomeMqttPassEye].forEach(btn => {
     if (!btn) return;
     btn.classList.toggle('show', show);
     btn.title = show ? '隐藏密码' : '显示密码';
