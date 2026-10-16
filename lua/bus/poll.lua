@@ -128,7 +128,7 @@ local function do_transaction(frame, timeout_ms, exp_slave, exp_fc)
     de_high()
     log.debug("poll", string.format("de_high+write n=%d", #frame))  -- 7-fix 诊断: DE 拉高 + uart.write
     pcall(uart.write, mbus.UART_ID, frame)
-    local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD)
+    local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD) + (cfg.DE_HOLD_MS or 50)  -- 14-fix: cfg.DE_HOLD_MS 可配, 默认 +50ms 测 SIT3088E 自动收发兼容
     if sys then sys.wait(hold) end
     de_low()
     log.debug("poll", string.format("de_low, hold=%dms, 等待响应 timeout=%d", hold, timeout_ms))  -- 7-fix 诊断
@@ -319,7 +319,7 @@ local function raw_tx(frame, timeout_ms, extra)
     local txok, txerr = pcall(uart.write, mbus.UART_ID, frame)
     txok = txok and true or false
     de_high()
-    local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD)
+    local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD) + (cfg.DE_HOLD_MS or 50)  -- 14-fix: cfg.DE_HOLD_MS 可配, 默认 +50ms 测 SIT3088E 自动收发兼容
     if sys then sys.wait(hold) end
     de_low()
     timeout_ms = timeout_ms or (lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS)
