@@ -7,7 +7,7 @@
 
 ## 2g - app.js 拆模块 (pc_tool 风格)
 
-- **状态**: 进行中 (2g-1 mqtt.js ✅, 2g-2 cfg.js 待做, 2g-3 reg.js 待做)
+- **状态**: 进行中 (2g-1 mqtt.js ✅, 2g-2 cfg.js ✅, 2g-3 reg.js 待做)
 - **讨论来源**: 之前会话 (当前会话之前) 提到, 当前会话 (feb2da2 之后) 漏记, user 提醒补回
 - **优先级**: 低 (nice to have, 不影响功能)
 - **预计工作量**: 大 (~3 个 commit, 每阶段 ~300-400 行)
@@ -19,9 +19,9 @@
   - 业务/UI 分离 (pc_tool 风格: 业务逻辑和 DOM 操作分开)
   - 长期 refactor, 改完不改变外部行为
 - **阶段**:
-  - 2g-1 mqtt.js ✅ (1c87a03, 2026-10-15, 14 个 mqtt 函数, app.js -360 行)
-  - 2g-2 cfg.js: 待做 (readCfg/saveCfg/pullCfg/readVal/refreshCfgDirty 等)
-  - 2g-3 reg.js: 待做 (renderRegTable/addRegRow/deleteRow/addParamRow/confirmAddReg 等)
+  - 2g-1 mqtt.js ✅ (1c87a03, 14 个 mqtt 函数, app.js -360 行)
+  - 2g-2 cfg.js ✅ (77c1e44, 15 个 cfg 函数, app.js -552 行)
+  - 2g-3 reg.js ✅ (commit, 6 个 reg 函数, app.js -102 行, 含 collectRegs/badRegRow 在 cfg.js)
 - **不做的代价**:
   - 现在用没问题 (developer 记得代码位置)
   - 半年后回来改东西要花 30 min 重新理解
