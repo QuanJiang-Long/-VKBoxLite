@@ -78,9 +78,18 @@ local function on_receive(id, len)
         local ok, data = pcall(uart.read, id, 512)
         if not ok then return end
         if type(data) ~= "string" or #data == 0 then break end
+        -- 7-fix 诊断: 每次 UART 接收都打 log, 看是不是根本没收到字节
+        --   (UART 中断触发了, 但 read 0 字节 = rx buf 真的是空的, 硬件没收到)
+        --   或 UART 中断都没触发 (这个 log 不会出现)
+        log.debug("poll", string.format("on_receive id=%d len=%d n=%d flag=%s", id, len, #data, tostring(respFlag)))
         if respFlag then
             respData = (respData or "") .. data
             if #respData > 512 then respData = respData:sub(-256) end
+        else
+            -- 7-fix 诊断: 收到字节但 respFlag=false, 说明 poll 不在等响应
+            --   (可能 mon/iomux 等别的模块占用了 UART, 或上次事务没清干净)
+            log.warn("poll", string.format("on_receive id=%d got %d bytes but respFlag=false (raw=[%s])",
+                id, #data, hexspaced(data)))
         end
     end
 end
@@ -117,10 +126,12 @@ local function do_transaction(frame, timeout_ms, exp_slave, exp_fc)
     respFlag, respData = true, nil
     reqSlave, reqFc = exp_slave, exp_fc
     de_high()
+    log.debug("poll", string.format("de_high+write n=%d", #frame))  -- 7-fix 诊断: DE 拉高 + uart.write
     pcall(uart.write, mbus.UART_ID, frame)
     local hold = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD)
     if sys then sys.wait(hold) end
     de_low()
+    log.debug("poll", string.format("de_low, hold=%dms, 等待响应 timeout=%d", hold, timeout_ms))  -- 7-fix 诊断
     local waited = 0
     while waited < timeout_ms do
         local f = try_resp()
@@ -155,7 +166,7 @@ local function poll_reg(reg)
         log.warn("poll", "build fail", reg.addr, tostring(err))
         return
     end
-    log.info("poll", string.format("Tx s%d fc3 addr=%d len=%d %s", slave, reg.addr, cnt, alias))
+    log.info("poll", string.format("Tx s%d fc3 addr=%d len=%d %s raw=[%s]", slave, reg.addr, cnt, alias, hexspaced(frame)))
     local f = do_transaction(frame, lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS, slave, 3)
     if not f then
         stat.timeout = stat.timeout + 1
