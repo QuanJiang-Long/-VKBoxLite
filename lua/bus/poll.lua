@@ -25,12 +25,14 @@ local curSlot = "poll"
 local stat = { rounds = 0, ok = 0, timeout = 0, werr = 0, zero = 0 }
 local wstat = { queued = 0, done = 0, wfail = 0 }
 
+-- 16-fix-1: DE 由内核 485 自动控制, 这两个函数保留为 noop
+--   (留作万一要回滚到手动 DE 模式时用, 当前没有任何调用)
 local function de_high()
-    if gpio then pcall(gpio.set, mbus.DE_PIN, 1) end
+    -- 16-fix-1: noop, 内核 485 在 uart.write 时自动拉高 DE
 end
 
 local function de_low()
-    if gpio then pcall(gpio.set, mbus.DE_PIN, 0) end
+    -- 16-fix-1: noop, 内核 485 在 tx-done 中断里自动拉低 DE
 end
 
 local function drain()
@@ -64,7 +66,15 @@ local function ensure_uart()
     local ok, e = pcall(uart.setup, mbus.UART_ID, lastCfg and lastCfg.baud or cfg.BAUD,
         lastCfg and lastCfg.databits or cfg.DATABITS,
         lastCfg and lastCfg.stopbits or cfg.STOPBITS,
-        mbus.parity_to_uart(lastCfg and lastCfg.parity or cfg.PARITY))
+        mbus.parity_to_uart(lastCfg and lastCfg.parity or cfg.PARITY),
+        -- 16-fix-1: 开启内核 485 (第 6-10 参)
+        --   合宙 demo 用内核 485 通 4096, 软件 hold 14/64ms 是根因(DE 霸占总线)
+        --   内核在 tx-done 中断里自动拉高/拉低 DE (μs 级精度)
+        nil,  -- 6: flow control (none)
+        1024, -- 7: buff_size
+        mbus.DE_PIN, -- 8: rs485_gpio
+        0,    -- 9: rs485_dir_rx_level (DE=0 时接收)
+        math.floor(20000 * 9600 / (lastCfg and lastCfg.baud or cfg.BAUD)))  -- 10: rs485_delay (按 baud 调整)
     _setup_n = _setup_n + 1
     if not ok then return false, "uart setup fail: " .. tostring(e) end
     if gpio then pcall(gpio.setup, mbus.DE_PIN, 0) end
@@ -125,23 +135,11 @@ local function do_transaction(frame, timeout_ms, exp_slave, exp_fc)
     drain()                                  -- 先清残留, 避免杂字节顶掉真响应
     respFlag, respData = true, nil
     reqSlave, reqFc = exp_slave, exp_fc
-    de_high()
-    log.debug("poll", string.format("de_high+write n=%d", #frame))  -- 7-fix 诊断: DE 拉高 + uart.write
+    -- 16-fix-1: 删除 de_high()/de_low(), 依赖内核 485 自动控制 DE
+    --   内核在 tx-done 中断里自动拉高/拉低 DE (μs 级精度)
+    log.debug("poll", string.format("write n=%d (kernel 485 auto DE)", #frame))
     pcall(uart.write, mbus.UART_ID, frame)
-    -- 15-fix: 合宙分析, 之前 hold=14/64ms 期间 DE=1 还在占线, 把自动方向从机(SIT3088E模块)的
-    --   响应压住了. 改用 uart.wait485 精确等 tx-done 中断 (微秒级), 立刻释放 DE.
-    --   CT 142 也能照常工作 (本来 DE 拉低时机对它没影响).
-    local hold_method, hold_ms
-    if pcall(uart.wait485, mbus.UART_ID) then
-        hold_method, hold_ms = "wait485", 0
-    else
-        -- 降级路径: 老的 sys.wait + calc_de_hold_ms (兼容没内核 485 的旧固件)
-        hold_ms = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD) + (cfg.DE_HOLD_MS or 0)
-        hold_method = "sys.wait"
-        if sys then sys.wait(hold_ms) end
-    end
-    de_low()
-    log.debug("poll", string.format("de_low, method=%s hold=%dms, 等待响应 timeout=%d", hold_method, hold_ms, timeout_ms))  -- 15-fix: method 区分 wait485 / sys.wait
+    log.debug("poll", string.format("等待响应 timeout=%d", timeout_ms))
     local waited = 0
     while waited < timeout_ms do
         local f = try_resp()
@@ -260,7 +258,7 @@ end
 local function worker()
     writeTaskRun = true
     drain_write_queue(gen, true)
-    de_low()
+    -- 16-fix-1: 删除 de_low(), 依赖内核 485 自动控制 DE
     writeTaskRun = false
 end
 
@@ -328,17 +326,7 @@ local function raw_tx(frame, timeout_ms, extra)
     pcall(uart.on, mbus.UART_ID, "receive", raw_on_receive)
     local txok, txerr = pcall(uart.write, mbus.UART_ID, frame)
     txok = txok and true or false
-    de_high()
-    -- 15-fix: 用 uart.wait485 精确定位 tx-done, 见上
-    local hold_method, hold_ms
-    if pcall(uart.wait485, mbus.UART_ID) then
-        hold_method, hold_ms = "wait485", 0
-    else
-        hold_ms = mbus.calc_de_hold_ms(#frame, lastCfg and lastCfg.baud or cfg.BAUD) + (cfg.DE_HOLD_MS or 0)
-        hold_method = "sys.wait"
-        if sys then sys.wait(hold_ms) end
-    end
-    de_low()
+    -- 16-fix-1: 删除 de_high()/de_low(), 依赖内核 485 自动控制 DE
     timeout_ms = timeout_ms or (lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS)
     local waited = 0
     while waited < timeout_ms do
@@ -489,7 +477,7 @@ function M.stop()
     if not running then return true end
     running = false
     gen = gen + 1
-    de_low()
+    -- 16-fix-1: 删除 de_low(), 依赖内核 485 自动控制 DE
     log.info("poll", "stopped")
     return true
 end

@@ -13,12 +13,11 @@ M.TIMEOUT_MS = 500
 M.REG_DEFAULT = {}
 M.MAX_REGS = 128
 
--- 14-fix: DE_PIN 保持时间额外余量 (ms)
---   6-fix calc_de_hold_ms 已经 +5ms 基础余量, 这里再加 N ms
---   解决 SIT3088E 等"自动收发"模块的时序兼容问题 (自动切换有延迟)
---   14-fix 验证失败 (hold=64ms 还是 100% timeout) -> 不是 DE 时序问题
---   15-fix: 改用 uart.wait485 精确等 tx-done, 这个配置位默认 0 不再需要
-M.DE_HOLD_MS = 0
+-- 16-fix-1: DE_PIN 由内核 485 自动控制, 这个配置项不再需要
+--   历史: 14-fix 加这个是为了测 hold 加长能否修好, 验证失败
+--   15-fix 改成 uart.wait485, 这个配置位作废
+--   16-fix-1 干脆改用内核 485 (uart.setup 第 8 参), 完全不需要手动 hold
+-- M.DE_HOLD_MS = 0  -- 16-fix-1 注释掉, 改用内核 485 替代
 
 -- 看门狗与监控
 M.WDT_TIMEOUT = 9000
