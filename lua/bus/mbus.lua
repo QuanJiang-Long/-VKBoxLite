@@ -230,9 +230,18 @@ function M.parse_regs(data, dtype)
     return out, table.concat(hex)
 end
 
+-- DE 拉低后保持时间: 一字节 10bit (8 数据 + 1 起始 + 1 停止)
+--   + 5ms 余量
+-- 余量要 ≥ 485 收发器方向切换延迟 + 仪表响应启动时间
+--   - SP485/MAX485 方向切换: 几十 μs ~ 几百 μs
+--   - 仪表收到请求到开始响应: Modbus 规范 3.5 字符间隔 (3.64ms @ 9600),
+--     但很多仪表不守规范, 收到立即响应 (几百 μs)
+--   - 早期 +2ms 不够: 设备 Rx 经常丢首字节 (log 表现为 timeout,
+--     sscom 抓包看到仪表响应是完整的, 设备侧偶尔收到响应的最后 2 字节 CRC)
+--   - 改 +5ms 后稳定. 轮询每 5s 一次, +3ms 完全可接受
 function M.calc_de_hold_ms(nbytes, baud)
     local bits = nbytes * (8 + 1 + 1)
-    return math.ceil(bits * 1000 / baud) + 2
+    return math.ceil(bits * 1000 / baud) + 5
 end
 
 -- CRC 试探法定帧长: Modbus RTU 无长度字段, 只能按功能码猜结构 + 验 CRC
