@@ -61,6 +61,26 @@ assertEq(extras[1].topic, '/sys/thing/gw/info/post/' + SN, 'U2 topic 带 SN');
 assertEq(VKBoxTopics.manualExtraTopics('').length, 0, '空 SN 返回空数组');
 assertEq(VKBoxTopics.manualExtraTopics(null).length, 0, 'null SN 返回空数组');
 
+// 测 5.5: platformExtraTopics 返回 9 条 (24-fix)
+const pextras = VKBoxTopics.platformExtraTopics(SN);
+assertEq(pextras.length, 9, 'platformExtraTopics 返回 9 条');
+// 验证每条 code 都唯一
+const codes = pextras.map(it => it.code);
+const uniq = codes.filter((v, i, a) => a.indexOf(v) === i);
+assertEq(uniq.length, 9, '9 条 code 都唯一');
+// 验证不包含 U4 (已在 mqStPub) 和 D1 (已在 mqStSub)
+assertEq(codes.indexOf('U4') < 0, true, '不含 U4 (已在 mqStPub)');
+assertEq(codes.indexOf('D1') < 0, true, '不含 D1 (已在 mqStSub)');
+// 验证 U1/U2/U3/U5/U6/U7 + D2/D3/D4 都在
+const expectedCodes = ['U1', 'U2', 'U3', 'U5', 'U6', 'U7', 'D2', 'D3', 'D4'];
+for (const c of expectedCodes) {
+  assertEq(codes.indexOf(c) >= 0, true, `包含 ${c}`);
+}
+// 验证 U2 用的是 info (不是 meta)
+assertEq(pextras.find(it => it.code === 'U2').name, 'info', 'U2 名称是 info');
+// 验证空 SN 返回空数组
+assertEq(VKBoxTopics.platformExtraTopics('').length, 0, 'platformExtraTopics 空 SN 返回空数组');
+
 // 测 5: formatListAsLines 输出多行
 const lines = VKBoxTopics.formatListAsLines(extras);
 assertEq(lines.indexOf('\n') >= 0, true, '输出包含换行');

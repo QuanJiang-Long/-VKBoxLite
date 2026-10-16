@@ -234,16 +234,26 @@ function renderMqtt() {
   setKvPre(pre, 'mqStPub', s.pub || '未连接', !s.pub);
   setKvPre(pre, 'mqStSub', s.sub || '未连接', !s.sub);
   // 22-fix: 手动档额外生效的 topic (U1 hello + U2 meta).
-  //   走 topics.js 的 VKBoxTopics.manualExtraTopics(sn) 拼.
-  //   只对 manual tab 显示 (platform/sniff 还有 U3/U5/U7 等, 一栏放不下,
-  //   等后续单独讨论). 用 id 后缀 'ExtraTopics' 区分 manual tab 的 mMqStExtraTopics
-  //   (m- 前缀) vs 未来其他 tab.
+  // 24-fix: 平台档也加 (U1/U2/U3/U5/U6/U7 + D2/D3/D4, 共 9 条).
+  //   走 topics.js 的 VKBoxTopics.manualExtraTopics / platformExtraTopics 拼.
+  //   sniff tab 暂不加 (后续讨论). 用 id 后缀 'ExtraTopics' 区分 manual tab
+  //   的 mMqStExtraTopics (m- 前缀) vs platform 的 pMqStExtraTopics.
   //   注: setKvPre 会把 className 整个重置, 会冲掉 <pre> 的 .kv-pre 样式,
   //   所以这里直接拿 el 操作, 保留 .kv-pre class.
   if (window.VKBoxTopics) {
     const did = s.device_id || s.sn || '';
-    const extras = VKBoxTopics.manualExtraTopics(did);
-    const txt = extras.length ? VKBoxTopics.formatListAsLines(extras) : '（手动档无额外生效 topic）';
+    const isManualTab = pre === 'm';
+    const isPlatformTab = pre === 'p';
+    let extras = [];
+    let placeholder = '（无额外生效 topic）';
+    if (isManualTab) {
+      extras = VKBoxTopics.manualExtraTopics(did);
+      placeholder = '（手动档无额外生效 topic）';
+    } else if (isPlatformTab) {
+      extras = VKBoxTopics.platformExtraTopics(did);
+      placeholder = '（平台档无额外生效 topic）';
+    }
+    const txt = extras.length ? VKBoxTopics.formatListAsLines(extras) : placeholder;
     const fullId = pre ? (pre + 'mqStExtraTopics'[0].toUpperCase() + 'mqStExtraTopics'.slice(1)) : 'mqStExtraTopics';
     const n = document.getElementById(fullId);
     if (n) {

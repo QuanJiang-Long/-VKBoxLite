@@ -513,6 +513,22 @@
     - **改**: "**状**态**"
   - **注**:**只**改**了** manual **档** (line 505**), **其**他**两**个** tab (platform/poll) **的** "**连**接**与**上**报**状**态**"** **暂**不**动** (等**后**续**讨**论**)** 
 - **23-fix 15/15 npm test **全**过**!
+- **24-fix 平**台**档**也**添**加** "**其**他**生**效** Topic**"** **栏**位** + **改**名** "**状**态**":
+  - **扩**展** `frontend/renderer/topics.js`**:
+    - **新**增** `platformExtraTopics(sn)` **函**数**, **返**回** 9 **条**:
+      - U1 hello, U2 info, U3 res, U5 event, U6 reply, U7 fpost
+      - D2 func, D3 pset, D4 pget
+      - **不**包**含** U4 pub (mqStPub **已**显**示**) + D1 get (mqStSub **已**显**示**)
+      - U2 info **只**列**一**次** (meta + topo **共**用** topic**)** 
+  - **扩**展** `frontend/tests/test_22_topics.js`**:**6 **个**新**测**试**点** (返**回** 9 **条** / code **唯**一** / 不**含** U4/D1 / 9 **个** code **都**在** / U2 **是** info / **空** SN **返**回**空**)** 
+  - **修**改** `frontend/renderer/mqtt.js`**:
+    - **根**据** `pre` (m-/p-**)** **判**断** tab, **分**别**调**用** manualExtraTopics **或** platformExtraTopics
+    - sniff tab **暂**不**加** (后**续**讨**论**)** 
+  - **修**改** `frontend/renderer/index.html`**:
+    - **平**台**档** panel-title: "**连**接**与**上**报**状**态**"** → "**状**态**"
+    - **平**台**档** pMqStSub **后**添**加** `<pre id="pMqStExtraTopics">`
+  - **不**用**改** app.js** (pMqSt **系**列**没**有** el **绑**定**, **直**接**用** id**)** 
+- **24-fix 15/15 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**

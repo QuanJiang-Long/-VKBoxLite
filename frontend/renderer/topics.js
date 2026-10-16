@@ -73,6 +73,26 @@ const VKBoxTopics = (function () {
     ];
   }
 
+  // 24-fix: 平台档额外生效的 topic 列表 (除 mqStPub/mqStSub 已显示的 2 条之外).
+  //   mqStPub = U4 pub   (PLATFORM_PUB_TOPIC)
+  //   mqStSub = D1 get   (PLATFORM_GET_TOPIC)
+  //   本表列出其余 9 条: U1/U2/U3/U5/U6/U7 + D2/D3/D4
+  //   U2 info: meta (不带 nodes) + topo (带 nodes) 共用同一 topic, 这里只列一次
+  function platformExtraTopics(sn) {
+    if (!sn) return [];
+    return [
+      { code: 'U1', name: 'hello', topic: format(TOPICS.PLATFORM_HELLO_TOPIC, sn) },
+      { code: 'U2', name: 'info',  topic: format(TOPICS.PLATFORM_INFO_TOPIC, sn) },
+      { code: 'U3', name: 'res',   topic: format(TOPICS.PLATFORM_RES_TOPIC, sn) },
+      { code: 'U5', name: 'event', topic: format(TOPICS.PLATFORM_EVENT_TOPIC, sn) },
+      { code: 'U6', name: 'reply', topic: format(TOPICS.PLATFORM_REPLY_TOPIC, sn) },
+      { code: 'U7', name: 'fpost', topic: format(TOPICS.PLATFORM_FPOST_TOPIC, sn) },
+      { code: 'D2', name: 'func',  topic: format(TOPICS.PLATFORM_FUNC_TOPIC, sn) },
+      { code: 'D3', name: 'pset',  topic: format(TOPICS.PLATFORM_PSET_TOPIC, sn) },
+      { code: 'D4', name: 'pget',  topic: format(TOPICS.PLATFORM_PGET_TOPIC, sn) },
+    ];
+  }
+
   // 把 topic 列表格式化成多行字符串 (给前端 <pre> 显示)
   function formatListAsLines(items) {
     if (!items || items.length === 0) return '';
@@ -83,6 +103,7 @@ const VKBoxTopics = (function () {
   return Object.assign({}, TOPICS, {
     format,
     manualExtraTopics,
+    platformExtraTopics,
     formatListAsLines,
   });
 })();

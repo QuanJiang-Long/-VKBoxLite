@@ -658,7 +658,7 @@ body.mq-manual .auto-only{display:none !important;}
                     </div>
                 </div>
                 <div class="panel">
-                    <div class="panel-title">连接与上报状态</div>
+                    <div class="panel-title">状态</div>
                     <div class="kv-grid">
                         <!-- Step 2i: 同 manual tab, 17 字段砍到 9 -->
                         <div class="kv"><b>连接状态</b><span id="pMqStConn">--</span></div>
@@ -668,6 +668,10 @@ body.mq-manual .auto-only{display:none !important;}
                         <div class="kv"><b>当前档次</b><span id="pMqStMode">--</span></div>
                         <div class="kv"><b>生效发布</b><span id="pMqStPub">--</span></div>
                         <div class="kv"><b>生效订阅</b><span id="pMqStSub">--</span></div>
+                        <!-- 24-fix: 平台档额外生效的 topic (U1/U2/U3/U5/U6/U7 + D2/D3/D4, 共 9 条).
+                             走 topics.js 的 VKBoxTopics.platformExtraTopics(sn) 拼.
+                             不含 mqStPub (U4) 和 mqStSub (D1) - 已在上面 2 行单独显示 -->
+                        <div class="kv kv-wide"><b>其他生效 Topic</b><pre id="pMqStExtraTopics" class="kv-pre">--</pre></div>
                         <div class="kv"><b>已订阅</b><span id="pMqStSubed">--</span></div>
                         <div class="kv"><b>会话管理</b><span id="pMqStKeepSession">--</span></div>
                     </div>
