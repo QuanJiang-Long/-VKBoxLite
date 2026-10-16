@@ -878,11 +878,21 @@ function renderHome() {
   const full = S.stat || {};
   const g = full.guard || {};
   const mq = (S.mqtt && S.mqtt.stat) || {};
-  setKv('hMode', (st.mode || 'idle') + (st.busy ? '（占用总线）' : ''));
-  setKv('hMqtt', mq.connected ? '已连接' : '未连接', !mq.connected);
+  // 30-fix: 串口未连接时 (S.modeStat/S.stat/S.mqtt.stat 都是空对象),
+  //   原来用 'idle' / '未连接' / '未启用' 作默认值, 看起来像真值, 实际是假的.
+  //   改成显式判 undefined → '--', 只在有应答的情况下才显示 'idle'/'已连接'/'未启用' 等真值
+  // hMode: 有 mode 字段才显示模式名, 否则 '--' (原来 st.mode || 'idle' 是错的)
+  setKv('hMode', st.mode ? (st.mode + (st.busy ? '（占用总线）' : '')) : '--');
+  // hMqtt: mq.connected 是 undefined (没应答) → '--'; 是 false (应答了但没连) → '未连接' 红; 是 true → '已连接' 绿
+  setKv('hMqtt',
+    mq.connected == null ? '--' : (mq.connected ? '已连接' : '未连接'),
+    mq.connected === false);
   setKv('hDevId', mq.device_id || (mq.sn || ''));
-  setKv('hWdt', g.wdt_to ? (wdtStalled(g, !!(st.poll || {}).running).stalled ? '停滞!' : '正常') : '未启用',
-        wdtStalled(g, !!(st.poll || {}).running).stalled);
+  // hWdt: wdt_to 是 undefined (没应答) → '--'; 是 0 (未启用) → '未启用'; 是 > 0 → '正常'/'停滞!'
+  const wdtStalledNow = wdtStalled(g, !!(st.poll || {}).running).stalled;
+  setKv('hWdt',
+    g.wdt_to == null ? '--' : (g.wdt_to ? (wdtStalledNow ? '停滞!' : '正常') : '未启用'),
+    wdtStalledNow);
   // 开机模式: 设备值 S.bootMode (R:BOOTMODE 应答), 跟本地 selBootMode 比对
   // 标 dirty (跟运行模式 tab 的 btnSaveBoot 同步)。这里只是渲染, dirty 状态
   // 状态由 refreshBootDirty() 维护 (改 selBootMode 时触发)
@@ -891,7 +901,9 @@ function renderHome() {
   // 首页 MQTT 地址/端口回填。5s 定时刷新会打到这里, 正在输入时不能抢,
   // 否则字打到一半被冲掉。密码要另外传 cfg —— stat 段不含 pass
   fillMqHome(mq, S.mqtt && S.mqtt.cfg);
-  el.stMqtt.textContent = mq.connected ? '已连接' : '未连接';
+  // 30-fix: 顶栏 MQTT 状态指示: 没应答时也显示 '--' (不要显示 '未连接', 那是 MQTT 自己的状态,
+  //   没问过设备前不应该下结论). 有应答时按 connected 显示
+  el.stMqtt.textContent = mq.connected == null ? '--' : (mq.connected ? '已连接' : '未连接');
   el.stMqtt.style.color = mq.connected ? '#0a7d2c' : '#999';
   renderPushBanner(mq);
 }
