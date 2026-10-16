@@ -566,6 +566,20 @@
     - `if (Array.isArray(d) || (d && typeof d === 'object'))` - **空**数**据**也**会** renderRegTable
   - **测**试**:**新**增** `test_27_readcfg_default.js`**:**5 **个**测**试**点** (**函**数**存**在** / **没**有**早** return / W:REG **被**调**用** / renderRegTable **被**调**用** / 27-fix **注**释** / readCfg **仍**保**留** default toast**)**
 - **27-fix 17/17 npm test **全**过**!
+- **28-fix 串**口**未**连**接**时**, **首**页** + **运**行**模**式**面**板**按**钮**守**卫**:
+  - **问**题**:**用**户**打**开**软**件**还**没**连**接**串**口**时**, **首**页**和**运**行**模**式**面**板**上**的**功**能**按**钮**都**是**可**点**的** - **点**了**没**意**义**(设**备**没**连**, **命**令**发**不**出**去**或**发**出**去**没**回**应**)** 
+  - **修**改** 3 **处**:
+    1. `setPortState()`**:**加** 5 **个**新**按**钮**到**禁**用**列**表** - btnImport / btnHomeRefresh / btnModeRefresh / selBootMode / btnSaveBoot
+    2. `setPortState()` **里** btnImport **加** OR **守**卫**:**!S.open || isPlatform(S.mode) - **串**口**未**连**或**是**平**台**档**都**灰** 
+    3. `syncTabs()` **里** btnImport **也**加** OR **守**卫** (避**免** mode **切**换**时**被**覆**盖**)** 
+    4. `applyMode()` **开**头**加** `if (!S.open) { toast('请先连接串口'); return; }` - **覆**盖** 4 **个** mode-card** (mcIdle/mcPoll/mcPollpull/mcSniff**)**
+  - **守**卫**列**表** (共** 8 **个**)**:
+    - **已**有**:**6 **个** - btnReadInfo / btnReadCfg / btnPullCfg / btnSaveCfg / btnReadVal / btnHomeMqttSave
+    - **新**增**:**5 **个** - btnImport / btnHomeRefresh / btnModeRefresh / selBootMode / btnSaveBoot
+    - **mode-card:** 4 **个** - mcIdle / mcPoll / mcPollpull / mcSniff (applyMode **开**头**拦**截** + toast**)**
+  - **未**做**的**:**MQTT **服**务**器**卡**片**的** input** - **用**户**认**为** btnHomeMqttSave **已**经**有**守**卫**了**, **不**需**要** input readonly**; btnExport **也**没**加** (读**本**地**配**置**快**照**, **不**依**赖**设**备**)** 
+  - **测**试**:**新**增** `test_28_port_state_guards.js`**:**5 **个**测**试**点** (setPortState 5 **个**新**按**钮** / **旧** 6 **个**仍**在** / btnImport OR **守**卫** / syncTabs OR **守**卫** / applyMode **开**头**拦**截** + toast / 28-fix **注**释**)** 
+- **28-fix 18/18 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**
