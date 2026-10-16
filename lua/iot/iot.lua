@@ -1597,30 +1597,33 @@ local function task_main()
                 S.lbs_at = os.time()
                 if r then S.lbs = r end
             end
-            -- hello 的两个时机: 连接后补发一次 + platform 档 30min 周期重发。
-            -- 放在 sys.wait 之后，保证每轮循环只判一次、且不和本轮的上报挤在一起
+            -- hello 有【两个入口】, 不能只看 task_main 这一个:
+            --   入口 1: ctrl.lua:76 — 进 mode 时主动调 iot.hello() (manual 档会走这里)
+            --   入口 2: 下面这个 if — task_main 每轮循环的"连上后补发" (manual 不进)
+            -- 入口 1 失败 (进 mode 时 MQTT 还没连上) 才需要入口 2 补, 但 manual 的
+            -- 入口 2 永远 false, 意味着 manual 模式下如果切档时 MQTT 没连上, hello
+            -- 不会重发 —— 但 ctrl.lua:71-75 注释说明 manual 失败不回滚, 平台那头
+            -- 看不到不影响采集 (主职是采寄存器表), 也就无所谓
             --
-            -- 20-fix: 修正矛盾注释 ——
-            --   只对非 idle **且**非 manual 档发 hello (pub_platform = should_pub_platform(),
-            --   manual_on=true 时 pub_platform=false, 整段 if 不进)
+            -- 放在 sys.wait 之后, 保证每轮循环只判一次、且不和本轮的上报挤在一起
+            -- 只对【非 idle 且非 manual】档走这个 if —— pub_platform 在 manual_on
+            -- 时返回 false, manual 档根本不会进 ① 也不会进 ②
             --
             -- ① 连接后补发。进模式那一刻 MQTT 往往还没连上(set_manual 刚触发
-            --    断开重连)，ctrl 里那次 hello 是静默失败的。这里保证每个连接
-            --    至少发一次 ——
+            --    断开重连), ctrl 里那次 hello 是静默失败的。这里保证每个连接
+            --    至少发一次:
             --      platform: 平台侧需要这个 hello + 后续拓扑/数据帧 auto-provision
             --                补建档案, 收不到 hello 平台那头完全看不到设备上线
             --      sniff:    也发一次, 是拓扑建档的前置
-            --      manual:   不发, pub_platform=false (手动档完全独立于平台, 不需要
-            --                auto-provision, 也不订 4 条平台下行)
             --    hello_at == 0 是 reset_state 里"这个连接还没发过"的语义, 正好复用
-            -- ② 只对 platform 档周期重发：那是唯一"在等平台下发配置"的档。sniff 档
-            --    的 hello 发完就判完成，没有"未拿到配置"这个状态；手动档不发 hello
-            --    自然不重发
+            -- ② 只对 platform 档周期重发: 那是唯一"在等平台下发配置"的档。sniff 档
+            --    的 hello 发完就判完成, 没有"未拿到配置"这个状态; manual 档的 hello
+            --    由 ctrl 入口发, 这里 30min 重发不涉及 manual
             --
-            -- 平台收到 hello 会重推 ConfigSnapshot，由 recv_push 自动落盘 ——
-            -- 不走拉取状态机，所以不影响前端正在显示的拉取结果，也不需要用户
-            -- 再点一次「拉取配置」。这正是文档"未拿到配置前每 30min 重发"的用途：
-            -- 平台侧档案被重置/白名单到期时，设备侧无从得知，只靠上电那一次 hello
+            -- 平台收到 hello 会重推 ConfigSnapshot, 由 recv_push 自动落盘 ——
+            -- 不走拉取状态机, 所以不影响前端正在显示的拉取结果, 也不需要用户
+            -- 再点一次「拉取配置」。这正是文档"未拿到配置前每 30min 重发"的用途:
+            -- 平台侧档案被重置/白名单到期时, 设备侧无从得知, 只靠上电那一次 hello
             -- 会永久失联且没有任何报错
             if pub_platform and S.hello_at == 0 and not pulling() then
                 log.info("iot", "hello on connect, mode=" .. get_mode())
