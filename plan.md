@@ -782,6 +782,14 @@
   - **安**全**性**:** W:CFG **流**程** poll.stop() + poll.apply_cfg() + poll.start() **中**间** poll.regs **短**暂**是**空**没**关**系** (**R:REG **不**会**并**发**跑**); **切** sniff **时** poll.stop() **清**也**正**确**。**
   - **测**试**:**新**增** test_36_poll_stop_clears.js。
 - **36-fix 30/30 npm test **全**过**!
+- **37-fix: poll_slot() **改**用** get_mode()** + **auto_apply **兜**底** start**:
+  - **问**题**:**用**户**日**志** (15:29 切 platform): R:CFG **返**回** 4 **个**寄**存**器** (ds_pull **有**), **但** R:REG **返**回** {}**。**参**数**列**表**空**。**点** "**重**新**拉**取**" **后**正**常**。**
+  - **根**因** 1** (poll_slot 错**误**):** iot.lua line 66-68 `poll_slot() = p.cur_slot()`。**切** platform **时** ctrl.poll.stop() 跑**了** (36-fix **清** regs/lastCfg 但 **不**重**置** curSlot), **然**后** ds_pull **空**不**起** poll, curSlot **残**留** "poll"** 默**认**值**。**auto_apply **走** `if poll_slot() == "pull"` **判**断**, **看**到** "poll" **就**跳**过** if **块**, **不**调** pe.apply_cfg/start**。**结**果** poll.regs **永**远**空**。**
+  - **根**因** 2** (auto_apply **漏** start):** iot.lua line 1022-1032 needs_restart+is_running=false **分**支**只** apply_cfg **不** start; needs_restart=false **分**支**同**样**不** start**。**W:CFG **流**程** (cmd.lua line 158-176) **有**兜**底** start**, **但** auto_apply **没**有**。**
+  - **修**改** 1**:** poll_slot() **改**用** get_mode() (S.cur)**: **platform** -> "pull", **manual** -> "poll", **其**它** nil**。**不**再**依**赖** poll.cur_slot() (**这**是** poll **内**部**状**态**, **可**能**和** mode **不**同**步**)。**
+  - **修**改** 2**:** auto_apply needs_restart+is_running=false **分**支**添**加** `pe.start("pull")` **兜**底**; needs_restart=false **分**支**添**加** `if not pe.is_running() then pe.start("pull") end` **兜**底**。**
+  - **测**试**:**新**增** test_37_poll_slot_uses_mode.js** (**3 **个**测**试**点**)**。
+- **37-fix 31/31 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**

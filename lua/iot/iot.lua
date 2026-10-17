@@ -64,8 +64,18 @@ end
 -- 不许把手配的寄存器表顶掉。问 poll 而不是问 ctrl 是为了不引入
 -- ctrl -> mon/poll -> iot 这条环
 local function poll_slot()
-    local p = get_poll()
-    return (p and p.cur_slot()) or "poll"
+    -- 37-fix: 改用 get_mode() (ctrl 记下的 S.cur) 而不是 p.cur_slot().
+    --   切 platform 档时 ctrl.switch_mode 会调 poll.stop() (36-fix 后 stop
+    --   清空 regs/lastCfg, 但不重置 curSlot), ds_pull 空时又不起 poll,
+    --   curSlot 残留 "poll" 默认值. 这种状态下 auto_apply 走 if poll_slot()
+    --   == "pull" 判断, 看到的是 "poll" 就跳过 apply_cfg, 导致 poll.regs
+    --   永远空, R:REG 返回 {} (用户实测: 拉取到了 4 条, ds_pull 有, R:REG 没).
+    --   改用 ctrl 记下的 mode: platform -> "pull", manual -> "poll", 其它 nil.
+    --   poll.cur_slot() 只表示 poll 模块当前在跑哪个槽, 不等价于"用户想用哪槽"
+    local m = get_mode()
+    if m == "platform" then return "pull"
+    elseif m == "manual" then return "poll"
+    else return nil end
 end
 
 -- 当前在用的那份轮询配置: 拉取档读 ds_pull, 其余读 ds_poll。
@@ -1025,10 +1035,18 @@ local function auto_apply(r)
                     pe.apply_cfg(n)
                     pe.start("pull")
                 else
+                    -- 37-fix: needs_restart=true 但 poll 没起来 (34-fix 让
+                    --   切 platform 时 ds_pull 空就不起), apply_cfg 后必须
+                    --   兜底 start, 否则 R:REG 永远空, poll 也不真起
                     pe.apply_cfg(n)
+                    pe.start("pull")
                 end
             else
                 pe.apply_cfg(n)
+                -- 37-fix: needs_restart=false 但 poll 没起来 (用户切 platform
+                --   时 ds_pull 空, 34-fix 不起; 平台随后推了一样的 baud/slave),
+                --   也得兜底 start
+                if not pe.is_running() then pe.start("pull") end
             end
         end
     end
