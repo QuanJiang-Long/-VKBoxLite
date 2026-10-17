@@ -88,8 +88,11 @@ assertEq(/btnInferClear:\s*\$?\(['"]btnInferClear['"]\)/.test(appJs), true,
   'sniff-3 f: app.js 加 el.btnInferClear 引用');
 
 // 7. app.js: btnFrameRefresh/btnFrameClear 绑 frameLog (readFrames / 清空 S.frames)
-assertEq(/el\.btnFrameRefresh\.onclick\s*=\s*readFrames/.test(appJs), true,
-  'sniff-3 f: app.js el.btnFrameRefresh.onclick = readFrames (绑 frameLog)');
+// sniff-3 i: btnFrameRefresh.onclick 改成 () => { if(...) return; readFrames() }
+//   包含 frameSectionOn 检查 + readFrames() 调用
+const refreshMatch = appJs.match(/el\.btnFrameRefresh\.onclick\s*=\s*[\s\S]{0,200}?;\s*\}/);
+assertEq(!!refreshMatch && /readFrames\(\)/.test(refreshMatch[0]), true,
+  'sniff-3 f: app.js el.btnFrameRefresh.onclick 调 readFrames (绑 frameLog)');
 assertEq(/el\.btnFrameClear\.onclick\s*=\s*\(\)\s*=>\s*\{[^}]*S\.frames\s*=\s*\[\]/.test(appJs), true,
   'sniff-3 f: app.js el.btnFrameClear.onclick 清空 S.frames (绑 frameLog)');
 

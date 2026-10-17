@@ -1702,7 +1702,10 @@ function startAutoRefresh() {
     try { await readHome(); } catch (_) {}
   }, 5000);
   frameTimer = setInterval(() => {
-    if (!S.pending && el.frameAuto.checked && S.mode === 'sniff') readFrames();
+    // sniff-3 i: 总开关 (frameSectionOn) 关时不跟设备交互. 开关开 + 自动刷新勾选
+    //   + sniff 模式 + 无 pending 才会发 R:FRAMES
+    if (!S.pending && el.frameSectionOn && el.frameSectionOn.checked
+        && el.frameAuto.checked && S.mode === 'sniff') readFrames();
   }, 2000);
 }
 function stopAutoRefresh() {
@@ -1961,7 +1964,11 @@ if (el.btnHomeMqttPassEye) el.btnHomeMqttPassEye.onclick = togglePassEye;
 // 报文页 (sniff-3 f: 重新分配按钮绑定)
 //   btnFrameRefresh/btnFrameClear 在总线报文子分段, 绑 frameLog
 //   btnInferClear 在 sniff嗅探 panel-title, 绑 inferTbody (推断表)
-el.btnFrameRefresh.onclick = readFrames;
+el.btnFrameRefresh.onclick = () => {
+  // sniff-3 i: 总开关 (frameSectionOn) 关时手动刷新也不发 R:FRAMES
+  if (el.frameSectionOn && !el.frameSectionOn.checked) return;
+  readFrames();
+};
 el.btnFrameClear.onclick = () => { S.frames = []; renderFrames(); renderDetected(); };
 if (el.btnInferClear) {
   el.btnInferClear.onclick = () => {

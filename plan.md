@@ -890,6 +890,14 @@
   - **修**改** 1 **个**文**件**:** app.js (applyFrameSection **体**内** 2 **行**)
   - **测**试**:** test_sniff3g_toggle.js **更**新** 2 **个**测**试**点** (禁**止**用** hidden **属**性**的**测**试**)
 - **sniff-3 h fix 39/39 npm test **全**过**!
+- **sniff-3 i: **总**开**关** frameSectionOn **关**时**不**跟**设**备**交**互**:
+  - **问**题**:** sniff-3 g/h **只**做**了** UI **层**面**的**隐**藏** (**style.display = 'none'**), **但** frameTimer **定**时**器**还**在**跑** readFrames (R:FRAMES) **设**备**交**互**。**开**关**关**时** UI **隐**藏**了**, **后**台**还**在** 2s **一**次**发** R:FRAMES**。
+  - **修**改** 1** (frameTimer **守**门**):** 调** readFrames **前**加** `el.frameSectionOn && el.frameSectionOn.checked` **检**查**。**条**件**顺**序**: S.pending → frameSectionOn → frameAuto → S.mode**。
+  - **修**改** 2** (btnFrameRefresh **手**动**刷**新**守**门**):** onclick **改**成** `() => { if (!el.frameSectionOn.checked) return; readFrames(); }`, **即**使**按**钮**可**见** (**代**码**层**防**御**), **关**时**也**不**发** R:FRAMES**。
+  - **不**动** btnFrameClear**: **本**地**操**作** (**清**空** S.frames + renderFrames + renderDetected**), **不**发**设**备**命**令**, **不**需**要**守**门**。
+  - **修**改** 1 **个**文**件**:** app.js (frameTimer + btnFrameRefresh.onclick)
+  - **测**试**:** test_sniff3i_toggle_gates.js (4 **个**测**试**点**) + **更**新** sniff-3 f **测**试** (btnFrameRefresh **绑**定**形**式**变**了)
+- **sniff-3 i 40/40 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**
