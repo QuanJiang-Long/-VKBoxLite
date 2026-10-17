@@ -119,21 +119,26 @@ assertEq(/pBtnPullOkIgnore\.onclick[\s\S]{0,150}platformPullOkHintDismissed\s*=\
   'pBtnPullOkIgnore.onclick 设置 platformPullOkHintDismissed=true');
 
 // === app.js: waitPullDone 拉取成功设置 pending ===
+// 33-fix: 不再用 polling 判断, 改用 pull.state === 'done'
+//   (33-fix 设备端轮询立即起来, polling=true 不再代表拉取成功)
 
-// 测 11: waitPullDone 中 polling 起来时设置 platformPullOkPending
+// 测 11: waitPullDone 中 pull.state === 'done' 时设置 platformPullOkPending
 const waitPullMatch = appJs.match(/async function waitPullDone\(\)\s*\{[\s\S]+?return true;[\s\S]+?\}/);
 assertEq(!!waitPullMatch, true, '能找到 waitPullDone 函数');
 if (waitPullMatch) {
   const body = waitPullMatch[0];
-  // 在 polling 起来的分支里有 platformPullOkPending = true
-  const pollingBranch = body.match(/if \(polling\)[\s\S]+?return true;/);
-  assertEq(!!pollingBranch, true, '能找到 polling 分支');
-  if (pollingBranch) {
-    assertEq(/platformPullOkPending\s*=\s*true/.test(pollingBranch[0]), true,
-      'polling 起来时设置 platformPullOkPending=true');
-    assertEq(/renderPlatformHints\(\)/.test(pollingBranch[0]), true,
-      'polling 起来时调用 renderPlatformHints');
+  // 找 pull.state === 'done' 分支
+  const doneBranch = body.match(/if\s*\(\s*pull\.state\s*===\s*['"]done['"]\s*\)[\s\S]+?return true;/);
+  assertEq(!!doneBranch, true, '能找到 pull.state === "done" 分支');
+  if (doneBranch) {
+    assertEq(/platformPullOkPending\s*=\s*true/.test(doneBranch[0]), true,
+      'pull.state=done 时设置 platformPullOkPending=true');
+    assertEq(/renderPlatformHints\(\)/.test(doneBranch[0]), true,
+      'pull.state=done 时调用 renderPlatformHints');
   }
+  // 不能再用 polling 作为成功判断
+  assertEq(/if\s*\(\s*polling\s*\)[\s\S]+?return true/.test(body), false,
+    'waitPullDone 不再用 if (polling) ... return true 作为成功判断 (33-fix 改用 pull.state)');
 }
 
 // === app.js: renderHome 末尾调用 renderPlatformHints ===

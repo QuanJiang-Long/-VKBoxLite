@@ -701,8 +701,10 @@ async function waitPullDone() {
     await readMode();
     const pull = (S.modeStat && S.modeStat.pull) || {};
     const polling = !!((S.modeStat || {}).poll || {}).running;
-    if (polling) {
-      // 轮询起来了才是真的到位: 设备是在 save_pull 之后才 start("pull") 的
+    // 33-fix 设备端撤掉了 MQTT 拦截, 轮询立即起来 (用 ds_pull 旧/空配置),
+    //   所以 polling=true 不再代表拉取成功. 改用 pull.state === 'done' 判断
+    //   (设备端 auto_apply 完成才置 'done', 此时新配置已落盘 + 已重启轮询)
+    if (pull.state === 'done') {
       status('平台配置已拉取并生效，开始轮询', true);
       toast('已切换到 platform（拉取配置）模式，开始轮询');
       // 33-fix: 拉取成功, 设置横幅 pending 标记. 渲染器看到 tabPlatform 激活
@@ -716,6 +718,11 @@ async function waitPullDone() {
       // MQTT 页那个手动档开关还停在旧状态, 和设备实际用的档位不一致
       readMqtt(true);
       return true;
+    }
+    // 轮询起来了但拉取还没完成 (常见: MQTT 未连接, host/port 没配)
+    //   等拉取自动完成. 55s 后超时 waitPullDone 会返回 false, 不显示绿条
+    if (polling && pull.state !== 'done') {
+      // 静默继续等
     }
     if (pull.state === 'fail') {
       status('平台配置拉取失败：' + (pull.msg || '未知原因'), false);
