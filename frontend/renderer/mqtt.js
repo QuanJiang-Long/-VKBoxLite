@@ -281,12 +281,51 @@ function renderMqtt() {
   setKvPre(pre, 'mqStKeepSession',
         s.keep_session == null ? '--' : (s.keep_session ? '持久会话' : '离线自动销毁'));
   renderHome();
+  // sniff-3 fix: 把同样的 stat 数据同步填到 sniff 面板的"状态"卡片
+  //   snStXxx 元素是 sniff tab 独立, 跟 m/p prefix 无关, 这里直接用 el
+  renderSnStatus(s, c, pubTopics);
   // 只在第一次渲染时套一次模式：只读属性/颜色/回显来源都要跟 S.mqManual 走。
   // 后面每次 readMqtt 都重套会覆盖用户在本次会话里点的「手动配置」
   if (S._mqModeInit !== true) {
     S._mqModeInit = true;
     setManualMode(S.mqManual);
   }
+}
+
+// sniff-3 fix: 把 R:MQTT 的 stat/cfg 数据填到 sniff 面板的"状态"卡片 (snStXxx)
+//   在 renderMqtt 末尾被调用, 跟 m/p 状态卡片共享 stat 字段, 但展示形式不同:
+//     - 11 字段, 没有手动/自动档区别 (sniff 模式只看设备实际生效值)
+//     - 生效发布 = pubTopics[0] (主 topic);  其他生效 Topic = pubTopics[1..] (平台档带 -n 后缀)
+//   设备没 pub_topics 字段时 (老设备), 回退到 s.pub 单条填 snStPub, snStPubTopics='--'
+function renderSnStatus(s, c, pubTopics) {
+  if (!el.snStConn) return;
+  // 连接状态: 跟 m/p 卡片同套 (connected → '已连接'; want_run → '连接中/已断开'; else '未启动')
+  setKv('snStConn', s.connected ? '已连接' : (s.want_run ? '连接中/已断开' : '未启动'), !s.connected);
+  setKv('snStClientId', s.client_id || s.device_id || s.sn || '--');
+  setKv('snStUser', s.user || s.device_id || s.sn || '--');
+  setKv('snStSn', s.device_id || s.sn || '--');
+  // 当前档次: 跟 m/p 卡片同步, 但 sniff 模式下都是设备实际生效值
+  //   c.manual_on=true 表示手动档在跑 (本页填的凭证/topic), false=自动档 (首页 MQTT + SN 拼)
+  setKv('snStMode', c.manual_on ? '手动档' : '自动档');
+  // 手动配置字段: 直接告诉用户当前是不是手动档, 不要混淆
+  setKv('snStManual', c.manual_on ? '是' : '否');
+  // 生效发布: pubTopics[0] (主 topic), 没连上是 '未连接'
+  if (pubTopics && pubTopics.length) {
+    setKv('snStPub', pubTopics[0], false);
+    // 其他生效 Topic: pubTopics[1..] 多行, 只有 1 条时 '--'
+    if (pubTopics.length > 1) {
+      setKv('snStPubTopics', pubTopics.slice(1).join('\n'), false);
+    } else {
+      setKv('snStPubTopics', '--', true);
+    }
+  } else {
+    setKv('snStPub', '未连接', true);
+    setKv('snStPubTopics', '--', true);
+  }
+  setKv('snStSub', s.sub || '未连接', !s.sub);
+  setKv('snStSubscribed', s.subscribed ? '是' : '否', !s.subscribed);
+  setKv('snStKeepSession',
+        s.keep_session == null ? '--' : (s.keep_session ? '持久会话' : '离线自动销毁'));
 }
 
 // quiet=true 跳过「有未保存更改」确认（保存/上报/重连之后的回读，以及

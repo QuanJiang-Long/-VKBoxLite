@@ -819,6 +819,16 @@
   - **修**改**:** applyMode **弹** toast **之**前** check S.mode 是**不**是** sniff** (含** S.modePending**), **不**是**就**静**默**不**弹**。**与** 35c-fix waitPullDone **同**套**思**路**。
   - **测**试**:** test_sniff2_stop_quick.js **增**加** 1 **个**测**试**点** (7 → 8)。
 - **sniff-2 b 33/33 npm test **全**过**!
+- **sniff-3: sniff **面**板** MQTT **卡**片**改**造** (sniff-3):
+  - 1. **标**题** "MQTT **连**接**手**动**配**置**" → "MQTT**连**接**"
+  - 2. **删**除** btnSnMqttSave **保**存**按**钮** + snMqttHint **提**示**
+  - 3. snMqHost / snMqPort / snMqInterval **改** readonly + ro-val (跟 platform **档** pMqHost **同**套**只**读**样**式**)
+  - 4. snMqInterval **加** ro-clickable, **点**击**弹**窗**修**改** (复**用** askEditInterval + saveMqtt)
+  - 5. **新**增** "**状**态" **卡**片**, 11 **个**字**段** (**从** R:MQTT stat/cfg **映**射**):
+     - **连**接**状**态 / ClientID / **用**户**名** / **设**备**编**号** / **当**前**档**次** / **手**动**配**置** / **生**效**发**布** / **生**效**订**阅** / **其**他**生**效** Topic / **已**订**阅** / **会**话**管**理**
+  - **修**改** 3 **个**文**件**:** index.html (卡**片**结**构**)、app.js (**绑**定** click + **删** btnSnMqttSave)、mqtt.js (加** renderSnStatus)
+  - **测**试**:** test_sniff3_mqtt_panel.js (9 **个**测**试**点**)
+- **sniff-3 34/34 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**

@@ -157,13 +157,23 @@ const el = new Proxy({
   hMqClientIdHint: $('hMqClientIdHint'),
   hMqPass: $('hMqPass'), btnHomeMqttPassEye: $('btnHomeMqttPassEye'),
   btnHomeMqttSave: $('btnHomeMqttSave'),
-  // sniff 页面简版 MQTT 配置 (只读 broker + 可改上报周期, 跟 sp-s2 共享 mqManual + mqDirty)
+  // sniff 页面简版 MQTT 配置 (broker 只读 + 上报周期点弹窗改, 删了保存按钮)
   snMqHost: $('snMqHost'),
   snMqPort: $('snMqPort'),
   snMqInterval: $('snMqInterval'),
   btnSnMqttRefresh: $('btnSnMqttRefresh'),
-  btnSnMqttSave: $('btnSnMqttSave'),
-  snMqttHint: $('snMqttHint'),
+  // sniff 状态卡片
+  snStConn: $('snStConn'),
+  snStClientId: $('snStClientId'),
+  snStUser: $('snStUser'),
+  snStSn: $('snStSn'),
+  snStMode: $('snStMode'),
+  snStManual: $('snStManual'),
+  snStPub: $('snStPub'),
+  snStSub: $('snStSub'),
+  snStPubTopics: $('snStPubTopics'),
+  snStSubscribed: $('snStSubscribed'),
+  snStKeepSession: $('snStKeepSession'),
   // 报文页
   btnFrameRefresh: $('btnFrameRefresh'), btnFrameClear: $('btnFrameClear'),
   frameFilter: $('frameFilter'), frameAuto: $('frameAuto'), frameLog: $('frameLog'),
@@ -1918,15 +1928,26 @@ document.querySelectorAll('#mBtnMqttPassEye, #btnMqttPassEye').forEach(b => { b.
 el.btnMqttPassEye.onclick = togglePassEye;
 // sniff 页面简版: 刷新 = 跟 sp-s2 一起 readMqtt; 保存 = 走 saveMqtt (snMqInterval 同步到 mqInterval)
 if (el.btnSnMqttRefresh) el.btnSnMqttRefresh.onclick = readMqtt;
-if (el.btnSnMqttSave) el.btnSnMqttSave.onclick = async () => {
-  // 同步 snMqInterval → mqInterval (saveMqtt 从 mqInterval 读)
-  if (el.snMqInterval && el.mqInterval) el.mqInterval.value = el.snMqInterval.value;
-  await saveMqtt();
-  if (el.snMqttHint) {
-    el.snMqttHint.textContent = S.mqtt ? '已保存' : '';
-    setTimeout(() => { if (el.snMqttHint) el.snMqttHint.textContent = ''; }, 3000);
-  }
-};
+// sniff 面板的上报周期: readonly + 点击弹窗修改, 跟 platform 档 pMqInterval 同套
+//   弹窗确认后同步 snMqInterval → mqInterval, 走 saveMqtt 走 W:MQTT
+if (el.snMqInterval) {
+  el.snMqInterval.addEventListener('click', async () => {
+    const cur = parseInt(el.snMqInterval.value, 10) || 120;
+    const v = await askEditInterval(cur);
+    if (v == null || v === cur) return;
+    el.snMqInterval.value = String(v);
+    if (el.mqInterval) el.mqInterval.value = String(v);
+    status('正在保存上报周期 ' + v + ' 秒…', true);
+    try {
+      await saveMqtt();
+      status('已保存上报周期 ' + v + ' 秒', true);
+      toast('上报周期已改为 ' + v + ' 秒');
+    } catch (e) {
+      status('保存失败：' + e.message, false);
+      toast('保存失败：' + e.message);
+    }
+  });
+}
 if (el.btnHomeMqttPassEye) el.btnHomeMqttPassEye.onclick = togglePassEye;
 // Step 2i: 删 btnMqttReset.onclick — 整**个**按**钮**已**从** HTML 移**除**(有**刷**新**了**, 按**钮**冗**余**)
 // 如**果**用**户**需**要**重**置**配**置**, 手**动**改**每**一**项** (有**填**的**就**清**空**) + 走**保**存**即**可**

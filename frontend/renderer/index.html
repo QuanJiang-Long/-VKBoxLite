@@ -929,27 +929,43 @@ body.mq-manual .auto-only{display:none !important;}
                     </table>
                 </div>
                 <div class="panel">
-                    <div class="panel-title">MQTT 连接手动配置
+                    <div class="panel-title">MQTT连接
                         <div class="spacer"></div>
                         <button class="sm" id="btnSnMqttRefresh">刷新</button>
                     </div>
                     <div class="form-row">
                         <label>MQTT 服务器地址</label>
-                        <input id="snMqHost" type="text" readonly title="sniff 模式下 broker 由设备锁定, 只读">
+                        <input id="snMqHost" type="text" readonly class="ro-val">
                     </div>
                     <div class="form-row">
                         <label>端口</label>
-                        <input id="snMqPort" type="number" readonly style="max-width:140px;">
+                        <input id="snMqPort" type="number" readonly class="ro-val" style="max-width:140px;">
                     </div>
                     <div class="form-row">
                         <label>上报周期(秒)</label>
-                        <input id="snMqInterval" type="number" value="120" min="120" max="86400" style="max-width:140px;">
+                        <input id="snMqInterval" type="number" value="120" min="120" max="86400"
+                            readonly class="ro-val ro-clickable" style="max-width:140px;">
                         <span class="hint">U2-m / U3 res / U4 prop 共享</span>
                     </div>
-                    <div style="margin-top:14px;display:flex;gap:8px;align-items:center;">
-                        <button id="btnSnMqttSave">保存</button>
-                        <span class="hint" id="snMqttHint"></span>
-                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-title">状态</div>
+                    <table class="param-table" style="table-layout:fixed;">
+                        <colgroup><col style="width:160px;"><col></colgroup>
+                        <tbody id="snStatusTbody">
+                            <tr><td>连接状态</td><td id="snStConn">--</td></tr>
+                            <tr><td>ClientID</td><td id="snStClientId">--</td></tr>
+                            <tr><td>用户名</td><td id="snStUser">--</td></tr>
+                            <tr><td>设备编号</td><td id="snStSn">--</td></tr>
+                            <tr><td>当前档次</td><td id="snStMode">--</td></tr>
+                            <tr><td>手动配置</td><td id="snStManual">--</td></tr>
+                            <tr><td>生效发布</td><td id="snStPub">--</td></tr>
+                            <tr><td>生效订阅</td><td id="snStSub">--</td></tr>
+                            <tr><td>其他生效 Topic</td><td id="snStPubTopics">--</td></tr>
+                            <tr><td>已订阅</td><td id="snStSubscribed">--</td></tr>
+                            <tr><td>会话管理</td><td id="snStKeepSession">--</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
