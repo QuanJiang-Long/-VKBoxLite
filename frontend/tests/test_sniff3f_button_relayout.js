@@ -33,11 +33,21 @@ assertEq(titleMatch && /id="btnInferClear"/.test(titleMatch[0]), true,
   'sniff-3 f: panel-title [清空] 按钮 id 改为 btnInferClear');
 
 // 2. 推断结果子分段: 加 [推断轮询表] [重新识别通讯参数] 在标题行
-const inferTitleMatch = sniffBody.match(/推断结果（从监听到的请求帧反推）[\s\S]*?<\/div>/);
-assertEq(inferTitleMatch && /id="btnInfer"/.test(inferTitleMatch[0]), true,
-  'sniff-3 f: 推断结果子分段含 [推断轮询表] 按钮 (id="btnInfer")');
-assertEq(inferTitleMatch && /id="btnAutoDetect"/.test(inferTitleMatch[0]), true,
-  'sniff-3 f: 推断结果子分段含 [重新识别通讯参数] 按钮 (id="btnAutoDetect")');
+// sniff-3 g: 标题改 "推断结果" (删 "（从监听到的请求帧反推）")
+//   "推断结果" 在注释里也出现 (line 890 等), 用 btnInfer 位置反查
+const btnInferIdx = sniffBody.indexOf('id="btnInfer"');
+const btnAutoIdx = sniffBody.indexOf('id="btnAutoDetect"');
+assertEq(btnInferIdx > 0 && btnAutoIdx > 0, true,
+  'sniff-3 f: 推断结果子分段含 [推断轮询表] (btnInfer) + [重新识别通讯参数] (btnAutoDetect) 按钮');
+// 找 btnInfer 之前 500 字符, 看是否含 "推断结果" 标题 + "inferHint" 标志
+const inferWindow = sniffBody.substring(Math.max(0, btnInferIdx - 500), btnInferIdx);
+assertEq(/id="inferHint"/.test(inferWindow), true,
+  'sniff-3 f: btnInfer 之前 500 字符含 inferHint (说明是推断结果子分段内)');
+assertEq(/btnAutoDetect/.test(sniffBody.substring(btnInferIdx, btnInferIdx + 200)), true,
+  'sniff-3 f: btnInfer 之后 200 字符含 btnAutoDetect (两按钮相邻)');
+// 推断结果标题简化: 没有 "（从监听到的请求帧反推）"
+assertEq(/推断结果（从监听到的请求帧反推）/.test(sniffBody), false,
+  'sniff-3 g: 推断结果标题 "（从监听到的请求帧反推）" 已删');
 
 // 3. 总线报文子分段: 加 [刷新] [清空]
 // sniff-3 f: 总线报文子分段用 flex 容器, 标题 + 按钮容器嵌套, 用位置距离验证
@@ -51,7 +61,13 @@ assertEq(frefIdx > txIdx && fclrIdx > frefIdx, true,
   'sniff-3 f: 总线报文文字 → btnFrameRefresh → btnFrameClear 顺序正确 (DOM 顺序)');
 // 三个都在 frame-toolbar 之前
 const toolbarIdx = sniffBody.indexOf('frame-toolbar');
-assertEq(fclrIdx > 0 && fclrIdx < toolbarIdx, true,
+// sniff-3 g: frameBody 包裹 frame-toolbar, frameButtons 在 frameBody 之外的标题行
+//   但 frame-toolbar class 在 .frame-toolbar{} CSS 里也出现 (line 170), 不在 sniffBody 内
+//   改找 <div class="frame-toolbar"> 实体
+const toolbarRealIdx = sniffBody.indexOf('<div class="frame-toolbar">');
+assertEq(fclrIdx > 0, true, 'sniff-3 f: fclrIdx > 0');
+assertEq(toolbarRealIdx > 0, true, 'sniff-3 f: toolbarRealIdx > 0');
+assertEq(fclrIdx < toolbarRealIdx, true,
   'sniff-3 f: 总线报文按钮容器 (含 [清空]) 在 frame-toolbar 之前');
 
 // 4. frame-toolbar 内不再有 btnInfer / btnAutoDetect

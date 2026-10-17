@@ -175,9 +175,13 @@ const el = new Proxy({
   snStSubed: $('snStSubed'),
   snStKeepSession: $('snStKeepSession'),
   // 报文页 (sniff-3 f: panel-title 的 [刷新] 删了, btnInferClear 改绑推断结果;
-  //   总线报文子分段新加 [刷新] [清空] 按钮, id 同 frameLog 命名)
+  //   总线报文子分段新加 [刷新] [清空] 按钮, id 同 frameLog 命名;
+  //   sniff-3 g: 总线报文加滑动开关 frameSectionOn, 控制 frameButtons + frameBody 显隐)
   btnFrameRefresh: $('btnFrameRefresh'), btnFrameClear: $('btnFrameClear'),
   btnInferClear: $('btnInferClear'),
+  frameSectionOn: $('frameSectionOn'),
+  frameButtons: $('frameButtons'),
+  frameBody: $('frameBody'),
   frameFilter: $('frameFilter'), frameAuto: $('frameAuto'), frameLog: $('frameLog'),
   btnInfer: $('btnInfer'), inferTbody: $('inferTbody'),
   inferHint: $('inferHint'),
@@ -1971,6 +1975,20 @@ if (el.btnInferClear) {
     if (S.infer) S.infer = null;
     status('已清空推断结果', true);
   };
+}
+// sniff-3 g: 总线报文子分段的滑动开关, 默认 unchecked
+//   - 关: 隐藏 frameButtons ([刷新][清空]) + frameBody (类型筛选+frame-log)
+//   - 开: 显示
+// 初始化时按 checked 状态设一次, 之后 onchange 切换
+function applyFrameSection(on) {
+  if (el.frameButtons) el.frameButtons.hidden = !on;
+  if (el.frameBody) el.frameBody.hidden = !on;
+}
+if (el.frameSectionOn) {
+  applyFrameSection(!!el.frameSectionOn.checked);
+  el.frameSectionOn.addEventListener('change', (e) => {
+    applyFrameSection(!!e.target.checked);
+  });
 }
 el.frameFilter.onchange = renderFrames;
 el.btnInfer.onclick = doInfer;
