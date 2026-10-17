@@ -529,15 +529,14 @@ function setPortState(open, path) {
       '导入配置文件 (.json / .csv)';
   }
   // im-3: btnExport 加 mode 守卫
-  //   - platform 档: 禁 (跟 import 一致, 配置从平台拉)
+  //   - platform 档: 开 (im-3 fix: 用户可导出平台拉下来的配置快照, 跟"导入禁用"语义不同)
   //   - idle 档: 禁 (idle 档无配置可导出, 用户应先进 manual 档看/改表单)
   //   - manual 档: 开
   //   - sniff 档: 开 (im-2 已加, 走 manual 档 prefix 导出)
   if (el.btnExport) {
-    const blocked = !open || isPlatform(S.mode) || S.mode === 'idle';
+    const blocked = !open || S.mode === 'idle';
     el.btnExport.disabled = blocked;
     el.btnExport.title = !open ? '请先连接串口' :
-      isPlatform(S.mode) ? '平台档配置从 MQTT 平台拉取，不能导出' :
       S.mode === 'idle' ? 'idle 档无配置, 请先切到手动档' :
       '导出当前档配置 (sniff 档导 manual 档)';
   }
@@ -776,11 +775,11 @@ function syncTabs() {
       '导入配置文件 (.json / .csv)';
   }
   // im-3: btnExport 加 mode 守卫 (syncTabs 里补, 跟 setPortState 同步)
+  //   im-3 fix: platform 档允许导出 (用户可导出平台拉下来的配置快照)
   if (el.btnExport) {
-    const blocked = !S.open || isPlatform(mode) || mode === 'idle';
+    const blocked = !S.open || mode === 'idle';
     el.btnExport.disabled = blocked;
     el.btnExport.title = !S.open ? '请先连接串口' :
-      isPlatform(mode) ? '平台档配置从 MQTT 平台拉取，不能导出' :
       mode === 'idle' ? 'idle 档无配置, 请先切到手动档' :
       '导出当前档配置 (sniff 档导 manual 档)';
   }

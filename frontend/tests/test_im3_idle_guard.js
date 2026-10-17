@@ -22,18 +22,21 @@ assertEq(/idle 档无配置, 请先切到手动档/.test(importBlockMatch[0]), t
   'im-3: setPortState btnImport title 提示"idle 档无配置, 请先切到手动档"');
 
 // 2. setPortState 加了 btnExport 守卫块 (之前没有)
+//   im-3 fix: platform 档允许导出, btnExport 守卫不含 isPlatform
 const exportBlockMatch = appJs.match(/if\s*\(el\.btnExport\)\s*\{[\s\S]*?S\.mode\s*===\s*'idle'\s*\?\s*'idle 档[\s\S]*?\}/);
 assertEq(!!exportBlockMatch, true, 'im-3: setPortState 里新增 btnExport 守卫块');
 assertEq(/S\.mode\s*===\s*'idle'/.test(exportBlockMatch[0]), true,
   'im-3: setPortState btnExport blocked 含 S.mode === "idle"');
-assertEq(/isPlatform\(S\.mode\)/.test(exportBlockMatch[0]), true,
-  'im-3: setPortState btnExport blocked 含 isPlatform (platform 档也禁)');
+// im-3 fix: 平台档允许导出, 守卫不含 isPlatform
+assertEq(/isPlatform\(S\.mode\)/.test(exportBlockMatch[0]), false,
+  'im-3 fix: setPortState btnExport blocked 不含 isPlatform (平台档允许导出)');
 // btnExport 不含 sniff 守卫 (sniff 档仍允许, im-2 已加)
 assertEq(/S\.mode\s*===\s*'sniff'/.test(exportBlockMatch[0]), false,
   'im-3: setPortState btnExport blocked 不含 sniff (sniff 档仍允许导出 manual)');
 
 // 3. syncTabs 守卫跟 setPortState 一致
 //   syncTabs 段是 mode 切换时调, 看 syncTabs 段内 btnImport/btnExport 守卫
+//   im-3 fix: syncTabs 段内 btnExport 守卫也不含 isPlatform (平台档允许导出)
 const syncTabsBody = appJs.substring(
   appJs.indexOf('function syncTabs'),
   appJs.indexOf('function syncTabs') + 1500);
@@ -41,9 +44,13 @@ assertEq(/mode\s*===\s*'idle'/.test(syncTabsBody), true,
   'im-3: syncTabs 段内含 mode === "idle" 守卫');
 assertEq(/mode\s*===\s*'sniff'/.test(syncTabsBody), true,
   'im-3: syncTabs 段内含 mode === "sniff" 守卫 (im-2 没删)');
-// syncTabs 段内 btnExport 守卫 (跟 setPortState 一样, 含 isPlatform + idle)
-assertEq(/isPlatform\(mode\)/.test(syncTabsBody), true,
-  'im-3: syncTabs btnExport 守卫含 isPlatform');
+// syncTabs 段内 btnExport 守卫: 只含 idle, 不含 isPlatform
+//   提取 syncTabs 段内 btnExport 守卫块 (syncTabs 里用 mode 是函数参数)
+const syncExportStart = syncTabsBody.indexOf('if (el.btnExport)');
+assertEq(syncExportStart > 0, true, 'im-3 fix: syncTabs 段内有 btnExport 守卫块');
+const syncExportBlock = syncTabsBody.substring(syncExportStart, syncExportStart + 500);
+assertEq(!/isPlatform\(mode\)/.test(syncExportBlock), true,
+  'im-3 fix: syncTabs btnExport 守卫不含 isPlatform (平台档允许导出)');
 
 // 4. 整个 idle 档行为: 导入/导出都禁, user 提示明确
 assertEq(/idle 档无配置, 请先切到手动档/.test(appJs), true,
