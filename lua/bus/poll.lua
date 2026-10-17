@@ -461,6 +461,11 @@ function M.stop()
     if not running then return true end
     running = false
     gen = gen + 1
+    -- 36-fix: 清空 regs/lastCfg/interval. 切 idle 时 ctrl.reset_user 已经擦掉
+    --   fskv 里的 ds_poll/ds_pull, 但 poll 模块内部的 regs 是另外存的,
+    --   stop() 不清就导致切回 manual 时 R:REG 还返回上次的寄存器表 (ds_poll
+    --   实际是空的). 让 stop 顺手清, 下次 start() 会从 fskv 重新 load
+    regs, interval, lastCfg = {}, cfg.POLL_INTERVAL_MS, nil
     -- 16-fix-1: 删除 de_low(), 依赖内核 485 自动控制 DE
     log.info("poll", "stopped")
     return true

@@ -774,7 +774,14 @@
   - **我**建**议** B **方**案**(**保**留** 35b-fix **逃**生**口** + **改** waitPullDone**):** waitPullDone **循**环**里**检**查** mode**, **如**果** mode **不**是** platform **了** (**用**户**已**切**走**), **静**默**返**回**, **不**弹** "**拉**取**失**败**"**。**保**留**逃**生**口**, **不**损**失** 35b-fix **带**来**的**能**力**。**
   - **用**户**选** B**。
   - **修**改**:** `app.js` waitPullDone **循**环**开**头**加** `if ((S.modeStat || {}).mode !== 'platform') return false;` (**静**默**返**回**, **不**调** status/toast**)**。
-  - **测**试**:** test_35b_idle_during_waitpull.js **加**上** waitPullDone **的**检**查**。**29/29 npm test **全**过**!**
+  - **测**试**:** test_35b_idle_during_waitpull.js **加**上** waitPullDone **的**检**查**。**29/29 npm test **全**过**!
+- **36-fix: poll.stop() **清**空** regs/lastCfg/interval**:
+  - **问**题**:**用**户**测**试**报**告**:**手**动**档**填**两**个**寄**存**器**保**存** → **切** idle **成**功** → **再**切** manual** → **进**入** manual **面**板**, **软**件**参**数**列**表**还**显**示**刚**才**填**的**两**个**寄**存**器**。**用**户**问**这**个**逻**辑**正**常**吗** - **正**常**不**正**常**!**因**为** reset_user **已**经**清**了** ds_poll**, **设**备**的** fskv **是**空**的**。**
+  - **根**因**:** lua/bus/poll.lua **的** M.stop() **只**设** running=false**, **不**清** regs/lastCfg/interval。**cmd.lua R:REG** = `poll.get_regs()`, **直**接**返**回** poll **模**块**的**本**地**变**量** regs。**切** idle **后**, fskv **是**空**的**, **但** poll.regs **还**是**上**次**的** 2 **个**。**前**端** readCfgSilent **读**到** 2 **个**, **显**示** 2 **个**。**
+  - **修**改**:** M.stop() **末**尾**加** `regs, interval, lastCfg = {}, cfg.POLL_INTERVAL_MS, nil`。**下**次** M.start(src) **调** reload_cfg(curSlot) **会**从** fskv **重**新** load**。**
+  - **安**全**性**:** W:CFG **流**程** poll.stop() + poll.apply_cfg() + poll.start() **中**间** poll.regs **短**暂**是**空**没**关**系** (**R:REG **不**会**并**发**跑**); **切** sniff **时** poll.stop() **清**也**正**确**。**
+  - **测**试**:**新**增** test_36_poll_stop_clears.js。
+- **36-fix 30/30 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**
