@@ -56,70 +56,111 @@ assertEq(/el\.mqInterval\.value\s*=\s*String\(v\)/.test(appJs), true,
 assertEq(/await\s+saveMqtt\(\)/.test(appJs), true,
   'sniff-3: 弹窗确认后调 saveMqtt 走 W:MQTT');
 
-// 5. 状态卡片: 11 字段
+// 5. 状态卡片: 11 字段, 字段名跟 manual 档 mMqStXxx 对齐 (DevId/Subed/ExtraTopics)
 const statusFields = [
-  'snStConn', 'snStClientId', 'snStUser', 'snStSn', 'snStMode',
-  'snStManual', 'snStPub', 'snStSub', 'snStPubTopics', 'snStSubscribed', 'snStKeepSession'
+  'snStConn', 'snStClientId', 'snStUser', 'snStDevId', 'snStMode',
+  'snStManual', 'snStPub', 'snStSub', 'snStExtraTopics', 'snStSubed', 'snStKeepSession'
 ];
 const allFields = statusFields.every(id => html.indexOf('id="' + id + '"') > 0);
 assertEq(allFields, true,
-  'sniff-3: 状态卡片 11 字段全有 (snStConn/ClientId/User/Sn/Mode/Manual/Pub/Sub/PubTopics/Subscribed/KeepSession)');
+  'sniff-3: 状态卡片 11 字段全有 (snStConn/ClientId/User/DevId/Mode/Manual/Pub/Sub/ExtraTopics/Subed/KeepSession)');
+// 5a. 旧字段名 (snStSn/snStPubTopics/snStSubscribed) 都不应再出现
+const oldIds = ['snStSn', 'snStPubTopics', 'snStSubscribed'];
+const noOld = oldIds.every(id => html.indexOf('id="' + id + '"') < 0);
+assertEq(noOld, true,
+  'sniff-3: 旧字段名 (snStSn/snStPubTopics/snStSubscribed) 已重命名');
 
-// 6. 字段 label 名称
+// 6. 显示格式: kv-grid 容器 + kv 单元 + pre 容器 (跟 manual 档 mMqStXxx 同套)
+assertEq(/<div class="kv-grid">[\s\S]*snStConn[\s\S]*<\/div>\s*<\/div>/.test(html), true,
+  'sniff-3: 状态卡片用 kv-grid 容器 (跟 manual 档 mMqStXxx 同套)');
+assertEq(/<div class="kv"><b>连接状态<\/b><span id="snStConn">/.test(html), true,
+  'sniff-3: 字段用 <div class="kv"><b>label</b><span id=...> 格式 (跟 manual 一致)');
+assertEq(/<div class="kv kv-wide"><b>其他生效 Topic<\/b><pre id="snStExtraTopics" class="kv-pre">/.test(html), true,
+  'sniff-3: 其他生效 Topic 用 kv-wide + pre (跟 manual 档 mMqStExtraTopics 同套)');
+
+// 7. 字段 label 名称 (11 个)
 const labels = [
   ['连接状态', 'snStConn'],
   ['ClientID', 'snStClientId'],
   ['用户名', 'snStUser'],
-  ['设备编号', 'snStSn'],
+  ['设备编号', 'snStDevId'],
   ['当前档次', 'snStMode'],
   ['手动配置', 'snStManual'],
   ['生效发布', 'snStPub'],
   ['生效订阅', 'snStSub'],
-  ['其他生效 Topic', 'snStPubTopics'],
-  ['已订阅', 'snStSubscribed'],
+  ['其他生效 Topic', 'snStExtraTopics'],
+  ['已订阅', 'snStSubed'],
   ['会话管理', 'snStKeepSession']
 ];
 const allLabels = labels.every(([label, id]) => {
-  // 找 <tr><td>label</td><td id="id">...</td></tr> 这种模式
-  const re = new RegExp('<td>' + label + '</td>\\s*<td[^>]*id="' + id + '"');
-  return re.test(html);
+  // 找 <div class="kv"><b>label</b><span id="id">...</span></div> 这种模式
+  // 其他生效 Topic 用 pre 而不是 span
+  if (id === 'snStExtraTopics') {
+    return new RegExp('<div class="kv kv-wide"><b>' + label + '<\\/b><pre id="' + id + '" class="kv-pre">').test(html);
+  }
+  return new RegExp('<div class="kv"><b>' + label + '<\\/b><span id="' + id + '">').test(html);
 });
 assertEq(allLabels, true,
   'sniff-3: 状态卡片 11 字段 label 名称正确 (连接状态/ClientID/...)');
 
-// 7. 卡片标题 "状态"
-assertEq(/<div class="panel-title">状态</.test(html), true,
+// 8. 卡片标题 "状态"
+assertEq(/<div class="panel-title">状态\s*</.test(html), true,
   'sniff-3: 状态卡片标题是 "状态"');
 
-// 8. mqtt.js 加 renderSnStatus 函数
+// 9. app.js el 引用: 新字段名, 旧字段名不引用
+const oldRefs = ['snStSn:', 'snStPubTopics:', 'snStSubscribed:'];
+const noOldRefs = oldRefs.every(r => appJs.indexOf(r) < 0);
+assertEq(noOldRefs, true,
+  'sniff-3: app.js el 引用改成 snStDevId/snStExtraTopics/snStSubed, 旧名不引用');
+const newRefs = ['snStDevId:', 'snStExtraTopics:', 'snStSubed:'];
+const hasNewRefs = newRefs.every(r => appJs.indexOf(r) > 0);
+assertEq(hasNewRefs, true,
+  'sniff-3: app.js el 引用含新名 (snStDevId/snStExtraTopics/snStSubed)');
+
+// 10. mqtt.js 加 renderSnStatus 函数
 assertEq(/function\s+renderSnStatus\s*\(/.test(mqttJs), true,
   'sniff-3: mqtt.js 加 renderSnStatus() 函数 (把 R:MQTT stat/cfg 填到 snStXxx)');
-// 8a. renderMqtt 末尾调用
+// 10a. renderMqtt 末尾调用
 const rMqtt = mqttJs.indexOf('function renderMqtt()');
-const rEnd = mqttJs.indexOf('\n}', rMqtt + 50);
-const rBody = mqttJs.substring(rMqtt, rEnd + 5);
+let rEnd = -1;
+for (let off = rMqtt + 50; off < mqttJs.length; off++) {
+  if (mqttJs[off] === '\n' && /^function\s/.test(mqttJs.substring(off + 1, off + 20))) {
+    rEnd = off; break;
+  }
+}
+const rBody = mqttJs.substring(rMqtt, rEnd > 0 ? rEnd : rMqtt + 2000);
 assertEq(/renderSnStatus\(s,\s*c,\s*pubTopics\)/.test(rBody), true,
   'sniff-3: renderMqtt 末尾调 renderSnStatus(s, c, pubTopics)');
 
-// 9. renderSnStatus 内部: 11 字段映射
+// 11. renderSnStatus 内部: 11 字段映射 (新字段名)
 const rsStart = mqttJs.indexOf('function renderSnStatus');
-const rsEnd = mqttJs.indexOf('\n}', rsStart + 100);
-const rsBody = mqttJs.substring(rsStart, rsEnd + 5);
+let rsEnd = -1;
+for (let off = rsStart + 100; off < mqttJs.length; off++) {
+  if (mqttJs[off] === '\n' && /^function\s/.test(mqttJs.substring(off + 1, off + 20))) {
+    rsEnd = off; break;
+  }
+}
+const rsBody = mqttJs.substring(rsStart, rsEnd > 0 ? rsEnd : rsStart + 2000);
 const mappings = [
   ['snStConn', '已连接'],
   ['snStClientId', 'client_id'],
   ['snStUser', 'user'],
-  ['snStSn', 'device_id'],
+  ['snStDevId', 'device_id'],
   ['snStMode', 'manual_on'],
   ['snStManual', 'manual_on'],
   ['snStPub', 'pubTopics'],
   ['snStSub', 'sub'],
-  ['snStPubTopics', 'slice'],
-  ['snStSubscribed', 'subscribed'],
+  ['snStExtraTopics', 'slice'],
+  ['snStSubed', 'subscribed'],
   ['snStKeepSession', 'keep_session'],
 ];
 const allMapped = mappings.every(([id, hint]) => rsBody.indexOf(id) > 0 && rsBody.indexOf(hint) > 0);
 assertEq(allMapped, true,
-  'sniff-3: renderSnStatus 把 stat/cfg 11 字段映射到 snStXxx');
+  'sniff-3: renderSnStatus 把 stat/cfg 11 字段映射到 snStXxx (新字段名)');
+// 11a. 旧字段名不再用
+const rsOldRefs = ['snStSn', 'snStPubTopics', 'snStSubscribed'];
+const rsNoOld = rsOldRefs.every(id => rsBody.indexOf("'" + id + "'") < 0);
+assertEq(rsNoOld, true,
+  'sniff-3: renderSnStatus 不再用旧字段名 snStSn/snStPubTopics/snStSubscribed');
 
-console.log('PASS: sniff-3 sniff 面板 MQTT 卡片改造 (改名+删保存+弹窗改周期+状态卡片)');
+console.log('PASS: sniff-3 sniff 面板 MQTT 卡片改造 (改名+删保存+弹窗改周期+状态卡片格式与 manual 一致)');

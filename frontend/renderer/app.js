@@ -162,17 +162,17 @@ const el = new Proxy({
   snMqPort: $('snMqPort'),
   snMqInterval: $('snMqInterval'),
   btnSnMqttRefresh: $('btnSnMqttRefresh'),
-  // sniff 状态卡片
+  // sniff 状态卡片 (字段名跟 manual 档 mMqStXxx 对齐: DevId/Subed/ExtraTopics)
   snStConn: $('snStConn'),
   snStClientId: $('snStClientId'),
   snStUser: $('snStUser'),
-  snStSn: $('snStSn'),
+  snStDevId: $('snStDevId'),
   snStMode: $('snStMode'),
   snStManual: $('snStManual'),
   snStPub: $('snStPub'),
   snStSub: $('snStSub'),
-  snStPubTopics: $('snStPubTopics'),
-  snStSubscribed: $('snStSubscribed'),
+  snStExtraTopics: $('snStExtraTopics'),
+  snStSubed: $('snStSubed'),
   snStKeepSession: $('snStKeepSession'),
   // 报文页
   btnFrameRefresh: $('btnFrameRefresh'), btnFrameClear: $('btnFrameClear'),

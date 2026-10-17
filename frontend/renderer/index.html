@@ -950,22 +950,19 @@ body.mq-manual .auto-only{display:none !important;}
                 </div>
                 <div class="panel">
                     <div class="panel-title">状态</div>
-                    <table class="param-table" style="table-layout:fixed;">
-                        <colgroup><col style="width:160px;"><col></colgroup>
-                        <tbody id="snStatusTbody">
-                            <tr><td>连接状态</td><td id="snStConn">--</td></tr>
-                            <tr><td>ClientID</td><td id="snStClientId">--</td></tr>
-                            <tr><td>用户名</td><td id="snStUser">--</td></tr>
-                            <tr><td>设备编号</td><td id="snStSn">--</td></tr>
-                            <tr><td>当前档次</td><td id="snStMode">--</td></tr>
-                            <tr><td>手动配置</td><td id="snStManual">--</td></tr>
-                            <tr><td>生效发布</td><td id="snStPub">--</td></tr>
-                            <tr><td>生效订阅</td><td id="snStSub">--</td></tr>
-                            <tr><td>其他生效 Topic</td><td id="snStPubTopics">--</td></tr>
-                            <tr><td>已订阅</td><td id="snStSubscribed">--</td></tr>
-                            <tr><td>会话管理</td><td id="snStKeepSession">--</td></tr>
-                        </tbody>
-                    </table>
+                    <div class="kv-grid">
+                        <div class="kv"><b>连接状态</b><span id="snStConn">--</span></div>
+                        <div class="kv"><b>ClientID</b><span id="snStClientId">--</span></div>
+                        <div class="kv"><b>用户名</b><span id="snStUser">--</span></div>
+                        <div class="kv"><b>设备编号</b><span id="snStDevId">--</span></div>
+                        <div class="kv"><b>当前档次</b><span id="snStMode">--</span></div>
+                        <div class="kv"><b>手动配置</b><span id="snStManual">--</span></div>
+                        <div class="kv"><b>生效发布</b><span id="snStPub">--</span></div>
+                        <div class="kv"><b>生效订阅</b><span id="snStSub">--</span></div>
+                        <div class="kv kv-wide"><b>其他生效 Topic</b><pre id="snStExtraTopics" class="kv-pre">--</pre></div>
+                        <div class="kv"><b>已订阅</b><span id="snStSubed">--</span></div>
+                        <div class="kv"><b>会话管理</b><span id="snStKeepSession">--</span></div>
+                    </div>
                 </div>
             </div>
         </div>

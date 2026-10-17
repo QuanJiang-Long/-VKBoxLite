@@ -829,6 +829,15 @@
   - **修**改** 3 **个**文**件**:** index.html (卡**片**结**构**)、app.js (**绑**定** click + **删** btnSnMqttSave)、mqtt.js (加** renderSnStatus)
   - **测**试**:** test_sniff3_mqtt_panel.js (9 **个**测**试**点**)
 - **sniff-3 34/34 npm test **全**过**!
+- **sniff-3 b: **状**态**卡**片**格**式**与** manual **档** mMqStXxx **一**致**:
+  - 1. **容**器** `<table>` → `<div class="kv-grid">` (跟** manual **档** mMqStXxx **同**套**)
+  - 2. **单**元** `<tr><td>` → `<div class="kv"><b>label</b><span id=...></div>` (跟** manual **一**致**)
+  - 3. **字**段**名**对**齐** manual: snStSn → snStDevId; snStPubTopics → snStExtraTopics; snStSubscribed → snStSubed
+  - 4. **其**他**生**效** Topic **用** `<pre class="kv-pre">` (**跟** manual **档** mMqStExtraTopics **同**套**)
+  - 5. **当**前**档**次**值**统**一**: '**手**动**配**置**' / '**自**动**(**设**备**拼**接**)' (**跟** manual **一**致**)
+  - **修**改** 3 **个**文**件**:** index.html (kv-grid 结**构**)、app.js (el **引**用**名**)、mqtt.js (renderSnStatus)
+  - **测**试**:** test_sniff3_mqtt_panel.js **增**加** 5 **个**测**试**点** (9 → 14)
+- **sniff-3 b 34/34 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**
