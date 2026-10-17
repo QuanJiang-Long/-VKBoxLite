@@ -1,9 +1,10 @@
 // test_sniff3d_rename.js
 //
-// sniff-3 d: 卡片改名 + 推断结果隐藏
+// sniff-3 d: 卡片改名 + 推断结果先隐藏 (sniff-3 e 之后已合并到 sniff嗅探 里)
 //   1. sniff 页面 "总线报文（旁听 sniff 模式）" -> "sniff嗅探"
 //   2. 运行模式 485运行状态 中 "旁听 sniff" -> "sniff(嗅探)"
-//   3. 推断结果卡片 DOM 保留但 hidden (id="snInferPanel", hidden 属性)
+//   注: sniff-3 d 之后 sniff-3 e 把推断结果合并到 sniff嗅探 卡片里, 此处
+//        只验证 2 个改名, 推断结果 DOM 验证交给 sniff-3 e
 
 const fs = require('fs');
 const path = require('path');
@@ -23,19 +24,8 @@ assertEq(/<div class="m-title">sniff\(嗅探\)<\/div>/.test(html), true,
 assertEq(/<div class="m-title">旁听 sniff<\/div>/.test(html), false,
   'sniff-3 d: 旧 m-title "旁听 sniff" 已删除');
 
-// 3. 推断结果卡片 DOM 保留但 hidden
-assertEq(/id="snInferPanel"/.test(html), true,
-  'sniff-3 d: 推断结果卡片有 id="snInferPanel"');
-const panelMatch = html.match(/<div class="panel" id="snInferPanel"[^>]*>/);
-assertEq(panelMatch && /hidden/.test(panelMatch[0]), true,
-  'sniff-3 d: 推断结果卡片有 hidden 属性 (DOM 保留但不显示)');
-// 3a. 推断结果 inner HTML 还在 (DOM 没删)
-const panelStart = html.indexOf('id="snInferPanel"');
-const panelEnd = html.indexOf('</div>', panelStart + 800);  // 跳过整个推断 panel
-const panelBody = html.substring(panelStart, panelEnd + 5);
-assertEq(/推断结果（从监听到的请求帧反推）/.test(panelBody), true,
-  'sniff-3 d: 推断结果卡片内部 (标题+表格) 完整保留');
-assertEq(/id="inferTbody"/.test(panelBody), true,
-  'sniff-3 d: 推断结果表格 inferTbody 完整保留');
+// 3. frameLog 提示词改为 "sniff(嗅探)" (跟 sniff-3 d/e 改名一致)
+assertEq(/切到"运行模式"页选择"sniff\(嗅探\)"后/.test(html), true,
+  'sniff-3 d: frame-line 提示词改为 "sniff(嗅探)"');
 
-console.log('PASS: sniff-3 d 卡片改名 sniff嗅探 + 推断结果 DOM 保留只隐藏 + 旁听 sniff 改 sniff(嗅探)');
+console.log('PASS: sniff-3 d 卡片改名 sniff嗅探 + 旁听 sniff 改 sniff(嗅探) (推断结果合并到 sniff-3 e)');
