@@ -336,7 +336,7 @@ body.mq-manual .auto-only{display:none !important;}
                             <div class="m-state" id="msPollpull"></div>
                         </div>
                         <div class="mode-card" id="mcSniff" data-mode="sniff">
-                            <div class="m-title">旁听 sniff</div>
+                            <div class="m-title">sniff(嗅探)</div>
                             <div class="m-desc">只收不发的总线听者<br>解析并配对请求/响应帧</div>
                             <div class="m-state" id="msSniff"></div>
                         </div>
@@ -665,7 +665,7 @@ body.mq-manual .auto-only{display:none !important;}
                              .ro-clickable 让 input 显示 pointer 鼠标 + 锁图标
                              onclick 绑到 editPlatformInterval, 弹模态输入新值后调 saveMqtt -->
                         <input id="pMqInterval" type="number" value="120" min="120" max="86400" style="max-width:140px;" class="ro-val ro-clickable" readonly>
-                        <span class="hint" style="margin-left:8px;">🔒 点击修改</span>
+                        <span class="hint" style="margin-left:8px;">✏️ 点击修改</span>
                     </div>
                     <div class="form-row" style="align-items:flex-start;">
                         <label style="padding-top:5px;">MQTT 会话管理</label>
@@ -885,7 +885,7 @@ body.mq-manual .auto-only{display:none !important;}
             <!-- ============ sniff模式 tabSniff ============ -->
             <div class="tab-pane" id="tabSniff">
                 <div class="panel">
-                    <div class="panel-title">总线报文（旁听 sniff 模式）
+                    <div class="panel-title">sniff嗅探
                         <div class="spacer"></div>
                         <button class="sm" id="btnFrameRefresh">刷新</button>
                         <button class="sm" id="btnFrameClear">清空</button>
@@ -911,7 +911,9 @@ body.mq-manual .auto-only{display:none !important;}
                         <div class="frame-line"><span class="fl-desc">未进入旁听模式 —— 切到"运行模式"页选择"旁听 sniff"后，这里会实时显示总线上解析出的报文。</span></div>
                     </div>
                 </div>
-                <div class="panel">
+                <!-- sniff-3 d: 推断结果卡片 DOM 合并到 sniff嗅探 卡片 (跟 snSt 状态卡片同位置),
+                     暂时 hidden, 等后续确认. 现在 sniff 面板只保留"总线报文" -->
+                <div class="panel" id="snInferPanel" hidden>
                     <div class="panel-title">推断结果（从监听到的请求帧反推）
                         <div class="spacer"></div>
                         <span class="hint" id="inferHint"></span>
@@ -945,7 +947,7 @@ body.mq-manual .auto-only{display:none !important;}
                         <label>上报周期(秒)</label>
                         <input id="snMqInterval" type="number" value="120" min="120" max="86400"
                             readonly class="ro-val ro-clickable" style="max-width:140px;">
-                        <span class="hint">U2-m / U3 res / U4 prop 共享</span>
+                        <span class="hint" style="margin-left:8px;">✏️ 点击修改</span>
                     </div>
                 </div>
                 <div class="panel">

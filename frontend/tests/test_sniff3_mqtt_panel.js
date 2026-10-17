@@ -44,6 +44,24 @@ assertEq(snMqInterval && /readonly/.test(snMqInterval[0]) && /ro-val/.test(snMqI
 assertEq(snMqInterval && /ro-clickable/.test(snMqInterval[0]), true,
   'sniff-3: snMqInterval 加 ro-clickable (允许点击弹窗修改)');
 
+// 3a. 上报周期提示词跟 platform 档一致: "🔒 点击修改"
+const intervalHint = html.match(/<span class="hint"[^>]*>[^<]*点击修改[^<]*<\/span>/g);
+const hasSnIntervalHint = intervalHint && intervalHint.some(s => s.indexOf('snMqInterval') < 0 && s.indexOf('🔒') >= 0);
+// 找 snMqInterval 后的 hint (在它附近)
+const snI = html.indexOf('snMqInterval');
+const snHint = html.substring(snI, snI + 400).match(/<span class="hint"[^>]*>[^<]+<\/span>/);
+assertEq(snHint && /✏️\s*点击修改/.test(snHint[0]), true,
+  'sniff-3 c: snMqInterval 提示词改为 "✏️ 点击修改" (笔图标, 跟 platform 档 pMqInterval 同套)');
+// 3c. 旧锁图标 🔒 已删
+assertEq(/🔒\s*点击修改/.test(html), false,
+  'sniff-3 c: 旧锁图标 🔒 已删除, 改用笔 ✏️');
+// 3d. 平台档也同步改了 (pMqInterval 后的提示词)
+assertEq(html.match(/✏️\s*点击修改/g).length >= 2, true,
+  'sniff-3 c: platform 档 pMqInterval + sniff 档 snMqInterval 都用 "✏️ 点击修改"');
+// 3b. 旧提示词 "U2-m / U3 res / U4 prop 共享" 已删
+assertEq(/U2-m\s*\/\s*U3 res\s*\/\s*U4 prop/.test(html), false,
+  'sniff-3 b: 旧提示词 "U2-m / U3 res / U4 prop 共享" 已删除');
+
 // 4. app.js 绑定 snMqInterval 点击 -> askEditInterval + saveMqtt
 assertEq(/el\.snMqInterval\.addEventListener\(['"]click['"]/.test(appJs), true,
   'sniff-3: app.js 绑 snMqInterval click 事件');
