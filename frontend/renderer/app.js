@@ -465,8 +465,10 @@ function setPortState(open, path) {
   // 29-fix: 4 个 mode-card (mcIdle/mcPoll/mcPollpull/mcSniff) 变灰
   //   28-fix 用 applyMode 拦截 + toast, 但用户希望视觉上就灰
   //   (toast 是兜底, 万一有别的入口绕过 .locked class 也能拦)
+  // 35-fix: mcIdle 是逃生口, 永远不灰. 串口开了之后, idle 一定要能进.
+  //   platform 档拉不到配置又不能切回 idle, 用户就被卡死了
   document.querySelectorAll('.mode-card').forEach(c => {
-    c.classList.toggle('locked', !open);
+    c.classList.toggle('locked', !open && c.id !== 'mcIdle');
   });
   syncPullCfgBtn();
 }
@@ -1747,6 +1749,27 @@ function idleWipeWarn(mode) {
 document.querySelectorAll('.mode-card').forEach(c => {
   c.onclick = async () => {
     const m = c.getAttribute('data-mode');
+    // 35-fix: idle 永远是逃生口, 串口没开也能进 (进 idle 不需要发命令,
+    //   不会因为串口断而失败). 这条在 locked 拦截之前, 否则 platform 档
+    //   拉不到配置又不能切回 idle, 用户就被卡死了
+    if (m === 'idle') {
+      // 不走 locked 检查, 但仍需串口开着 (进 idle 也要发 W:MODE=idle)
+      if (!S.open) { toast('请先连接串口'); return; }
+      if (S.modeSwitching) return;
+      if (m === S.mode && !S.modePending) { renderMode(); return; }
+      const label = MODE_LABEL[m] || m;
+      const curLabel = MODE_LABEL[S.mode] || S.mode;
+      if (!await askConfirm('确定把 485 运行模式从「' + curLabel + '」切换到「' + label + '」？\n\n'
+                   + '切换时设备会先停掉旧模式再启动新模式（互斥），'
+                   + '正在进行的采集会中断。'
+                   // 切回空闲不只是停总线, 设备会顺带复位用户配置。这是不可恢复的
+                   // 删除动作, 必须在同一个弹窗里一次说清, 不能让用户点完才知道
+                   + idleWipeWarn(m), '切换运行模式')) return;
+      applyMode(m);
+      return;
+    }
+    // 非 idle 档: 走原来的 locked 守卫
+    if (c.classList.contains('locked')) return;  // 35-fix: locked 卡片不响应
     // 点的就是设备当前模式且没有待应用选择：只重绘，不发命令、不弹窗
     if (m === S.mode && !S.modePending) { renderMode(); return; }
     // 切换中忽略连点（applyMode 内部也有同样的保护）

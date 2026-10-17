@@ -776,7 +776,7 @@ local function on_mqtt(cli, event, data, payload)
             local d = tostring(data)
             if d == "conack" or not S.reject_reason then
                 if d == "conack" then
-                    S.reject_reason = "平台拒绝连接(CONACK 0x05 未授权), 检查地址/端口或补用户名密码"
+                    S.reject_reason = "平台拒绝连接(CONACK 0x05 未授权), 检查地址/端口或补用户密码/凭证密码"
                 else
                     S.reject_reason = "连不上服务器(" .. d .. "): 域名解析不到或端口不通, 核对 host 拼写"
                 end
