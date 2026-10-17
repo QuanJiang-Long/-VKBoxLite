@@ -518,13 +518,28 @@ function setPortState(open, path) {
   // btnImport 的 platform 档守卫要在 setPortState 之后跑, 否则会被覆盖
   // (syncTabs 现在是 mode 切换时调, 不是 port 切换时调, 所以这里手动补一下)
   // im-2: sniff 档也禁用导入 (sniff 档无表单可填, 导入会丢数据)
+  // im-3: idle 档也禁用导入 (idle 档无配置, 导入没意义, 应先进 manual 档)
   if (el.btnImport) {
-    const blocked = !open || isPlatform(S.mode) || S.mode === 'sniff';
+    const blocked = !open || isPlatform(S.mode) || S.mode === 'sniff' || S.mode === 'idle';
     el.btnImport.disabled = blocked;
     el.btnImport.title = !open ? '请先连接串口' :
       isPlatform(S.mode) ? '平台档配置从 MQTT 平台拉取，不能导入' :
       S.mode === 'sniff' ? 'sniff 档无表单可导入, 请切到手动档' :
+      S.mode === 'idle' ? 'idle 档无配置, 请先切到手动档' :
       '导入配置文件 (.json / .csv)';
+  }
+  // im-3: btnExport 加 mode 守卫
+  //   - platform 档: 禁 (跟 import 一致, 配置从平台拉)
+  //   - idle 档: 禁 (idle 档无配置可导出, 用户应先进 manual 档看/改表单)
+  //   - manual 档: 开
+  //   - sniff 档: 开 (im-2 已加, 走 manual 档 prefix 导出)
+  if (el.btnExport) {
+    const blocked = !open || isPlatform(S.mode) || S.mode === 'idle';
+    el.btnExport.disabled = blocked;
+    el.btnExport.title = !open ? '请先连接串口' :
+      isPlatform(S.mode) ? '平台档配置从 MQTT 平台拉取，不能导出' :
+      S.mode === 'idle' ? 'idle 档无配置, 请先切到手动档' :
+      '导出当前档配置 (sniff 档导 manual 档)';
   }
   // 29-fix: 4 个 mode-card (mcIdle/mcPoll/mcPollpull/mcSniff) 变灰
   //   28-fix 用 applyMode 拦截 + toast, 但用户希望视觉上就灰
@@ -751,12 +766,23 @@ function syncTabs() {
   //   这里 mode 切换时也要保持灰 (避免 mode 切换把 setPortState 的灰给覆盖掉)
   if (el.btnImport) {
     // im-2: sniff 档也禁用导入 (sniff 档无表单可填, 导入会丢数据)
-    const blocked = !S.open || isPlatform(mode) || mode === 'sniff';
+    // im-3: idle 档也禁用导入 (idle 档无配置, 导入没意义, 应先进 manual 档)
+    const blocked = !S.open || isPlatform(mode) || mode === 'sniff' || mode === 'idle';
     el.btnImport.disabled = blocked;
     el.btnImport.title = !S.open ? '请先连接串口' :
       isPlatform(mode) ? '平台档配置从 MQTT 平台拉取，不能导入' :
       mode === 'sniff' ? 'sniff 档无表单可导入, 请切到手动档' :
+      mode === 'idle' ? 'idle 档无配置, 请先切到手动档' :
       '导入配置文件 (.json / .csv)';
+  }
+  // im-3: btnExport 加 mode 守卫 (syncTabs 里补, 跟 setPortState 同步)
+  if (el.btnExport) {
+    const blocked = !S.open || isPlatform(mode) || mode === 'idle';
+    el.btnExport.disabled = blocked;
+    el.btnExport.title = !S.open ? '请先连接串口' :
+      isPlatform(mode) ? '平台档配置从 MQTT 平台拉取，不能导出' :
+      mode === 'idle' ? 'idle 档无配置, 请先切到手动档' :
+      '导出当前档配置 (sniff 档导 manual 档)';
   }
   // 当前停留的栏目被藏掉时，落到首页 —— 否则界面会变成一片空白，
   // 用户以为程序卡死了（实际只是没有 active 的 tab-pane）
