@@ -17,6 +17,12 @@ local pendingReqs, lastReqs = {}, {}
 local lastRx, lastBaud = 0, nil
 -- 识别中标记: true = 正在扫 21 个候选, 业务视为未就绪; M.stop() 会清
 local detecting, detectGen = false, 0
+-- sniff-2 fix: forceStop 标志, mon.stop() 立刻设 true, auto_detect 内部
+--   每次 sys.wait 醒来 check, 立即 return. 否则 sys.wait(2000) 期间切档
+--   静默跑完剩余 baud, 还会调 uart.setup 改分频, 破坏 mon.stop 已经关闭
+--   的 uart.on("receive", nil) 效果 (用户实测 16:07:35.965 切 idle 后
+--   16:07:36.780 还在 Uart_ChangeBR)
+local forceStop = false
 -- 进 sniff 时的配置参数(可能和现场不符)。识别失败要把串口还原成它,
 -- 否则扫空后串口停在最后候选(1200 8O1), 真流量全成乱码
 local bootCfg = nil
@@ -26,6 +32,19 @@ local DETECT_RETRY_MS = 3000
 -- (parse_frame 是白名单 + 强制 CRC, 其余 fc 到不了这里), 所以
 -- pendingReqs 总共 ≤ 12 条 —— 改 decode_frame 的 kind 判断时记得复核这条
 local MAX_PENDING_PER_FC = 4
+
+-- sniff-2 fix: 替代 sys.wait, 每 20ms 醒来 check forceStop, 切档时
+--   最迟 20ms 内退出, 不让后台 auto_detect 在 sys.wait(2000) 中跑完
+--   剩余 baud. forceStop 标志在 mon.stop 里立刻设 true
+local function sniff_wait(ms)
+    local t = 0
+    while t < ms do
+        if forceStop or not running then return false end
+        if sys then sys.wait(20) end
+        t = t + 20
+    end
+    return not forceStop and running
+end
 -- lastReqs 的键是 "slave:qty", 键空间上千万且只增不减。sniff 挂在异常总线上
 -- 会单调增长, 两千条左右就吃掉大半 Lua 堆, 而 iot 的 OOM 兜底 trim_cache()
 -- 根本清不到它 —— 所以这里自己封顶。超了整表作废重来, 不逐条 FIFO:
@@ -399,6 +418,9 @@ end
 
 function M.start(c)
     if running then return true end
+    -- sniff-2 fix: 重新进 sniff 时清 forceStop, 否则上次的 stop 标志会让
+    --   auto_detect 立刻 return "stopped" (detect_loop 也会跟着退)
+    forceStop = false
     -- 没有 sniff 持久槽: 参数由 auto_detect() 试出来只存本次会话;
     -- 调用方不传 c 时用编译期默认(原空槽的 9600 8N1)
     c = c or { baud = cfg.BAUD, databits = cfg.DATABITS, stopbits = cfg.STOPBITS, parity = cfg.PARITY }
@@ -448,35 +470,36 @@ end
 function M.auto_detect()
     if not sys then return nil, "no sys" end
     if not running and not M.start() then return nil, "start fail" end
+    -- sniff-2 fix: mon.start 后强制清 forceStop, 否则上次的 stop 标志
+    --   会让本轮 auto_detect 立即 return "stopped"
+    forceStop = false
     -- sniff 启动后等 5s: 142 设备 UART 从 poll 切到 sniff 可能错乱,
     -- 等它稳定再切 baud. 之前 0 帧就是 142 设备 UART 没准备好
     log.info("mon", "auto_detect: wait 5s for 142 UART stable")
-    sys.wait(5000)
+    if not sniff_wait(5000) then return nil, "stopped" end
     for _, p in ipairs({ 0, 1, 2 }) do
         for _, b in ipairs(cfg.DETECT_BAUDS) do
             -- 完整复位 (合宙 Q1 修法): close + wait500 + setup + on
             -- 在已打开的 485 口上 uart.setup 走 Uart_ChangeBR 快路径,
             -- 只改分频不复位 RX/DE, 需 close+wait500 强制重开.
             pcall(uart.close, mbus.UART_ID)
-            if sys then sys.wait(500) end
+            if not sniff_wait(500) then return nil, "stopped" end
             rxbuf = ""
             local ok = pcall(uart.setup, mbus.UART_ID, b, 8, 1, mbus.parity_to_uart(p))
             if ok then
                 pcall(uart.on, mbus.UART_ID, "receive", on_receive)
                 -- 高 baud 切完多等 200ms (跟之前 D2 v5 一致, 142 设备 19200
                 -- t3.5=1.82ms 太早到 RX FIFO 接不住, 给驱动恢复窗口)
-                if b >= 19200 then sys.wait(200) end
+                if b >= 19200 then
+                    if not sniff_wait(200) then return nil, "stopped" end
+                end
                 -- ★ Q2: 静默监听 cfg.DETECT_WIN_MS (默认 2000ms), 不主动发探针.
                 -- 之前主动发 8 字节 modbus 请求会让 142 passive 设备响应, 但
                 -- 也占用 485 总线跟其他 master 冲突. 静默监听切 baud 后看 RX
                 -- 有没有 CRC 合法帧即可, 总线上有其他 master 在轮询就能命中.
                 -- 142 设备场景无 master 时永远 0 帧, 由 cfg.BAUD 兜底 (见下).
                 local before_frames = stat.frames
-                local t = 0
-                while t < cfg.DETECT_WIN_MS do
-                    if sys then sys.wait(20) end
-                    t = t + 20
-                end
+                if not sniff_wait(cfg.DETECT_WIN_MS) then return nil, "stopped" end
                 log.info("mon", "check baud=" .. b .. " p=" .. p
                     .. " frames=" .. tostring(stat.frames)
                     .. " paired=" .. tostring(stat.paired)
@@ -490,7 +513,7 @@ function M.auto_detect()
                     return { baud = b, databits = 8, stopbits = 1, parity = p }
                 end
             end
-            if not running then return nil, "stopped" end
+            if not running or forceStop then return nil, "stopped" end
         end
     end
     -- ★ Q2: 兜底 cfg.BAUD (restore_params 已经做了). 142 设备等 passive
@@ -528,7 +551,8 @@ local function detect_loop()
         stat.detect_fail = stat.detect_fail + 1
         log.warn("mon", "detect round " .. stat.detect_round .. " no hit, retry in "
             .. DETECT_RETRY_MS .. "ms")
-        if sys then sys.wait(DETECT_RETRY_MS) end
+        -- sniff-2 fix: 用 sniff_wait 替代 sys.wait, 切档时不再闷头等
+        if not sniff_wait(DETECT_RETRY_MS) then return end
     end
 end
 
@@ -553,8 +577,14 @@ function M.stop()
     detecting = false
     running = false
     gen = gen + 1
+    -- sniff-2 fix: 立刻设 forceStop, auto_detect 内部最迟 20ms 内退出
+    forceStop = true
+    -- sniff-2 fix: 立刻关 UART. 不让后台的 auto_detect 后续 uart.setup
+    --   改分频破坏 mon.stop 已关闭的 uart.on 回调. 下次进 sniff (mon.start)
+    --   或 manual/platform (poll.start -> ensure_uart) 会重新 uart.setup
     if gpio then pcall(gpio.set, mbus.DE_PIN, 0) end
     pcall(uart.on, mbus.UART_ID, "receive", nil)
+    pcall(uart.close, mbus.UART_ID)
     rxbuf = ""
     pendingReqs, lastReqs = {}, {}
     log.info("mon", "sniff stopped")

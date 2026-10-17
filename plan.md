@@ -804,6 +804,15 @@
   - **其**它**档**切**档**不**变**: **只**有**从** platform **切**走**才**弹**; idle **切**走**不**弹** (idle **本**来**就**清**两**槽**); manual/platform/sniff **互**切**不**弹** (除**非**经**过** platform**)。
   - **测**试**:** test_38_clrpull_on_switch.js (**8 **个**测**试**点**)。
 - **38-fix 32/32 npm test **全**过**!
+- **sniff-2: 切**档**立**刻**停** auto_detect** (**forceStop + uart.close + sniff_wait**)**:
+  - **问**题**:**用**户**日**志** (16:07): 16:07:35.964 W:MODE=idle → 16:07:35.965 mon.stop() 设 running=false, **但** auto_detect **正**在** sys.wait(2000) **中**, **醒**来**还**调** uart.setup **改**分**频** (16:07:36.780 Uart_ChangeBR), **破**坏** mon.stop **已**关**的** uart.on 回调**; 16:07:38.815 **还**在**打** "**check baud=9600...**" **日**志**, **证**明** auto_detect **主**循**环**还**在**跑**。
+  - **根**因**: mon.stop() **只**设** running=false, **没**有**标**志**让** sys.wait **醒**后**检**测**切**档**。auto_detect **内**部**每**个** sys.wait(500/200/2000) **在**醒**来**后**只** check `if not running`, **但**这**个**时**候** running **已**经**是** false, **应**该**返**回**, **但**它**会**先**完**成**这**次** baud **尝**试** (uart.setup, sys.wait(2000) **等**才**回**头** check**)。
+  - **修**改** 1** (mon.stop 立刻设 forceStop)**:** `forceStop = true` **加**在** mon.stop **顶**部**。
+  - **修**改** 2** (mon.stop 立刻关 UART)**:** `pcall(uart.close, mbus.UART_ID)` **加**在** uart.on 之后**。**下**次**进** sniff (mon.start) / manual/platform (poll.start → ensure_uart) **会**重**新** uart.setup**, **不**影**响**正**常**流**程**。
+  - **修**改** 3** (sniff_wait 替**代** sys.wait)**:** **自**定**义** sniff_wait(ms) **每** 20ms **醒**来** check forceStop / running, **返**回** false **立**刻** return**。auto_detect **内**部** 5 **个** sys.wait (5s/500ms/200ms/2s/DETECT_RETRY_MS) **全**改** sniff_wait**。
+  - **修**改** 4** (mon.start / auto_detect 入**口**清** forceStop)**:** **不**清**的**话**再**次**进** sniff **会**立**刻**被** sniff_wait **当**作** stop **返**回**。
+  - **测**试**:** test_sniff2_stop_quick.js (**6 **个**测**试**点**)。
+- **sniff-2 33/33 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**
