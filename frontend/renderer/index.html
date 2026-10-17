@@ -160,6 +160,12 @@ body.mq-manual .auto-only{display:none !important;}
     text-decoration:underline;cursor:pointer;font-size:12px;padding:0;}
 .push-banner.push-banner-bad{background:#fdecea;border-color:#f0a9a0;color:#a33327;}
 .push-banner.push-banner-bad .push-ignore{color:#a33327;}
+/* 33-fix: 拉取成功横幅. 绿底 = 已生效. 跟 push-banner(黄)/push-banner-bad(红) 区分 */
+.push-banner.push-banner-ok{background:#ecf7ee;border-color:#9fcfa8;color:#1e6c34;}
+.push-banner.push-banner-ok .push-ignore{color:#1e6c34;}
+/* 33-fix: MQTT 未连接横幅. 复用 push-banner 黄底, 但强调「需要操作」 */
+.push-banner.push-banner-warn{background:#fdf6ec;border-color:#f0c36d;color:#8a6116;}
+.push-banner.push-banner-warn .push-ignore{color:#8a6116;}
 /* 报文视图 */
 .frame-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;}
 .frame-toolbar select,.frame-toolbar input{padding:3px 6px;border:1px solid #ccc;font-size:13px;}
@@ -549,6 +555,19 @@ body.mq-manual .auto-only{display:none !important;}
                     <!-- Step 2e+: 平台档 485 配置只做显示, "保存配置" 按钮藏掉,
                          平台档由设备从 MQTT 平台拉取, 不允许用户手动保存 -->
                     <!-- <button id="pBtnSaveCfg" class="primary">保存配置</button> -->
+                </div>
+                <!-- 33-fix: MQTT 未连接提示. platform 档需要 MQTT 拉配置.
+                     切换 mode 前的拦截已撤掉, 这里用横条提示代替, 进入面板才看得到.
+                     「知道了」点掉本会话; 切走再回来还会再弹 (状态没变) -->
+                <div id="pMqttHint" class="push-banner push-banner-warn" hidden>
+                    <span id="pMqttHintText">MQTT 未连接, 无法拉取配置. 请到 MQTT 配置子段检查 host/port</span>
+                    <button id="pBtnMqttHintIgnore" class="push-ignore">知道了</button>
+                </div>
+                <!-- 33-fix: 拉取成功提示. waitPullDone 等到轮询起来时显示, 一次性,
+                     切到其他 tab 不再显示, 切回 platform 也不重弹 (类比 pushIgnored) -->
+                <div id="pPullOkHint" class="push-banner push-banner-ok" hidden>
+                    <span id="pPullOkHintText">已从平台拉取配置, 开始轮询</span>
+                    <button id="pBtnPullOkIgnore" class="push-ignore">知道了</button>
                 </div>
                 <div id="pPushBanner" class="push-banner" hidden>
                     <span id="pPushBannerText"></span>

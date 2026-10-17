@@ -57,6 +57,9 @@ const S = {
   pushIgnored: false,  // 用户点过横幅「忽略」。只对当前这一份生效：
                        // 平台再推一份（push_n 变）就重新弹，见 renderPushBanner()
   pushSeenN: 0,        // 被忽略的那一份的 push_n，用于判断"是不是新的一份"
+  // 33-fix: platform 档的提示横幅状态
+  platformMqttHintDismissed: false,  // 「MQTT 未连接」点过「知道了」. 切到 tabPlatform 时重置
+  platformPullOkHintDismissed: false, // 「拉取成功」点过「知道了」. 切档 / 重启会话前持久 (类似 pushIgnored)
   mock: !window.serial // 浏览器预览模式
 };
 
@@ -166,7 +169,12 @@ const el = new Proxy({
   frameFilter: $('frameFilter'), frameAuto: $('frameAuto'), frameLog: $('frameLog'),
   btnInfer: $('btnInfer'), inferTbody: $('inferTbody'),
   inferHint: $('inferHint'),
-  btnAutoDetect: $('btnAutoDetect'), detectHint: $('detectHint')
+  btnAutoDetect: $('btnAutoDetect'), detectHint: $('detectHint'),
+  // 33-fix: platform 档两个提示横幅的 DOM 引用
+  pMqttHint: $('pMqttHint'), pMqttHintText: $('pMqttHintText'),
+  pBtnMqttHintIgnore: $('pBtnMqttHintIgnore'),
+  pPullOkHint: $('pPullOkHint'), pPullOkHintText: $('pPullOkHintText'),
+  pBtnPullOkIgnore: $('pBtnPullOkIgnore')
 }, {
   // 未在表里列出的 id 走 $() 现取（如只读展示字段），
   // 取不到返回 null，由调用方判空
@@ -697,6 +705,10 @@ async function waitPullDone() {
       // 轮询起来了才是真的到位: 设备是在 save_pull 之后才 start("pull") 的
       status('平台配置已拉取并生效，开始轮询', true);
       toast('已切换到 platform（拉取配置）模式，开始轮询');
+      // 33-fix: 拉取成功, 设置横幅 pending 标记. 渲染器看到 tabPlatform 激活
+      // 且未 dismiss 就会显示 pPullOkHint
+      S.platformPullOkPending = true;
+      renderPlatformHints();
       // quiet=true: 静默填表单, 避免 ds_pull 是空(首次进 platform 还没推)
       // 时弹「尚未保存过配置」误导用户以为配置没生效
       await readCfg(true);   // 表单回填成平台那份, 否则用户看到的还是手配的
@@ -746,32 +758,20 @@ async function applyMode(mode) {
       '切换运行模式');
     if (!ok) return;
   }
-  // 25-fix: 切到 platform 前预检 MQTT 连接状态
-  //   避免"切进去没拉取到配置但用户不知道原因"的问题
-  //   设备端 (ctrl.lua) 也会做同样检查, 这里前端先一步拦截, 给出跳转入口
-  if (isPlatform(mode) && (!S.mqtt || !S.mqtt.stat || !S.mqtt.stat.connected)) {
-    const goConfig = await askConfirm(
-      'MQTT 未连接, 进入 platform 模式后无法拉取配置.\n' +
-      '建议先在「platform 模式」标签页的 MQTT 配置子段检查 host/port.\n\n' +
-      '点"确定"跳到 platform 模式的 MQTT 配置子段\n' +
-      '点"取消"继续 (会收到设备端的明确错误提示)',
-      '切到 platform 模式');
-    if (goConfig) {
-      // 跳到 tabPlatform 的 s2 (MQTT 配置) sub-tab
-      activateTab('tabPlatform');
-      const s1 = document.getElementById('sp-p-s1');
-      const s2 = document.getElementById('sp-p-s2');
-      if (s1) s1.classList.remove('active');
-      if (s2) s2.classList.add('active');
-      document.querySelectorAll('#tabPlatform .serial-tab').forEach(t => {
-        t.classList.toggle('active', t.getAttribute('data-serial') === 's2');
-      });
-      return;
-    }
-    // 选"取消" - 照常发 W:MODE=platform (设备端会返回清晰错误)
-  }
+  // 25-fix: 切到 platform 前预检 MQTT 连接状态 (弹窗拦截). 33-fix: 撤掉
+  //   弹窗, 让用户自由进. 进入后 platform 面板顶部用 pMqttHint 横条提示
+  //   MQTT 未连接, 「知道了」可点掉 (本会话内). 切走再回来还会再弹.
+  //   设备端 (ctrl.lua) 仍会报清晰错误, 拉不到配置时用户能看到
   S.modeSwitching = true;
   S.modePending = mode;          // 先记下用户所选，防止 5s 定时刷新把高亮打回旧模式
+  // 33-fix: 切到非 platform 档时清掉两个提示横幅的 dismiss/pending 状态,
+  //   下次切回 platform 重新提示. 切到 platform 档不重置, 让 waitPullDone
+  //   成功后再决定要不要显示
+  if (!isPlatform(mode)) {
+    S.platformMqttHintDismissed = false;
+    S.platformPullOkHintDismissed = false;
+    S.platformPullOkPending = false;
+  }
   renderMode();
   try {
     status('正在切换到 ' + (MODE_LABEL[mode] || mode) + ' …', true);
@@ -904,6 +904,8 @@ function renderHome() {
   el.stMqtt.textContent = mq.connected == null ? '--' : (mq.connected ? '已连接' : '未连接');
   el.stMqtt.style.color = mq.connected ? '#0a7d2c' : '#999';
   renderPushBanner(mq);
+  // 33-fix: 5s 定时刷新也刷两个 platform 档的提示横幅 (MQTT 状态变化时会重新显示)
+  renderPlatformHints();
 }
 
 // 平台重新下发配置的横幅。
@@ -947,6 +949,28 @@ function renderPushBanner(mq) {
   el.pushBannerText.textContent = txt;
   // 黄色=已生效的通知，红色=失败待处理
   box.classList.toggle('push-banner-bad', bad);
+}
+
+// 33-fix: platform 档两个提示横幅的渲染器.
+//   - pMqttHint: MQTT 未连接时显示. 用户点「知道了」隐藏, 切到 tabPlatform 时重置
+//   - pPullOkHint: 拉取成功 (waitPullDone 等到轮询起来) 时显示. 用户点「知道了」后
+//                  本会话不重弹 (类比 pushIgnored)
+// 调用点: renderHome() 末尾 (有数据就刷), readHome 5s 轮询
+function renderPlatformHints() {
+  const mqttBox = el.pMqttHint;
+  const pullOkBox = el.pPullOkHint;
+  if (!mqttBox || !pullOkBox) return;
+  const mq = (S.mqtt && S.mqtt.stat) || {};
+  const mqConnected = !!mq.connected;
+  // 1. MQTT 未连接提示: 只在 platform 档 + tabPlatform 激活 + 未连接 + 未被 dismiss
+  //    非激活 tab 上也隐藏, 避免切到 manual tab 还看到 platform 的横条
+  const tabActive = document.getElementById('tabPlatform').classList.contains('active');
+  const showMqtt = isPlatform(S.mode) && tabActive && !mqConnected && !S.platformMqttHintDismissed;
+  mqttBox.hidden = !showMqtt;
+  // 2. 拉取成功提示: 一次性. waitPullDone 触发时打开, 点了「知道了」关闭
+  //    切档重置 (见 activateTab / applyMode). 平台档才显示
+  const showPullOk = isPlatform(S.mode) && tabActive && !S.platformPullOkHintDismissed && S.platformPullOkPending;
+  pullOkBox.hidden = !showPullOk;
 }
 
 
@@ -1605,6 +1629,19 @@ if (el.btnPushIgnore) el.btnPushIgnore.onclick = () => {
   if (el.pushBanner) el.pushBanner.hidden = true;
 };
 
+// 33-fix: platform 档两个提示横幅的「知道了」按钮
+//   - MQTT 未连接: 关闭本会话内的提示, 切到 tabPlatform 时重置 (状态没变)
+//   - 拉取成功: 关闭本会话内的提示, 不重弹 (类比 pushIgnored)
+if (el.pBtnMqttHintIgnore) el.pBtnMqttHintIgnore.onclick = () => {
+  S.platformMqttHintDismissed = true;
+  if (el.pMqttHint) el.pMqttHint.hidden = true;
+};
+if (el.pBtnPullOkIgnore) el.pBtnPullOkIgnore.onclick = () => {
+  S.platformPullOkHintDismissed = true;
+  S.platformPullOkPending = false;   // 不再尝试显示
+  if (el.pPullOkHint) el.pPullOkHint.hidden = true;
+};
+
 // 485 页未保存检测：一条 input + 一条 change 的事件代理覆盖全部编辑入口
 // （波特率/从站/间隔/超时 4 个输入框 + 3 组 radio + 参数表每行 5 个可编辑单元格），
 // 比逐个控件挂监听省事，新增控件也不会漏。
@@ -1802,6 +1839,13 @@ function activateTab(tabId) {
     pane.querySelectorAll('.serial-tab').forEach(t => {
       t.classList.toggle('active', t.getAttribute('data-serial') === 's1');
     });
+  }
+  // 33-fix: 切到 tabPlatform 时重置 pMqttHint 的 dismiss 状态. 切走再回来
+  //   时 MQTT 还是未连接, 状态没变, 应该再弹一次提示. (platformPullOkHint
+  //   不重置, 类比 pushIgnored, 拉取成功是一次性提示)
+  if (tabId === 'tabPlatform') {
+    S.platformMqttHintDismissed = false;
+    renderPlatformHints();
   }
   // 切到报文页时立即拉一次
   if (tabId === 'tabSniff' && S.open && S.mode === 'sniff') readFrames();

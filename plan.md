@@ -659,6 +659,31 @@
   - **手**动**档**影**响**:**无**! pub_topics **就**是**用**户**填**的** pub_topic** (**单**个**), **显**示**和**现**在**完**全**一**样** 
   - **测**试**:**新**增** `test_32_pub_topics.js`, 11 **个**测**试**点** (**设**备** 2 **文**件** 5 **点** + **前**端** 2 **文**件** 6 **点**)** 
 - **32-fix 23/23 npm test **全**过**!
+- **33-fix 撤**掉** applyMode **切**到** platform **前**的** MQTT **拦**截**弹**窗** (**25-fix**), **改**为** platform **面**板**顶**部**两**个**横**条**:
+  - **问**题**:**用**户**反**馈**手**动**档**想**切**到** platform **档**, **如**果** MQTT **未**连**接**会**被** 25-fix **的**弹**窗**拦**住** ("**确**定**"** 跳**到** MQTT **配**置** / "**取**消**"** 继**续**), **体**验**不**好** - **用**户**想**先**进**去**看**看**但**被**打**断**
+  - **修**改**方**案**:**撤**掉**弹**窗**拦**截** + **添**加**两**个**平**台**面**板**横**条** (**复**用** push-banner **样**式**)**:
+    1. **pMqttHint** (**黄**底** push-banner-warn**)**:**MQTT **未**连**接**时**显**示** "**MQTT **未**连**接**, **无**法**拉**取**配**置**. **请**到** MQTT **配**置**子**段**检**查** host/port**"** + "**知**道**了**"**
+       - **显**示**条**件**:**isPlatform(S.mode**)** + **tabPlatform active** + **!mq.connected** + **!S.platformMqttHintDismissed**
+       - **点** "**知**道**了**"** 隐**藏** (S.platformMqttHintDismissed = true**)** 
+       - **切**到** tabPlatform **时**重**置** (S.platformMqttHintDismissed = false**)** - **状**态**没**变**, **再**次**提**示** 
+    2. **pPullOkHint** (**绿**底** push-banner-ok**)**:**拉**取**成**功**时**显**示** "**已**从**平**台**拉**取**配**置**, **开**始**轮**询**"** + "**知**道**了**"**
+       - **触**发**:**waitPullDone **等**到**轮**询**起**来**时** (**S.platformPullOkPending = true**)** 
+       - **点** "**知**道**了**"** 永**久**关**闭** (S.platformPullOkHintDismissed = true**)** - **类**比** pushIgnored** 
+       - **切**档** (非** platform**) **时**清**掉** 3 **个**状**态**字**段**, **下**次**切**回** platform **重**新**提**示**
+  - **改**动**清**单**:
+    1. `index.html` - platform **面**板**添**加** 2 **个** div (pMqttHint / pPullOkHint**)** + **新**增** 2 **个** CSS (push-banner-ok / push-banner-warn**)** 
+    2. `app.js` - **撤**掉** applyMode **中** 25-fix **的** MQTT **拦**截**弹**窗** (line 752-772**)** 
+    3. `app.js` - S **新**增** 3 **个**字**段** (**platformMqttHintDismissed** / **platformPullOkHintDismissed** / **platformPullOkPending**)** 
+    4. `app.js` - **新**增** renderPlatformHints()** **函**数** (**基**于** isPlatform + tabActive + mq.connected + dismissed **判**断**)** 
+    5. `app.js` - el **新**增** 5 **个** DOM **引**用** (pMqttHint/pMqttHintText/pBtnMqttHintIgnore/pPullOkHint/pPullOkHintText/pBtnPullOkIgnore**)** 
+    6. `app.js` - **2 **个** "**知**道**了**"** **按**钮** onclick** **绑**定** 
+    7. `app.js` - waitPullDone **成**功**时**设**置** S.platformPullOkPending = true** + **调**用** renderPlatformHints()** 
+    8. `app.js` - renderHome **末**尾**调**用** renderPlatformHints()** (**5s **定**时**刷**新**会**重**新**判**断**)** 
+    9. `app.js` - activateTab(tabPlatform**) **时**重**置** platformMqttHintDismissed** 
+    10. `app.js` - applyMode **切**到**非** platform **档**时**清**掉** 3 **个**状**态**字**段**
+  - **保**留**:**platform → manual **的** askConfirm **弹**窗** (**line 755-759**)** 不**动**! **那**是**另**一**个**拦**截** (**提**示**用**户**会**清**掉**显**示**), **不**是**这**次**的**讨**论**范**围**
+  - **测**试**:**新**增** `test_33_platform_hints.js`, 14 **个**测**试**点** (**HTML 4 + app.js 10**)** 
+- **33-fix 24/24 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**
