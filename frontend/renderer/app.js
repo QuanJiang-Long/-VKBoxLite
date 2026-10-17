@@ -1485,7 +1485,9 @@ function exportCfgAsJson(pre) {
   const c = collectCfg(pre);
   if (!c.ok) { toast('当前表单配置无效，无法导出：' + c.err); return; }
   const data = {
-    tool: 'VKBox配置工具', version: '2.0.0',
+    // im-5 6a: version 从 window.__APP_VERSION__ 读 (index.html 注入, 跟 package.json 同步)
+    //   没读到时 (老环境/异常) fallback 'unknown', 不让导不出去
+    tool: 'VKBox配置工具', version: (window.__APP_VERSION__ || 'unknown'),
     exported: new Date().toISOString(),
     serial: c.cfg,
     registers: collectRegs(pre),
@@ -1728,6 +1730,21 @@ async function importCfg(pre) {
             fmt = 'CSV';
           } else {
             throw new Error('无法识别格式');
+          }
+        }
+        // im-5 6b: JSON 导入时做版本校验 (major version 不同拒绝, minor/patch 兼容)
+        //   - 没 version 字段 (老格式): 接受, 兼容
+        //   - major 相同 (2.0.0 / 2.0.1): 接受
+        //   - major 不同 (1.x / 3.x): 拒绝 + 提示
+        //   - CSV 不校验 (CSV 没 version 字段)
+        if (fmt === 'JSON') {
+          const cur = (window.__APP_VERSION__ || 'unknown');
+          if (data.version != null) {
+            const curMajor = String(cur).split('.')[0];
+            const impMajor = String(data.version).split('.')[0];
+            if (curMajor !== impMajor) {
+              throw new Error('版本不兼容 (导入 v' + data.version + ', 当前 v' + cur + ')');
+            }
           }
         }
         const cnt = applyParsedData(pre, data);
