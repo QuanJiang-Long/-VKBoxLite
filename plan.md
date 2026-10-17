@@ -949,6 +949,17 @@
   - **修**改** 1 **个**文**件**:** app.js (setPortState + syncTabs btnExport **去**掉** isPlatform)
   - **测**试**:** test_im3_idle_guard.js **更**新** 2 **个**测**试**点** (btnExport **不**含** isPlatform **守**卫**)
 - **im-3 fix 43/43 npm test **全**过**!
+- **im-4: exportCfgAsJson **加** mqtt_status **段**:
+  - **用**户**反**馈**:** MQTT **状**态**这**些**数**据** (**连**接**状**态**/ClientID/**用**户**名**/**设**备**编**号**/**生**效**发**布**/**生**效**订**阅**/**其**他**生**效**T**o**pi**c**/**已**订**阅**/**会**话**管**理**) **没**有**在**导**出**数**据**内**。
+  - **根**因**:** exportCfgAsJson **之**前**只**导**出**配**置**表**单** (host/port/ssl/user/pass/client_id/pub_topic/sub_topic/interval_s/keep_session/auto.pass/manual_on) + serial + registers, **没**有** mqtt_status **段**。**状**态**数**据**是** R:STAT **来**的** S.mqtt.stat, **只**读**快**照**, **应**该**作**为**备**份**的**一**部**分**。
+  - **修**改**:** exportCfgAsJson **data** **对**象**加** mqtt_status **字**段**: `(S.mqtt && S.mqtt.stat) || null`。
+    - **字**段**:** connected / want_run / subscribed / client_id / user /
+      device_id / sn / sub / pub_topics / keep_session
+    - **没**拉**到** R:STAT **时** (**S.mqtt** **不**存**在**): **返** null
+  - **CSV **不**导**:** sub/keep_session/pub_topics **不**太**适**合**表**格**, **J**SO**N **优**先**
+  - **修**改** 1 **个**文**件**:** app.js (exportCfgAsJson data **加** mqtt_status)
+  - **测**试**:** test_im4_mqtt_status_export.js (5 **个**测**试**点**)
+- **im-4 44/44 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**
