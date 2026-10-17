@@ -39,6 +39,10 @@
     // ---- 平台配置拉取 ----
     pullCfg:     ()  => 'W:PULLCFG',        // 发起拉取（立即应答 started）
     pullCfgStat: ()  => 'R:PULLCFG',        // 查拉取状态
+    // 38-fix: 清空 ds_pull (仅平台档的配置). 切 manual/sniff 走人时如果
+    //   勾选 "清空平台拉取配置" 会发这条, 让设备端只擦 ds_pull (ds_poll /
+    //   mqtt 凭证都不动). 不要发空字符串 / 多次, 设备端有"正在拉取"守卫
+    clrPull:     ()  => 'W:CLRPULL',
 
     // ---- MQTT ----
     mqtt:    ()   => 'R:MQTT',

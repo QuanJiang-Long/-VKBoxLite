@@ -243,4 +243,18 @@ function M.reset_user()
     return cleared
 end
 
+-- 38-fix: 只清 ds_pull (不动 ds_poll / mqtt 凭证). 场景: 前端从 platform
+--   切 manual/sniff 时弹窗, 默认勾选 "清空平台拉取配置", 确认后发 W:CLRPULL
+--   调这个. 返回 (ok, err, wrote) - wrote 表示是否实际清掉东西 (没写过
+--   的话 wrote=false, 不报"已清空"骗用户).
+function M.clear_pull()
+    if not fskv then return false, "fskv 不可用", false end
+    local ok, v = pcall(fskv.get, K_PULL)
+    if not ok then return false, "读 ds_pull 失败: " .. tostring(v), false end
+    if v == nil or v == "" then return true, nil, false end
+    fskv.set(K_PULL, "")
+    if fskv.save then pcall(fskv.save) end
+    return true, nil, true
+end
+
 return M

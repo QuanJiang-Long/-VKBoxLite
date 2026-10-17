@@ -1008,6 +1008,10 @@ body.mq-manual .auto-only{display:none !important;}
     <div class="modal-content">
         <h3 id="cfTitle" style="margin:0 0 12px 0;font-weight:normal;">请确认</h3>
         <p id="cfMsg" style="margin:0;font-size:13px;line-height:1.7;white-space:pre-wrap;"></p>
+        <div id="cfCheckBox" style="display:none;align-items:center;gap:6px;margin-top:10px;padding:8px;background:#f5f5f5;border-radius:4px;">
+            <input type="checkbox" id="cfCheck" checked style="margin:0;">
+            <label for="cfCheck" id="cfCheckLabel" style="font-size:13px;cursor:pointer;user-select:none;"></label>
+        </div>
         <div class="modal-footer">
             <button id="cfNo">取消</button>
             <button id="cfYes">确定</button>

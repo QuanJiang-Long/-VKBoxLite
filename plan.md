@@ -790,6 +790,20 @@
   - **修**改** 2**:** auto_apply needs_restart+is_running=false **分**支**添**加** `pe.start("pull")` **兜**底**; needs_restart=false **分**支**添**加** `if not pe.is_running() then pe.start("pull") end` **兜**底**。**
   - **测**试**:**新**增** test_37_poll_slot_uses_mode.js** (**3 **个**测**试**点**)**。
 - **37-fix 31/31 npm test **全**过**!
+- **38-fix: platform 切 manual/sniff 弹窗 + W:CLRPULL**:
+  - **需**求**:**用**户**要**求**从** platform **切** manual/sniff **时**弹**窗**, **默**认**勾**选** "**清**空**平**台**拉**取**配**置**", **确**认**后**清** ds_pull**。
+  - **背**景**:**两**个**槽**隔**离**设**计**之**前**只**有**切** idle **才**清**两**个**槽**。**用**户**要**的**是**: platform **档**拉**的**配**置**只**是** "**在**平**台**档**才**有**效**", **切**走**就**作**废**。**如**果**不**清**, **切**回** platform **档**时** 34-fix **会**把** ds_pull **当** "**已**有**配**置**"** **直**接**起**轮**询**, **不**重**新**拉**, **不**符**合**用**户**预**期**。
+  - **设**备**端**:
+    - `cfgstore.clear_pull()`: **只**清** K_PULL (ds_pull)**, **不**动** K_POLL / mqtt **凭**证**。**返**回** (ok, err, wrote) - wrote **表**示**是**否**真**的**清**掉**东**西**。
+    - `cmd.lua W:CLRPULL` **新**指**令**: **调** cfgstore.clear_pull(); **拉**取**中** (iot.pulling()=true) **拒**绝**; **应**答** RET:CLRPULL=OK;cleared:platform 配置 / RET:CLRPULL=OK;cleared: (没**写**过**)。
+  - **前**端**:
+    - `Protocol.Enc.clrPull()` **新**增**。
+    - `index.html` modalConfirm **加** cfCheckBox / cfCheck / cfCheckLabel **复**选**框**。
+    - `app.js askConfirmCheck()` **新**弹**窗**函**数** (**带**复**选**框**, **返**回** {ok, checked}**)。
+    - `applyMode()`: **当**前** mode=platform **且**目**标** mode=manual/sniff **时**弹**窗** (取**消** 25-fix **之**后** 19-fix **的**单**纯**确**认**弹**窗**), **默**认**勾**选** "**清**空**平**台**拉**取**配**置** (ds_pull)"**; **确**认** + **勾**选** -> **发** W:CLRPULL **再**发** W:MODE; **确**认** + **取**消**勾**选** -> **只**发** W:MODE (ds_pull **保**留**)**。
+  - **其**它**档**切**档**不**变**: **只**有**从** platform **切**走**才**弹**; idle **切**走**不**弹** (idle **本**来**就**清**两**槽**); manual/platform/sniff **互**切**不**弹** (除**非**经**过** platform**)。
+  - **测**试**:** test_38_clrpull_on_switch.js (**8 **个**测**试**点**)。
+- **38-fix 32/32 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**

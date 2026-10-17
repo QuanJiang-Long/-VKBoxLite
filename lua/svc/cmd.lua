@@ -214,6 +214,25 @@ local function reg_cmds()
         M.reply("RET:PULLCFG=" .. jencode(iot.pull_status()))
     end)
 
+    -- 38-fix: W:CLRPULL 清空 ds_pull. 场景: 前端从 platform 切 manual/sniff
+    --   时弹窗, 默认勾选清空平台拉取配置. 设备收到后只擦 ds_pull (不动
+    --   ds_poll / mqtt_manual / mqtt auto 凭证). 留个"已清空"应答, 前端
+    --   能区分"设备端正常清掉了"和"命令丢失 / 设备忙".
+    M.reg("W:CLRPULL", function()
+        if not cfgstore then return M.reply("RET:FAIL:CLRPULL:cfgstore 不可用") end
+        -- 不能在 platform 档正在拉取中清: 拉取链路可能正在写 ds_pull
+        if iot and iot.pulling() then
+            return M.reply("RET:FAIL:CLRPULL:平台正在拉取中, 稍后重试")
+        end
+        local ok, err, wrote = cfgstore.clear_pull()
+        if not ok then return M.reply("RET:FAIL:CLRPULL:" .. tostring(err)) end
+        -- wrote=false 时 ds_pull 本来就是空, 也回 ok 不报错, 避免前端
+        -- 出现"没清成功"的误提示
+        log.info("cmd", string.format("W:CLRPULL cleared=%s", tostring(wrote)))
+        if wrote then return M.reply("RET:CLRPULL=OK;cleared:platform 配置")
+        else return M.reply("RET:CLRPULL=OK;cleared:") end
+    end)
+
     -- R:MQTT: 前端读 cfg / auto_pass / manual_on / pub / sub
     M.reg("R:MQTT", function()
         local e = mqtt_cfg.effective(device_id_str())

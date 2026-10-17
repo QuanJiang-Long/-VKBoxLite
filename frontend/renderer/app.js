@@ -245,6 +245,51 @@ function askConfirm(msg, title) {
     document.addEventListener('keydown', onKey);
   });
 }
+
+// 38-fix: 带复选框的确认弹窗. 场景: 从 platform 切 manual/sniff 时,
+//   问"是否清空平台拉取配置" (默认勾选). 返回 {ok, checked}, 都取消/确认
+//   时结构一致, 调用方按需取字段
+function askConfirmCheck(msg, title, opt) {
+  return new Promise(resolve => {
+    $('cfTitle').textContent = title || '请确认';
+    $('cfMsg').textContent = msg;
+    // 复选框块: 没传 opt 或 opt.label 隐藏
+    const box = $('cfCheckBox');
+    const lab = $('cfCheckLabel');
+    const cb = $('cfCheck');
+    if (opt && opt.label) {
+      lab.textContent = opt.label;
+      cb.checked = opt.checked !== false;   // 默认勾选
+      box.style.display = 'flex';
+    } else {
+      box.style.display = 'none';
+    }
+    $('modalConfirm').style.display = 'flex';
+    let done = false;
+    const finish = ok => {
+      if (done) return;
+      done = true;
+      $('modalConfirm').style.display = 'none';
+      box.style.display = 'none';
+      $('cfYes').onclick = null;
+      $('cfNo').onclick = null;
+      $('modalConfirm').onclick = null;
+      document.removeEventListener('keydown', onKey);
+      resolve({ ok: ok, checked: cb.checked });
+    };
+    // 复选框显示时, Enter 不能默认确认 (要按空格切勾选), 否则焦点在
+    // 确认按钮时 Enter 还是确认. 这里保持原 Enter 行为, 勾选用鼠标或
+    // Tab 到复选框按空格
+    const onKey = e => {
+      if (e.key === 'Escape') finish(false);
+      else if (e.key === 'Enter') finish(true);
+    };
+    $('cfYes').onclick = () => finish(true);
+    $('cfNo').onclick = () => finish(false);
+    $('modalConfirm').onclick = e => { if (e.target === $('modalConfirm')) finish(false); };
+    document.addEventListener('keydown', onKey);
+  });
+}
 // 添加寄存器弹窗内的错误提示。不用 alert()/toast()：
 // alert() 是原生模态框，有和 confirm() 一样的焦点问题；
 // toast 的 z-index 低于弹窗，会被遮住看不见
@@ -781,11 +826,28 @@ async function applyMode(mode) {
   // platform → manual 切档提示: 当前显示的是平台那份(ds_pull), 切过去
   // 后会清掉显示内容, 用户得自己点「读取配置」读 ds_poll 那份
   // "manual"/"platform" 是当前 mode 名; "poll"/"pollpull" 是历史别名
-  if (isManual(mode) && isPlatform(S.mode)) {
-    const ok = await askConfirm(
-      '当前显示的是平台拉取配置 (ds_pull)。切换到「手动配置」会清掉显示内容, 需重新点「读取配置」读取您的本地配置。\n确定继续？',
-      '切换运行模式');
-    if (!ok) return;
+  // 38-fix: platform 切 manual/sniff 弹窗加 "清空平台拉取配置" 复选框,
+  //   默认勾选. 切走意味着"不再用平台配置", 不清的话 ds_pull 留着, 用户
+  //   切回 platform 时会被 34-fix 当成"已有旧配置"直接起, 不重新拉,
+  //   这跟用户预期(切走就作废)不符
+  if ((isManual(mode) || mode === 'sniff') && isPlatform(S.mode)) {
+    const msg = '当前显示的是平台拉取配置 (ds_pull)。切换到「' + (MODE_LABEL[mode] || mode) +
+      '」后, 切回 platform 档时是否清空这份配置?\n\n' +
+      '• 勾选: 切档同时清空 ds_pull, 切回 platform 时重新从平台拉取\n' +
+      '• 取消勾选: 保留 ds_pull, 切回 platform 时直接用旧配置起轮询';
+    const r = await askConfirmCheck(msg, '切换运行模式',
+      { label: '清空平台拉取配置 (ds_pull)', checked: true });
+    if (!r.ok) return;
+    if (r.checked) {
+      // 38-fix: 先发 W:CLRPULL 清 ds_pull, 再发 W:MODE 切档. 即便
+      //   W:CLRPULL 失败也继续切档 (设备端会用旧 ds_pull 起轮询, 用户
+      //   可在 platform 面板点"重新拉取"补救), 弹个 toast 提示一下
+      try {
+        await sendCmd(Protocol.Enc.clrPull(), 'CLRPULL', 5000);
+      } catch (e) {
+        toast('清空 ds_pull 失败: ' + e.message + ' (切档后可能用旧配置)');
+      }
+    }
   }
   // 25-fix: 切到 platform 前预检 MQTT 连接状态 (弹窗拦截). 33-fix: 撤掉
   //   弹窗, 让用户自由进. 进入后 platform 面板顶部用 pMqttHint 横条提示
