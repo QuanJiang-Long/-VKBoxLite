@@ -174,8 +174,10 @@ const el = new Proxy({
   snStExtraTopics: $('snStExtraTopics'),
   snStSubed: $('snStSubed'),
   snStKeepSession: $('snStKeepSession'),
-  // 报文页
+  // 报文页 (sniff-3 f: panel-title 的 [刷新] 删了, btnInferClear 改绑推断结果;
+  //   总线报文子分段新加 [刷新] [清空] 按钮, id 同 frameLog 命名)
   btnFrameRefresh: $('btnFrameRefresh'), btnFrameClear: $('btnFrameClear'),
+  btnInferClear: $('btnInferClear'),
   frameFilter: $('frameFilter'), frameAuto: $('frameAuto'), frameLog: $('frameLog'),
   btnInfer: $('btnInfer'), inferTbody: $('inferTbody'),
   inferHint: $('inferHint'),
@@ -1952,9 +1954,24 @@ if (el.btnHomeMqttPassEye) el.btnHomeMqttPassEye.onclick = togglePassEye;
 // Step 2i: 删 btnMqttReset.onclick — 整**个**按**钮**已**从** HTML 移**除**(有**刷**新**了**, 按**钮**冗**余**)
 // 如**果**用**户**需**要**重**置**配**置**, 手**动**改**每**一**项** (有**填**的**就**清**空**) + 走**保**存**即**可**
 
-// 报文页
+// 报文页 (sniff-3 f: 重新分配按钮绑定)
+//   btnFrameRefresh/btnFrameClear 在总线报文子分段, 绑 frameLog
+//   btnInferClear 在 sniff嗅探 panel-title, 绑 inferTbody (推断表)
 el.btnFrameRefresh.onclick = readFrames;
 el.btnFrameClear.onclick = () => { S.frames = []; renderFrames(); renderDetected(); };
+if (el.btnInferClear) {
+  el.btnInferClear.onclick = () => {
+    // 推断表清空: inferTbody 还原到初始"点击'推断轮询表'从已监听到的报文反推"
+    if (el.inferTbody) {
+      el.inferTbody.innerHTML = '<tr><td colspan="7" style="color:#999;">点击"推断轮询表"从已监听到的报文反推</td></tr>';
+    }
+    if (el.inferHint) el.inferHint.textContent = '';
+    if (el.detectHint) el.detectHint.textContent = '';
+    // 同步清掉 S 里保存的推断结果
+    if (S.infer) S.infer = null;
+    status('已清空推断结果', true);
+  };
+}
 el.frameFilter.onchange = renderFrames;
 el.btnInfer.onclick = doInfer;
 el.btnAutoDetect.onclick = autoDetect;

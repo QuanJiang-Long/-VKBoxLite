@@ -51,14 +51,21 @@ assertEq(inferIdx > 0 && frameLogIdx > 0 && inferIdx < frameLogIdx, true,
   'sniff-3 e: 推断结果在总线报文 (frameLog) 之前 (DOM 顺序)');
 
 // 7. 总线报文工具栏前有分隔线 (margin-top + border-top, 在 frame-toolbar 之前)
-const sepIdx = sniffBody.indexOf('总线报文</div>');
+// sniff-3 f: 总线报文子分段现在用 flex (含 [刷新] [清空] 按钮), "总线报文" 后面不是直接 </div>
+//   找 ">总线报文" 避免匹配注释里的 "总线报文" 字样
+//   但 html 里 "总线报文" 在 <div> 内的换行后, 不是 ">总线报文", 所以改成
+//   找包含 "border-top:1px solid #dde2ea" 的 <div> style 开头位置
+const sepIdx = sniffBody.indexOf('border-top:1px solid #dde2ea;display:flex;');
 const toolbarIdx = sniffBody.indexOf('frame-toolbar');
-assertEq(sepIdx > 0 && toolbarIdx > 0 && sepIdx < toolbarIdx, true,
+assertEq(sepIdx > 0, true, 'sniff-3 e: 总线报文子分段含 border-top + flex');
+assertEq(toolbarIdx > 0 && sepIdx < toolbarIdx, true,
   'sniff-3 e: 总线报文子分段在 frame-toolbar 之前');
-// border-top 在 <div style="..."> 上, 往前查 300 字符
-const sepChunk = sniffBody.substring(Math.max(0, sepIdx - 300), sepIdx);
-assertEq(/border-top:\s*1px\s+solid/.test(sepChunk), true,
-  'sniff-3 e: 总线报文子分段前有 border-top 分隔线');
+// border-top 字符串本身在 sepIdx 附近 (就是 <div style="..."> 里那部分)
+//   sniff-3 f 改后, "总线报文" 在 <div style="..."> 内的换行后, sepIdx 找
+//   border-top:1px solid 字符串位置, 直接检查 sepIdx 周围含 "总线报文"
+const sepWindow = sniffBody.substring(sepIdx, sepIdx + 400);
+assertEq(/总线报文/.test(sepWindow), true,
+  'sniff-3 e: 总线报文子分段 (含 border-top + flex) 内有"总线报文"文字');
 
 // 8. 旧的独立 snInferPanel div 已删
 assertEq(/id="snInferPanel"/.test(html), false,
