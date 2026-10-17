@@ -615,8 +615,13 @@ function renderMode() {
       stEl.classList.toggle('pending', !!isPending);
     }
     // 切换进行中给卡片加禁手型，避免用户连点
-    if (c && c.classList.contains('switching') !== !!S.modeSwitching) {
-      c.classList.toggle('switching', !!S.modeSwitching);
+    // 35b-fix: mcIdle 是逃生口, 哪怕在切换中也不能灰. 否则 platform 档
+    //   等 waitPullDone 期间 idle 看起来禁用了, 用户不敢点
+    if (c) {
+      const shouldSwitch = !!S.modeSwitching && c.id !== 'mcIdle';
+      if (c.classList.contains('switching') !== shouldSwitch) {
+        c.classList.toggle('switching', shouldSwitch);
+      }
     }
   });
 
@@ -703,6 +708,10 @@ async function waitPullDone() {
     await readMode();
     const pull = (S.modeStat && S.modeStat.pull) || {};
     const polling = !!((S.modeStat || {}).poll || {}).running;
+    // 35c-fix: 用户已切走 (applyMode 让 idle 能在 waitPullDone 期间也响应),
+    //   设备模式已经不是 platform, 静默返回, 不弹"拉取失败/超时"误提示.
+    //   设备可能根本就没收到完整的 platform 流程, 提示只会让用户困惑
+    if ((S.modeStat || {}).mode !== 'platform') return false;
     // 33-fix 设备端撤掉了 MQTT 拦截, 轮询立即起来 (用 ds_pull 旧/空配置),
     //   所以 polling=true 不再代表拉取成功. 改用 pull.state === 'done' 判断
     //   (设备端 auto_apply 完成才置 'done', 此时新配置已落盘 + 已重启轮询)
@@ -759,7 +768,10 @@ async function readMode() {
 
 async function applyMode(mode) {
   // 切换进行中再点，忽略（避免连点把设备和 UI 搞乱）
-  if (S.modeSwitching) return;
+  // 35b-fix: idle 是逃生口, 哪怕在 waitPullDone 期间 (S.modeSwitching=true)
+  //   也要能切回 idle. 串口单未决不会冲突, 新发的 W:MODE=idle 会在切
+  //   platform 那条应答之后被设备处理
+  if (S.modeSwitching && mode !== 'idle') return;
   // 28-fix: 串口未连接时禁止切档. 4 个 mode-card (mcIdle/mcPoll/mcPollpull/mcSniff)
   //   都走 applyMode, 在这里统一拦截 + toast 提示
   if (!S.open) {
@@ -1755,7 +1767,10 @@ document.querySelectorAll('.mode-card').forEach(c => {
     if (m === 'idle') {
       // 不走 locked 检查, 但仍需串口开着 (进 idle 也要发 W:MODE=idle)
       if (!S.open) { toast('请先连接串口'); return; }
-      if (S.modeSwitching) return;
+      // 35b-fix: 也不等 modeSwitching. platform 档切过去后 applyMode 在
+      //   await waitPullDone (最多 55s), 这期间 S.modeSwitching=true,
+      //   35-fix 漏了这个守卫, idle 还是被卡住. 串口单未决, 新发的
+      //   W:MODE=idle 会被设备在切 platform 那条应答之后处理, 不会有竞争
       if (m === S.mode && !S.modePending) { renderMode(); return; }
       const label = MODE_LABEL[m] || m;
       const curLabel = MODE_LABEL[S.mode] || S.mode;

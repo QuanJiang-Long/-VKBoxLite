@@ -752,6 +752,29 @@
     3. `lua/iot/iot.lua` S.reject_reason **文**案**改**为** "或**补**用**户**密**码**/凭**证**密**码**"
   - **测**试**:**新**增** `test_35_idle_always_clickable.js`, 3 **个**分**类**通**过**
 - **35-fix 28/28 npm test **全**过**!
+- **35b-fix: 35-fix **漏**了** **`S.modeSwitching` **守**卫**:
+  - **问**题**:**用**户**测**试** 35-fix **后**报**告**:**从** MQTT **未**连**接**切**到** platform **档**后** idle **卡**片**还**是** "**禁**用**了**"**。**
+  - **根**因**:** `app.js` click handler **中** idle **分**支**的** `S.modeSwitching` **检**查**没**移**除**。**切** platform **时** `applyMode` **会** `await waitPullDone()` (**最**多** 55s**), **这**期**间** `S.modeSwitching=true`, **用**户**点** idle **就**被** `if (S.modeSwitching) return;` **挡**住**了**。**35-fix **只**解**决**了** `.locked` class **的**问**题**, **没**解**决** modeSwitching **的**问**题**。**
+  - **修**改**:** idle **分**支**删**除** `if (S.modeSwitching) return;` (**单**未**决**串**口**不**会**有**竞**争**, **新**发**的** `W:MODE=idle` **会**在**切** platform **那**条**应**答**之**后**被**处**理**)**。
+  - **测**试**:**新**增** `test_35b_idle_during_waitpull.js`。
+- **35b-fix 29/29 npm test **全**过**!
+- **35b-fix v2: 35b-fix **也**漏**了** applyMode **内**部**的** S.modeSwitching **守**卫**:
+  - **问**题**:**用**户**测**试** 35b-fix **后**报**告**:**现**在**可**以**点**了** (**35b-fix **起**作**用**了**), **但**点**击**后**还**是**没**切**回** idle**。**
+  - **根**因**:** click handler idle **分**支**的** S.modeSwitching **检**查**移**除**了** (**35b-fix **做**了**), **但** applyMode **函**数**本**身**的** `if (S.modeSwitching) return;` **守**卫**还**在**!** 35b-fix **只**改**了** click handler, **没**改** applyMode**。**所**以** applyMode('idle') **在** line 762 **被**挡**住**了**。**
+  - **修**改**:** applyMode **中**的** S.modeSwitching **守**卫**改**为** `if (S.modeSwitching && mode !== 'idle') return;`, **让** idle **档**也**绕**过**这**层**守**卫**。**串**口**单**未**决**不**会**有**竞**争**。**
+  - **测**试**:** `test_35b_idle_during_waitpull.js` **加**上**了** applyMode **守**卫**的**检**查**。**29/29 npm test **全**过**!
+- **35b-fix v3: renderMode **中** .switching class **也**会**给** mcIdle **加** (**op**acity**:.75 **变**灰**)**, **35b-fix **漏**了**:
+  - **问**题**:**用**户**测**试** 35b-fix v2 **后**报**告**:**在**切**换**期**间**, idle **还**是**显**示**灰**的**。**
+  - **根**因**:** `app.js` renderMode **中** (`function renderMode`, line 617-620`)`:**当** `S.modeSwitching=true` **时**, **给**所**有** 4 **个** mode-card **加** `.switching` class**, **CSS** ` ` `.mode-card.switching { cursor: progress; opacity: .75; }` ` **让**卡**片**半**透**明**看**起**来**灰**。**35b-fix **只**挡**了** JS **层**的** modeSwitching, **没**有**挡** .switching class **的**视**觉**效**果**。**
+  - **修**改**:** renderMode **的** .switching class **加**载**条**件**加**上** `c.id !== 'mcIdle'`, **让** mcIdle **不**被**视**觉**灰**。**
+  - **测**试**:** test_35b_idle_during_waitpull.js **添**加** renderMode **检**查**。**29/29 npm test **全**过**!
+- **35c-fix: waitPullDone **用**户**切**走**后**静**默**退**出**:
+  - **问**题**:**用**户**测**试** 35b-fix v3 **后**报**告**:** MQTT **已**连**接**, **点** platform **立**刻**点** idle**, **设**备**已**经**切**到** idle**, **但**过**会**软**件**还**弹** "**拉**取**失**败**:**平**台**未**下**发**配**置**(**超**时**)"**, **因**为** applyMode('platform') **的** waitPullDone **还**在**跑** 35s **超**时**。**
+  - **用**户**建**议**:**回**退** 35b-fix**, **回**到** 35-fix **之**前**的**设**计** (**进** platform **后**等**平**台**拉**取**, idle **切**换**不**能**点**切**换**)。**设**备**不**留**冗**余**代**码**。**
+  - **我**建**议** B **方**案**(**保**留** 35b-fix **逃**生**口** + **改** waitPullDone**):** waitPullDone **循**环**里**检**查** mode**, **如**果** mode **不**是** platform **了** (**用**户**已**切**走**), **静**默**返**回**, **不**弹** "**拉**取**失**败**"**。**保**留**逃**生**口**, **不**损**失** 35b-fix **带**来**的**能**力**。**
+  - **用**户**选** B**。
+  - **修**改**:** `app.js` waitPullDone **循**环**开**头**加** `if ((S.modeStat || {}).mode !== 'platform') return false;` (**静**默**返**回**, **不**调** status/toast**)**。
+  - **测**试**:** test_35b_idle_during_waitpull.js **加**上** waitPullDone **的**检**查**。**29/29 npm test **全**过**!**
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**
