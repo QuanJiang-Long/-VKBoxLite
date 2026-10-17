@@ -66,14 +66,19 @@ assertEq(/function\s+applyFrameSection\s*\(/.test(appJs), true,
 assertEq(/el\.frameSectionOn\.addEventListener\(['"]change['"]/.test(appJs), true,
   'sniff-3 g: app.js 绑 frameSectionOn change 事件');
 
-// 7. applyFrameSection 体内: 切换 frameButtons + frameBody hidden
+// 7. applyFrameSection 体内: 切换 frameButtons + frameBody 显隐
+// sniff-3 h fix: 不能用 hidden 属性, 因为 frameButtons 有内联 display:flex
+//   优先级高于 [hidden]{display:none}. 改用 style.display 直接设
 const afStart = appJs.indexOf('function applyFrameSection');
 const afEnd = appJs.indexOf('\n}', afStart + 30);
 const afBody = appJs.substring(afStart, afEnd + 5);
-assertEq(/el\.frameButtons\.hidden\s*=\s*!on/.test(afBody), true,
-  'sniff-3 g: applyFrameSection 切换 frameButtons hidden (关=hidden)');
-assertEq(/el\.frameBody\.hidden\s*=\s*!on/.test(afBody), true,
-  'sniff-3 g: applyFrameSection 切换 frameBody hidden (关=hidden)');
+assertEq(/el\.frameButtons\.style\.display\s*=\s*disp/.test(afBody), true,
+  'sniff-3 h fix: applyFrameSection 切 frameButtons.style.display (不能用 hidden 属性)');
+assertEq(/el\.frameBody\.style\.display\s*=\s*disp/.test(afBody), true,
+  'sniff-3 h fix: applyFrameSection 切 frameBody.style.display (不能用 hidden 属性)');
+// 不能用 hidden 属性 (会被内联 display:flex 覆盖)
+assertEq(/el\.frameButtons\.hidden\s*=\s*!on/.test(afBody), false,
+  'sniff-3 h fix: applyFrameSection 不再用 frameButtons.hidden (内联 display 覆盖)');
 
 // 8. 初始化时调 applyFrameSection
 assertEq(/applyFrameSection\(!!el\.frameSectionOn\.checked\)/.test(appJs), true,

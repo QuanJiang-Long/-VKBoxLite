@@ -1976,13 +1976,17 @@ if (el.btnInferClear) {
     status('已清空推断结果', true);
   };
 }
-// sniff-3 g: 总线报文子分段的滑动开关, 默认 unchecked
+// sniff-3 g/h: 总线报文子分段的滑动开关, 默认 unchecked
 //   - 关: 隐藏 frameButtons ([刷新][清空]) + frameBody (类型筛选+frame-log)
 //   - 开: 显示
 // 初始化时按 checked 状态设一次, 之后 onchange 切换
+// 注意: 不能用 el.frameButtons.hidden = !on, 因为 frameButtons 元素上有
+//   style="display:flex" 内联样式, 优先级高于 [hidden]{display:none} 属性选择器,
+//   开了 hidden 也被内联 display:flex 覆盖回来, 实际不隐藏. 改用 style.display 直接设
 function applyFrameSection(on) {
-  if (el.frameButtons) el.frameButtons.hidden = !on;
-  if (el.frameBody) el.frameBody.hidden = !on;
+  const disp = on ? '' : 'none';
+  if (el.frameButtons) el.frameButtons.style.display = disp;
+  if (el.frameBody) el.frameBody.style.display = disp;
 }
 if (el.frameSectionOn) {
   applyFrameSection(!!el.frameSectionOn.checked);
