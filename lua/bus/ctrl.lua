@@ -45,14 +45,16 @@ function M.switch_mode(mode, from_boot)
         return false, "BUSY: 正在识别通讯参数, 完成后自动开始旁听(或先 W:MODE=idle 放弃)"
     end
     if mode == "manual" or mode == "platform" then
-        -- 25-fix: platform 必须 MQTT 已连接才能进入 (前端手动切换路径)
-        --   避免"切进去没拉取到配置但用户不知道原因"的问题
-        --   开机路径 (from_boot=true) 跳过, iot.start 跑完连上后会自动拉取
-        if mode == "platform" and not from_boot then
-            if not (iot and iot.is_connected and iot.is_connected()) then
-                return false, "FAIL platform: MQTT 未连接, 请先在 MQTT 配置页确认 host/port (看状态卡片'连接状态'), 等连上后再切"
-            end
-        end
+        -- 33-fix: 撤掉 25-fix 的 platform MQTT 拦截. 让用户自由进 platform 档.
+        --   之前 25-fix 要求 MQTT 已连接才能切, 体验不好 (用户想先进去看
+        --   看但被弹窗打断). 现在改为: 不管 MQTT 连没连都让进.
+        --   - 如果 ds_pull 有旧配置: poll.start("pull") 用旧配置起轮询
+        --   - 如果 ds_pull 是空的: poll.start("pull") 也起, 但 for 循环空跑
+        --     (空配置), 此时不触发现有活动. 看门狗停滞是误报, 后续再讨论
+        --   - iot.pull_start() 会 kick MQTT 重连, 连上后自动拉新配置,
+        --     拉到了 auto_apply 调 poll.start("pull") 重启轮询
+        --   - 即使 host/port 没配, 也让用户进来 (前端的 pMqttHint 黄条会提示)
+        -- 开机路径 (from_boot=true) 本来就没这个检查, 不受影响
         if mon.is_running() then
             mon.stop()
             switch_delay()
@@ -75,8 +77,11 @@ function M.switch_mode(mode, from_boot)
             -- 跑旧配置, 新配置到了由 auto_apply 立即生效
             local ok, err = iot and iot.pull_start()
             if not ok then
-                poll.stop()
-                return false, "FAIL pull: " .. tostring(err)
+                -- 33-fix: 撤掉 25-fix 的 poll.stop() 回滚. 让用户进 platform 档,
+                --   拉取失败时 poll 仍用 ds_pull 跑 (空/旧), 前端黄条会提示
+                --   MQTT 未连接. MQTT 连上后 waitPullDone / auto_apply 会自动重拉
+                log.warn("ctrl", "platform entered but pull_start failed: " .. tostring(err))
+                return true, "OK platform (拉取未启动: " .. tostring(err) .. ")"
             end
             return true, "OK platform, pulling"
         end
