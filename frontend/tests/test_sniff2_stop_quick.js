@@ -80,4 +80,17 @@ const loopBody = monLua.substring(loopFn, monLua.indexOf('\nend', loopFn + 500))
 assertEq(/sniff_wait\(DETECT_RETRY_MS\)/.test(loopBody), true,
   'sniff-2: detect_loop 用 sniff_wait 替代 sys.wait (retry 间隔)');
 
-console.log('PASS: sniff-2 mon.stop 立刻停 auto_detect (forceStop + uart.close + sniff_wait)');
+// 7. 前端: applyMode 切 sniff 后, pollDetect 返 null 时检查 mode, 用户已
+//   切走 (mode != sniff) 就不弹"识别未完成"toast
+const appJs2 = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
+const applyStart2 = appJs2.indexOf('async function applyMode');
+// 找 pollDetect 那一段
+const pollDetectStart = appJs2.indexOf('const d = await pollDetect(25)');
+if (pollDetectStart > 0) {
+  // 取往后 30 行
+  const chunk = appJs2.substring(pollDetectStart, pollDetectStart + 800);
+  assertEq(/S\.mode\s*===\s*['"]sniff['"]/.test(chunk), true,
+    'sniff-2: applyMode 弹"识别未完成"toast 前 check mode 是不是 sniff (用户已切走不弹)');
+}
+
+console.log('PASS: sniff-2 mon.stop 立刻停 auto_detect (forceStop + uart.close + sniff_wait) + applyMode 切走不弹误提示');

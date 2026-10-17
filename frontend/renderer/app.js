@@ -881,8 +881,14 @@ async function applyMode(mode) {
         status('识别成功，开始旁听：' + serialDesc(d), true);
         toast('已识别 ' + serialDesc(d) + '，开始旁听');
       } else {
-        status('识别未完成，设备会在后台每 3 秒重试直到认出来', false);
-        toast('识别未完成，设备会自动重试；总线无流量时可检查 AB 线/从机');
+        // sniff-2 fix: 用户可能切走了 (35c-fix waitPullDone 那种场景),
+        //   pollDetect 会因为 R:AUTODETECT 返 RET:FAIL:not in sniff mode
+        //   立即返 null, 此时再弹"识别未完成"没意义 —— 设备都 idle 了
+        //   谁还看这条? 在弹 toast 前再 check 一次 mode, 不在 sniff 就静默
+        if (S.mode === 'sniff' || S.modePending === 'sniff') {
+          status('识别未完成，设备会在后台每 3 秒重试直到认出来', false);
+          toast('识别未完成，设备会自动重试；总线无流量时可检查 AB 线/从机');
+        }
       }
       readMode();
       return;
