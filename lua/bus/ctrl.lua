@@ -68,7 +68,27 @@ function M.switch_mode(mode, from_boot)
         --    两个模式一起废
         local slot = SLOT[mode]
         if iot then pcall(iot.set_manual, mode == "manual") end
-        if not poll.start(slot) then return false, "FAIL poll start" end
+        -- 34-fix: 模式对应的槽空着, 就不起轮询. 不起的好处:
+        --   1) for 循环不会空跑 (空 regs 没活可干, 浪费串口/CPU)
+        --   2) 看门狗不再被 "poll 起来了但 regs=0" 误判为"停滞"
+        --   3) 用户界面更清晰: 看不到假的"轮询中"状态
+        -- 起来后补路径:
+        --   - manual: 用户在表单添寄存器表后 W:CFG 会重启 poll (见 cmd.lua W:CFG)
+        --   - platform: iot.pull_start 拉到平台配置后 auto_apply 会启动 poll
+        --             (见 iot.lua auto_apply)
+        local have_cfg = true
+        if mode == "manual" then
+            have_cfg = cfgstore and cfgstore.has_poll_cfg and cfgstore.has_poll_cfg()
+        elseif mode == "platform" then
+            have_cfg = cfgstore and cfgstore.has_pull_cfg and cfgstore.has_pull_cfg()
+        end
+        if have_cfg then
+            if not poll.start(slot) then return false, "FAIL poll start" end
+        else
+            log.info("ctrl", string.format(
+                "%s 档: %s 槽空, 暂不起轮询, 等配置就位后由 W:CFG / auto_apply 补起",
+                mode, slot))
+        end
         if mode == "platform" then
             -- 进拉取档一律向平台报到(hello)并重新拉一次, 不再看 ds_pull
             -- 拉没拉过。之前只在 pull_src()=="default" 时才拉: 拿过一次

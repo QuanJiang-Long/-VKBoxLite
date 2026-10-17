@@ -143,11 +143,18 @@ local function reg_cmds()
         if not t then return M.reply("RET:FAIL:CFG:bad json") end
         local n, err = cfgstore.normalize_poll(t)
         if not n then return M.reply("RET:FAIL:CFG:" .. tostring(err)) end
-        local slot = (ctrl.get_mode() == "platform") and SLOT_PULL or SLOT_POLL
+        local cur_mode = ctrl.get_mode()
+        local slot = (cur_mode == "platform") and SLOT_PULL or SLOT_POLL
         local ok, serr
         if slot == SLOT_PULL then ok, serr = cfgstore.save_pull(t)
         else ok, serr = cfgstore.save_poll(t) end
         if not ok then return M.reply("RET:FAIL:CFG:" .. tostring(serr)) end
+        -- 34-fix: 进入 polling 档 (manual/platform) 时, 如果 poll 因为空配置
+        --   没起来 (34-fix 的副作用, 之前一定起来), 现在 W:CFG 写完要把
+        --   poll 启起来, 否则用户添了表保存后什么都看不到
+        -- idle/sniff 档: poll 本来就不该起, 即便 get_mode() 算出 SLOT_POLL
+        --   也不在这两档起 (前端不会在这两档发 W:CFG, 这层防御是兜底)
+        local in_poll_mode = cur_mode == "manual" or cur_mode == "platform"
         if poll.needs_restart(n) then
             if poll.is_running() then
                 poll.stop()
@@ -156,9 +163,17 @@ local function reg_cmds()
                 poll.start(slot)
             else
                 poll.apply_cfg(n)
+                if in_poll_mode then poll.start(slot) end
             end
         else
             poll.apply_cfg(n)
+            if in_poll_mode and not poll.is_running() then
+                -- 34-fix: needs_restart 不成立但 poll 没起来 (例如:
+                --   manual 档进入时空 ds_poll → 34-fix 不起 → 用户添
+                --   寄存器表但 baud/slave 没动 → needs_restart=false →
+                --   之前没人调 poll.start). 补起
+                poll.start(slot)
+            end
         end
         if iot and iot.reply_config then pcall(iot.reply_config) end
         M.reply("RET:CFG=OK")

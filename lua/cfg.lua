@@ -189,6 +189,24 @@ function M.pull_src()
     return "fskv"
 end
 
+-- 34-fix: 槽里是否真有可轮询的配置。
+--   仅 src=="fskv" 还不够, 万一上层把空配置(regs={})写进去就骗过这一道。
+--   用 #regs>0 才算"有东西可采"; 串口参数(baud/slave/...)总是有默认值的,
+--   不是判断依据, 真正决定"轮询一跑就能出活"的是寄存器表
+--   用途: ctrl.switch_mode 看到这个为 false 就跳过 poll.start,
+--   省掉"空配置下 for 循环空跑 + 喂狗误报"那一串副作用
+function M.has_poll_cfg()
+    if M.poll_src() ~= "fskv" then return false end
+    local c = M.load_poll()
+    return c and #(c.regs or {}) > 0
+end
+
+function M.has_pull_cfg()
+    if M.pull_src() ~= "fskv" then return false end
+    local c = M.load_pull()
+    return c and #(c.regs or {}) > 0
+end
+
 -- 切回 idle 时的 485 复位: 擦掉用户改过的痕迹, 回到"从没存过配置"的状态。
 -- 返回真正清掉的槽名(没写过的槽不出现), 由调用方拼进 W:MODE 应答给前端看。
 --

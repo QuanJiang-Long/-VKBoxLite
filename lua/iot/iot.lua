@@ -1437,9 +1437,13 @@ local function pull_step()
             -- 用户要求：拉取成功即自动保存，不再等前端「保存配置」确认。
             -- 落盘失败（配置不合法/存不下）不当成功：平台会继续重推，
             -- 而设备留着的还是旧配置，此时报 fail 比假装成功好排查
+            -- 34-fix: 区分 "拉取失败" (网络/超时) 和 "拉到了但应用失败"
+            --   (配置不合法/存不下). 后者单独给 apply_fail 状态, 前端可
+            --   据此给用户更精确的提示 (用户卡在 "等下发" 时能知道是
+            --   平台配置有问题, 不是网络)
             local aok, aerr = auto_apply(r)
             if not aok then
-                return pull_finish("fail", "自动保存失败: " .. tostring(aerr))
+                return pull_finish("apply_fail", "拉取成功但配置不适用: " .. tostring(aerr))
             end
             -- 保存已生效 = 这套配置被现场认可，此刻回执 U6，平台据此停止重推
             pcall(reply_config)

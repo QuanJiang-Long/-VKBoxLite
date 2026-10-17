@@ -729,6 +729,14 @@ async function waitPullDone() {
       toast('拉取失败：' + (pull.msg || '未知原因') + '，模式已退回，可重试');
       return false;
     }
+    // 34-fix: 拉取到了但应用失败 (auto_apply 失败: 配置不合法/存不下)
+    //   单独区分 apply_fail 和 fail: 前者说明 MQTT 是通的, 是平台推的配置
+    //   本身有问题; 后者是网络/超时. 给用户更精确的提示
+    if (pull.state === 'apply_fail') {
+      status('拉取到配置但应用失败：' + (pull.msg || '未知原因'), false);
+      toast('平台配置不适用：' + (pull.msg || '未知原因') + '，轮询未启动，可联系平台管理员修正');
+      return false;
+    }
     await sleep(1000);
   }
   status('拉取超时：平台未在 55 秒内下发配置', false);
