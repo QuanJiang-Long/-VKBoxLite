@@ -10,6 +10,13 @@ local iot = util.try("iot/iot")
 
 local M = {}
 
+-- 34-fix: 当前模式. 之前 get_mode() 全靠 poll.is_running() / mon.is_running() 推导
+--   (manual=轮询在跑+poll 槽 / platform=轮询在跑+pull 槽 / sniff=mon 在跑 /
+--   idle=都没在跑). 34-fix 改了 poll: 槽空时不起轮询, "槽空=platform 档但
+--   poll 没起" 这种状态下 get_mode 会误报 idle. 显式记一下最稳.
+-- 启动默认 idle (没经过 switch_mode 时), 开机 boot 路径会立刻覆盖
+local S = { cur = "idle" }
+
 local SWITCH_DELAY_MS = 50
 -- 运行模式 -> poll 配置槽(manual=手配 / platform=平台拉取)。MQTT 手动档跟着反着走:
 -- 手动配置用手动档, 拉取配置必须用自动档(hello 应答走 config/get, 手动档不订)
@@ -101,8 +108,10 @@ function M.switch_mode(mode, from_boot)
                 --   拉取失败时 poll 仍用 ds_pull 跑 (空/旧), 前端黄条会提示
                 --   MQTT 未连接. MQTT 连上后 waitPullDone / auto_apply 会自动重拉
                 log.warn("ctrl", "platform entered but pull_start failed: " .. tostring(err))
+                S.cur = "platform"  -- 34-fix: 即便 pull_start 失败, 档位也切了
                 return true, "OK platform (拉取未启动: " .. tostring(err) .. ")"
             end
+            S.cur = "platform"  -- 34-fix: 记下当前 mode
             return true, "OK platform, pulling"
         end
         -- 手动档也向平台报到(hello)。平台侧不预知这台设备的具体配置, 靠
@@ -111,6 +120,7 @@ function M.switch_mode(mode, from_boot)
         -- 主职是采用户配的寄存器表, 平台那头看不到不影响采集。真没发出去
         -- 时 task_main 连上后会补发(见 iot.lua 的 hello on connect 分支)
         if iot then pcall(iot.hello) end
+        S.cur = "manual"  -- 34-fix: 记下当前 mode
         return true, "OK manual started"
 
     elseif mode == "sniff" then
@@ -128,6 +138,7 @@ function M.switch_mode(mode, from_boot)
             -- 看不到它上线。失败不回滚: 旁听才是 sniff 的主职, 平台那头
             -- 连不上不该让用户连旁听都用不了
             if iot then pcall(iot.pull_start) end
+            S.cur = "sniff"  -- 34-fix: 记下当前 mode
             return true, "OK sniff started, detecting"
         end
         return false, "FAIL sniff start"
@@ -136,6 +147,7 @@ function M.switch_mode(mode, from_boot)
         if poll.is_running() then poll.stop() end
         if mon.is_running() then mon.stop() end
         local cleared = M.reset_user_cfg()
+        S.cur = "idle"  -- 34-fix: 记下当前 mode
         -- 第三个返回值是给 W:MODE 拼应答的(见 cmd.lua 的 cleared: 那段),
         -- msg 本身保持原样, 别把清单塞进去 —— switch_mode 的返回值有别的调用方
         return true, "OK idle (bus released)", cleared
@@ -170,12 +182,11 @@ end
 
 -- 前端据此高亮对应的卡。platform 要单列一张卡, 不能和 manual 混:
 -- 两者跑的是两套配置(手配 / 平台拉), 混在一起用户看不出当前在采哪份
+-- 34-fix: 优先用 S.cur (switch_mode 记下的), 兜底用 poll/mon 推导
+--   S.cur 必中; 兜底只在 S.cur 没更新过的极端路径才需要 (例如设备启动后
+--   switch_mode 还没被调用过, 此时 S.cur="idle" 也是对的)
 function M.get_mode()
-    if poll.is_running() then
-        return poll.cur_slot() == "pull" and "platform" or "manual"
-    end
-    if mon.is_running() then return "sniff" end
-    return "idle"
+    return S.cur
 end
 
 function M.is_busy()

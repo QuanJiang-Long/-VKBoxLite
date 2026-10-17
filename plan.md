@@ -720,6 +720,29 @@
     3. **问**题** 3 (**手**动**档**切**到** platform**, ds_pull **空**):**正**确** (**不**起**轮**询**, **等**拉**取**)**; **严**格**隔**离** ds_poll / ds_pull **不**混**用** 
   - **测**试**:**新**增** `test_34_empty_poll.js`, 5 **个**分**类**通**过** 
 - **34-fix 26/26 npm test **全**过**!
+- **34b-fix: `ctrl.get_mode()` **改**用** S.cur **显**式**记**录** mode** (不**再**靠** poll/mon **推**导**)**:
+  - **问**题**:**用**户**测**试** 34-fix **时**反**馈**:**从** idle **切**到** platform **后**软**件**没**有**显**示**进**档**! **设**备**日**志**显**示** `W:MODE=platform` **被**接**受** (**RET:MODE=OK**), **且** **iot.pull_start() **被**调**用**了** (**pull.state="connecting"**), **但** R:MODE **还**在**显**示** `mode:"idle"`**。
+  - **根**因**:** `lua/bus/ctrl.lua` **的** `M.get_mode()` **原**来**是**这**样**的**:
+    ```lua
+    function M.get_mode()
+        if poll.is_running() then
+            return poll.cur_slot() == "pull" and "platform" or "manual"
+        end
+        if mon.is_running() then return "sniff" end
+        return "idle"
+    end
+    ```
+    **全**靠** poll.is_running() / mon.is_running() **推**导**。**34-fix **让** poll **在**槽**空**时**不**起**, **此**时** poll.is_running() = false → **返**回** "idle"**。**但**设**备**实**际**已**经**是** platform **档**了** (iot.pull_start 已**调**用**)。
+  - **修**改**方**案**:**显**式**记**录**当**前** mode**:
+    1. `ctrl.lua` **加** `local S = { cur = "idle" }`
+    2. `switch_mode` **4 **个**成**功**返**回**点**都**设** `S.cur = mode`:
+       - manual **档** **→** `S.cur = "manual"`
+       - platform **档** **→** `S.cur = "platform"` (**即**便** pull_start **失**败**也**设**)
+       - sniff **档** **→** `S.cur = "sniff"`
+       - idle **档** **→** `S.cur = "idle"`
+    3. `M.get_mode()` **改**为** `return S.cur`** (**不**再**推**导**)
+  - **测**试**:**新**增** `test_34b_mode_tracking.js`, 4 **个**分**类**通**过**
+- **34b-fix 27/27 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**
