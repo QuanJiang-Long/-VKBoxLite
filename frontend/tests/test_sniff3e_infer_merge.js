@@ -55,16 +55,22 @@ assertEq(btnInferIdx2 > 0 && frameLogIdx > 0 && btnInferIdx2 < frameLogIdx, true
 
 // 7. 总线报文工具栏前有分隔线 (margin-top + border-top, 在 frame-toolbar 之前)
 // sniff-3 f/g: 总线报文子分段用 flex 含 [刷新] [清空] + 滑动开关, "总线报文" 后面
-//   不是直接 </div>. 找 border-top:1px solid 字符串位置 (可能多种 flex 组合)
-const sepIdx = sniffBody.indexOf('border-top:1px solid #dde2ea');
+//   不是直接 </div>. sniff-3 h 加了第 2 条 border-top (推断结果上方), 找总线报文那条
+//   用 "总线报文" 文字位置作为锚点, 往前找最近的 border-top
+const txIdx2 = sniffBody.indexOf('总线报文');  // 第一次出现就是标题 (在 sniff-3 h 注释之前或之后)
+const frameBtnsIdx = sniffBody.indexOf('id="frameButtons"');
+const beforeFrame = sniffBody.substring(Math.max(0, frameBtnsIdx - 600), frameBtnsIdx);
+const sepFrameIdx = beforeFrame.lastIndexOf('border-top:1px solid #dde2ea');
 const toolbarRealIdx = sniffBody.indexOf('<div class="frame-toolbar">');
-assertEq(sepIdx > 0, true, 'sniff-3 e: 总线报文子分段含 border-top');
-assertEq(toolbarRealIdx > 0 && sepIdx < toolbarRealIdx, true,
-  'sniff-3 e: 总线报文子分段 (含 border-top) 在 frame-toolbar 之前');
-// border-top 字符串本身在 sepIdx 附近 (就是 <div style="..."> 里那部分)
-const sepWindow = sniffBody.substring(sepIdx, sepIdx + 500);
-assertEq(/总线报文/.test(sepWindow), true,
-  'sniff-3 e: 总线报文子分段 (含 border-top) 内有"总线报文"文字');
+assertEq(txIdx2 > 0 && sepFrameIdx > 0 && toolbarRealIdx > 0, true,
+  'sniff-3 e: 总线报文文字 + 总线报文 border-top + frame-toolbar 都存在');
+assertEq(frameBtnsIdx > 0 && sepFrameIdx < frameBtnsIdx && frameBtnsIdx < toolbarRealIdx, true,
+  'sniff-3 e: 总线报文 border-top 在 frameButtons 之前, frameButtons 在 frame-toolbar 之前 (DOM 顺序)');
+// 总线报文子分段 (含 border-top) 内有"总线报文"文字
+//   "总线报文" 文字在 frameButtons 之前 (标题行 div 内, frameButtons 之前)
+const sepFrameWindow = sniffBody.substring(Math.max(0, frameBtnsIdx - 200), frameBtnsIdx);
+assertEq(/总线报文/.test(sepFrameWindow), true,
+  'sniff-3 e: 总线报文按钮容器附近 (frameButtons 之前 200 字符) 有"总线报文"文字');
 
 // 8. 旧的独立 snInferPanel div 已删
 assertEq(/id="snInferPanel"/.test(html), false,
