@@ -907,6 +907,21 @@
   - **修**改** 1 **个**文**件**:** app.js (renderDetected **体**内**)
   - **测**试**:** test_sniff3j_no_fallback_disp.js (4 **个**测**试**点**)
 - **sniff-3 j 41/41 npm test **全**过**!
+- **im-2: **导**入**/**导**出**两**点**调**整**:
+  - **1. CSV **加** server **列**:
+    - `cfg.js` collectCfg **收**集** `server: el.fUrl.value.trim()` (**配**置**服**务**器**url**, **来**自**首**页** fUrl **只**读**显**示**)
+    - `app.js` CSV_COLS.serial **加** `['服务器地址', 'server']` **列**
+    - JSON **导**出**自**动**有** (**因**为** `serial: c.cfg` **直**接**带**过**去**)
+    - applyParsedData **导**入**时**也**支**持** `c.server` → `el.fUrl.value` (**已**有**)
+  - **2. sniff **档**导**出**开**启** + **导**入**禁**用**:
+    - `exportCfg` **特**判** sniff **档**:** pre='m' (走 manual 档) + toast "sniff 档无表单, 导出当前手动档配置"
+    - `importCfg` **特**判** sniff **档**:** toast "sniff 档无表单可导入, 请切到手动档再导入" + return
+    - `setPortState` **的** btnImport **守**卫**加** S.mode === 'sniff'
+    - `syncTabs` **的** btnImport **守**卫**加** mode === 'sniff'
+    - **sniff **档** btnImport **总**是** disabled, title **提**示** "sniff 档无表单可导入, 请切到手动档"
+  - **修**改** 3 **个**文**件**:** cfg.js (collectCfg server) + app.js (CSV_COLS + exportCfg/importCfg + 2 **个**守**卫**)
+  - **测**试**:** test_im2_export_csv_sniff.js (6 **个**测**试**点**)
+- **im-2 42/42 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**

@@ -517,11 +517,14 @@ function setPortState(open, path) {
   ].forEach(b => { if (b) b.disabled = !open; });
   // btnImport 的 platform 档守卫要在 setPortState 之后跑, 否则会被覆盖
   // (syncTabs 现在是 mode 切换时调, 不是 port 切换时调, 所以这里手动补一下)
+  // im-2: sniff 档也禁用导入 (sniff 档无表单可填, 导入会丢数据)
   if (el.btnImport) {
-    const blocked = !open || isPlatform(S.mode);
+    const blocked = !open || isPlatform(S.mode) || S.mode === 'sniff';
     el.btnImport.disabled = blocked;
     el.btnImport.title = !open ? '请先连接串口' :
-      isPlatform(S.mode) ? '平台档配置从 MQTT 平台拉取，不能导入' : '导入配置文件 (.json / .csv)';
+      isPlatform(S.mode) ? '平台档配置从 MQTT 平台拉取，不能导入' :
+      S.mode === 'sniff' ? 'sniff 档无表单可导入, 请切到手动档' :
+      '导入配置文件 (.json / .csv)';
   }
   // 29-fix: 4 个 mode-card (mcIdle/mcPoll/mcPollpull/mcSniff) 变灰
   //   28-fix 用 applyMode 拦截 + toast, 但用户希望视觉上就灰
@@ -747,10 +750,13 @@ function syncTabs() {
   // 28-fix: 加一层 "串口未连接" 守卫. setPortState 已经把 btnImport 灰了,
   //   这里 mode 切换时也要保持灰 (避免 mode 切换把 setPortState 的灰给覆盖掉)
   if (el.btnImport) {
-    const blocked = !S.open || isPlatform(mode);
+    // im-2: sniff 档也禁用导入 (sniff 档无表单可填, 导入会丢数据)
+    const blocked = !S.open || isPlatform(mode) || mode === 'sniff';
     el.btnImport.disabled = blocked;
     el.btnImport.title = !S.open ? '请先连接串口' :
-      isPlatform(mode) ? '平台档配置从 MQTT 平台拉取，不能导入' : '导入配置文件 (.json / .csv)';
+      isPlatform(mode) ? '平台档配置从 MQTT 平台拉取，不能导入' :
+      mode === 'sniff' ? 'sniff 档无表单可导入, 请切到手动档' :
+      '导入配置文件 (.json / .csv)';
   }
   // 当前停留的栏目被藏掉时，落到首页 —— 否则界面会变成一片空白，
   // 用户以为程序卡死了（实际只是没有 active 的 tab-pane）
@@ -1336,7 +1342,9 @@ const CSV_COLS = {
     ['停止位', 'stopbits'],
     ['从机地址', 'slave'],
     ['轮询间隔ms', 'interval_ms'],
-    ['响应超时ms', 'timeout_ms']
+    ['响应超时ms', 'timeout_ms'],
+    // im-2: 加 server 列 (配置服务器url, 来自首页 fUrl 只读显示)
+    ['服务器地址', 'server']
   ],
   registers: [
     ['地址', 'addr'],
@@ -1635,6 +1643,13 @@ async function editPlatformInterval() {
 // 2h exportCfg: 弹窗选 json/csv, dispatch 到对应导出函数
 async function exportCfg(pre) {
   if (pre === undefined) pre = cfgPrefix();
+  // im-2: sniff 档无 485 表单, 用 manual 档 prefix ('m') 导出当前手动档配置.
+  //   用户在 manual 档配好 baud/databits/parity/stopbits/interval/从机/寄存器表
+  //   切 sniff 看, 想保存一份备份就用导出. 平台档仍然禁用 (syncTabs 守门).
+  if (S.mode === 'sniff') {
+    pre = 'm';
+    toast('sniff 档无表单, 导出当前手动档配置');
+  }
   const fmt = await askExportFormat();
   if (fmt === 'json') return exportCfgAsJson(pre);
   if (fmt === 'csv')  return exportCfgAsCsv(pre);
@@ -1642,8 +1657,13 @@ async function exportCfg(pre) {
 
 // 2h importCfg: 文件选择框 (filter .json,.csv), 选完按扩展名 dispatch
 // 平台档已被 syncTabs 禁用 btnImport, 此处不需再检查 isPlatform
+// im-2: sniff 档也禁用导入, sniff 档无表单可填, 导入会丢数据
 async function importCfg(pre) {
   if (pre === undefined) pre = cfgPrefix();
+  if (S.mode === 'sniff') {
+    toast('sniff 档无表单可导入, 请切到手动档再导入');
+    return;
+  }
   // 先问再弹文件选择框：顺序反了的话用户选完文件才被告知会丢改动，白选一趟
   if (!await guardUnsaved(S.cfgDirty, '485', '保存配置', () => { S.cfgSnap = null; })) return;
   const inp = document.createElement('input');

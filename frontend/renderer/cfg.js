@@ -379,7 +379,10 @@ function collectCfg(pre) {
       slave: slave,
       interval_ms: interval,
       // 留空 = 早返回模式（收到响应立刻走下一事务）
-      timeout_ms: timeout === '' ? null : parseInt(timeout, 10)
+      timeout_ms: timeout === '' ? null : parseInt(timeout, 10),
+      // im-2: 加 server 字段 (配置服务器url, 来自首页 fUrl 只读显示)
+      //   让 JSON/CSV 导出能带出来, 跟导入时 applyParsedData 的 c.server 对齐
+      server: el.fUrl.value.trim()
     }
   };
 }
