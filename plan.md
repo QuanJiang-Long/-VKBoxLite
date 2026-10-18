@@ -974,6 +974,22 @@
   - **修**改** 2 **个**文**件**:** index.html (注**入** __APP_VERSION__) + app.js (exportCfgAsJson version + importCfg **校**验**)
   - **测**试**:** test_im5_version.js (5 **个**测**试**点**)
 - **im-5 45/45 npm test **全**过**!
+- **im-6: **用**户**选** C **方**案**, exportCfgAsJson **加** device_status **段**:
+  - **问**题**:** 用**户**报**告**导**出**好**像**没**有**设**备**的**当**前**运**行**状**态**。
+  - **讨**论**:** R:STAT **返**回** 4 **段**平**级** { mode, data, guard, mqtt }。**现**状**是**只** mqtt **段**走** mqtt_status (im-4 **加**的**), mode/data/guard **三**段**没**导**出**。
+  - **用**户**选** C **方**案**:** **保**留** mqtt_status (**不**变**), **新**加** device_status **段** (**只**含** mode + data + guard 3 **段**, **不**含** mqtt **避**免**重**复**)。
+  - **修**改**:** exportCfgAsJson data **对**象**加** device_status **字**段**:
+    - `S.stat ? { mode: S.stat.mode || null, data: S.stat.data || null, guard: S.stat.guard || null } : null`
+    - **字**段**:
+      - **mode**:** mode / busy / poll / mon (**当**前** 485 **模**式** + **占**用**状**态**)
+      - **data**:** pushed / frames / raw / points / ring (**M**o**d**b**us** **采**集**数**据**状**态**)
+      - **guard**:** uptime / feed / stall / wdt_to (**看**门**狗**状**态**)
+    - **没**拉**到** R:STAT **时** (**S.stat** **不**存**在**): **返** null
+  - **CSV **不**导**:** **对**象**, **不**适**合**表**格**
+  - **段**顺**序**:** tool/version/exported/serial/registers/mqtt/mqtt_status/**device_status**
+  - **修**改** 1 **个**文**件**:** app.js (exportCfgAsJson data **加** device_status)
+  - **测**试**:** test_im6_device_status.js (5 **个**测**试**点**)
+- **im-6 46/46 npm test **全**过**!
 - **R:VAL addr=96 **的**误**解**修**正**:
   - **之**前**我**以**为** R:VAL **返**回**的** addr **是** Modbus **地**址** → **错**!
   - R:VAL **返**回**的** addr **是**设**备**内**部**的** "**数**据**记**录** ID**"** 或** **缓**存** key**, **跟** Modbus **地**址**是**两**码**事**

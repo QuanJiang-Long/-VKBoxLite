@@ -1475,11 +1475,15 @@ function parseCsv(text) {
   return result;
 }
 
-// data: { serial, registers, mqtt, mqtt_status } - 内部统一格式
+// data: { serial, registers, mqtt, mqtt_status, device_status } - 内部统一格式
 // im-4: 加 mqtt_status 段 (设备 R:STAT 来的 mqtt 段, 只读快照)
 //   - 含 connected / want_run / subscribed / client_id / user /
 //     device_id / sub / pub_topics / keep_session 等运行态
 //   - CSV 不导 (sub/keep_session/pub_topics 不太适合表格, JSON 优先)
+// im-6: 加 device_status 段 (设备 R:STAT 来的 mode + data + guard 3 段, 设备运行态)
+//   - 跟 mqtt_status 段平级, 但不含 mqtt 段 (mqtt 走 mqtt_status 段, 不重复)
+//   - 没拉到 R:STAT 时 (S.stat 不存在): 返 null
+//   - CSV 不导 (对象, 不适合表格)
 function exportCfgAsJson(pre) {
   if (pre === undefined) pre = cfgPrefix();
   const c = collectCfg(pre);
@@ -1506,7 +1510,16 @@ function exportCfgAsJson(pre) {
     // im-4: MQTT 运行态快照 (设备 R:STAT mqtt 段, 没拉到时 null)
     //   字段: connected / want_run / subscribed / client_id / user /
     //         device_id / sn / sub / pub_topics / keep_session 等
-    mqtt_status: (S.mqtt && S.mqtt.stat) || null
+    mqtt_status: (S.mqtt && S.mqtt.stat) || null,
+    // im-6: 设备运行态 (R:STAT 4 段里的 mode + data + guard, 不含 mqtt 段)
+    //   - mode:  { mode, busy, poll, mon } 当前 485 模式 + 占用状态
+    //   - data:  { pushed, frames, raw, points, ring } Modbus 采集数据状态
+    //   - guard: { uptime, feed, stall, wdt_to } 看门狗状态
+    device_status: S.stat ? {
+      mode:  S.stat.mode  || null,
+      data:  S.stat.data  || null,
+      guard: S.stat.guard || null
+    } : null
   };
   const json = JSON.stringify(data, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
