@@ -71,9 +71,9 @@ M.PLATFORM_FPOST_TOPIC = "/sys/thing/gw/function/post/%s"
 M.PLATFORM_EVENT_TOPIC = "/sys/thing/gw/event/post/%s"
 M.PLATFORM_FUNC_TOPIC = "/sys/thing/gw/service/invoke/%s"
 -- D2-node 子设备级服务调用: {sn}-N 的 N 是从机序号。
--- Step3a 先精确订 {sn}-1: 验证 broker 接受 node 前缀的订阅本身;
--- 通配 {sn}-+ 的版本出过"切 platform 断 MQTT", 单独在 Step3b 再试
--- (试通过后把 build_subs 里的 -1 后缀改回 -+)。
+-- Step3a 精确订 {sn}-1 已验证 broker 接受 node 前缀; Step3b 换 -+ 通配
+-- (一条罩所有从机, 拓扑增减不用重订)。若通配被 broker 拒/断连, 回退精确订:
+-- build_subs 里 -+ 改回 -N (按档案从机逐条订, 留源码 TODO)
 -- 报文处理与 gw 级同一套 (handle_downlink 只看 payload 形状,
 -- claim_ok 对 -N 结尾天然放行), U7 回执仍发 /gw/function/post/{sn}
 M.PLATFORM_FUNC_NODE_TOPIC = "/sys/thing/node/service/invoke/%s"
