@@ -325,7 +325,12 @@ function renderSnStatus(s, c, pubTopics) {
     const extras = (window.VKBoxTopics && did)
       ? VKBoxTopics.formatListAsLines(VKBoxTopics.platformExtraTopics(did))
       : '';
-    setKv('snStExtraTopics', extras || '--', !extras);
+    // 不能走 setKv: 它会把 className 整个重置, 冲掉 <pre> 的 .kv-pre
+    // 绿色样式 (m/p 档 mMqSt/pMqStExtraTopics 同款坑, 直接拿 el 操作)
+    if (el.snStExtraTopics) {
+      el.snStExtraTopics.textContent = extras || '--';
+      el.snStExtraTopics.className = extras ? 'kv-pre' : 'kv-pre bad';
+    }
   } else {
     setKv('snStPub', '未连接', true);
     setKv('snStExtraTopics', '--', true);
