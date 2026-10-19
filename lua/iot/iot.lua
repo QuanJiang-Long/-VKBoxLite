@@ -659,11 +659,14 @@ end
 --   下才有意义。idle 订着 = 设备还没开始采数就先挂在平台的接收侧，
 --   看着像已经接了任务，实际一个字节都不会用上。
 --
--- 其余三档：4 条 gw 平台前缀，一条都不能少：
+-- 其余三档：5 条平台 topic（4 条 gw 前缀 + 1 条 node 前缀），一条都不能少：
 --   ① D1(/gw/config/get/{sn}) 是"拉取配置"链路唯一的入口
---   ② function/get + property/set + property/get 是平台侧另外三类下行，
+--   ② service/invoke + property/set + property/get 是平台侧另外三类下行，
 --      不订就收不到服务调用/属性设置/全量查询，且无报错
---   这 4 条是 core/config.lua 的平台常量，不随配置变
+--   ③ D2-node(/node/service/invoke/{sn}-1, Step3a 精确订) 是子设备级
+--      服务调用的下行；-+ 通配版在 Step3b 通过后再替换 (历史: 通配
+--      出过切 platform 断 MQTT, 记录见 .agent-memory/d2-topic-switch-log)
+--   这些 topic 是 core/config.lua 的平台常量，不随配置变
 --
 -- ⚠️ 手动档额外还要订用户填的 sub_topic：手动档连的是用户自己的 broker，
 --    平台那套 /sys/thing/gw/{sn} 拼出来也没人往那儿发。不订用户那条 =
@@ -682,10 +685,13 @@ local function build_subs()
     if get_mode() == "idle" then return subs end
     local did = S.device_id
     if not did or did == "" then return subs end
-    -- 手动档不订 4 条平台下行：manual 完全独立于平台, 唯一入口是用户 sub_topic
+    -- 手动档不订平台下行：manual 完全独立于平台, 唯一入口是用户 sub_topic
     if not mqttcfg.load().manual_on then
         add(string.format(cfg.PLATFORM_GET_TOPIC, did))
+        -- D2 服务调用：gw 级 + node 级两条。Step3a node 级先精确订 -1
+        -- （订阅循环逐条 pcall, 单条被拒不连坐其他 4 条）
         add(string.format(cfg.PLATFORM_FUNC_TOPIC, did))
+        add(string.format(cfg.PLATFORM_FUNC_NODE_TOPIC, did) .. "-1")
         add(string.format(cfg.PLATFORM_PSET_TOPIC, did))
         add(string.format(cfg.PLATFORM_PGET_TOPIC, did))
     end

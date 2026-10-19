@@ -70,6 +70,13 @@ M.PLATFORM_FPOST_TOPIC = "/sys/thing/gw/function/post/%s"
 -- U5 资源告警: 上升沿触发(ram>=85 / cpu>=90 / disk>=90), manual/idle 不发
 M.PLATFORM_EVENT_TOPIC = "/sys/thing/gw/event/post/%s"
 M.PLATFORM_FUNC_TOPIC = "/sys/thing/gw/service/invoke/%s"
+-- D2-node 子设备级服务调用: {sn}-N 的 N 是从机序号。
+-- Step3a 先精确订 {sn}-1: 验证 broker 接受 node 前缀的订阅本身;
+-- 通配 {sn}-+ 的版本出过"切 platform 断 MQTT", 单独在 Step3b 再试
+-- (试通过后把 build_subs 里的 -1 后缀改回 -+)。
+-- 报文处理与 gw 级同一套 (handle_downlink 只看 payload 形状,
+-- claim_ok 对 -N 结尾天然放行), U7 回执仍发 /gw/function/post/{sn}
+M.PLATFORM_FUNC_NODE_TOPIC = "/sys/thing/node/service/invoke/%s"
 M.PLATFORM_PSET_TOPIC = "/sys/thing/gw/property/set/%s"
 M.PLATFORM_PGET_TOPIC = "/sys/thing/gw/property/get/%s"
 M.PULL_TIMEOUT_MS = 15000
