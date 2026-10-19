@@ -242,9 +242,11 @@ function renderMqtt() {
   setKvPre(pre, 'mqStPub', pubText, pubTopics.length === 0);
   setKvPre(pre, 'mqStSub', s.sub || '未连接', !s.sub);
   // 22-fix: 手动档额外生效的 topic (U1 hello + U2 meta).
-  // 24-fix: 平台档也加 (U1/U2/U3/U5/U6/U7 + D2/D3/D4, 共 9 条).
+  // 24-fix: 平台档也加 (U1/U2/U3/U5/U6/U7 + D2/D2n/D3/D4, 共 10 条;
+  //         D2 服务调用已改 service/invoke, D2n 是子设备级 {sn}-N).
   //   走 topics.js 的 VKBoxTopics.manualExtraTopics / platformExtraTopics 拼.
-  //   sniff tab 暂不加 (后续讨论). 用 id 后缀 'ExtraTopics' 区分 manual tab
+  //   sniff tab 的 2 条 D2/D2n 由 renderSnStatus 拼到 snStExtraTopics (见那头).
+  //   用 id 后缀 'ExtraTopics' 区分 manual tab
   //   的 mMqStExtraTopics (m- 前缀) vs platform 的 pMqStExtraTopics.
   //   注: setKvPre 会把 className 整个重置, 会冲掉 <pre> 的 .kv-pre 样式,
   //   所以这里直接拿 el 操作, 保留 .kv-pre class.
@@ -295,7 +297,8 @@ function renderMqtt() {
 // sniff-3 fix: 把 R:MQTT 的 stat/cfg 数据填到 sniff 面板的"状态"卡片 (snStXxx)
 //   在 renderMqtt 末尾被调用, 跟 m/p 状态卡片共享 stat 字段, 但展示形式不同:
 //     - 11 字段, 没有手动/自动档区别 (sniff 模式只看设备实际生效值)
-//     - 生效发布 = pubTopics[0] (主 topic);  其他生效 Topic = pubTopics[1..] (平台档带 -n 后缀)
+//     - 生效发布 = pubTopics[0] (主 topic);  其他生效 Topic = pubTopics[1..]
+//       (平台档带 -n 后缀) + 尾附 D2/D2n 两条下行 invoke topic
 //   设备没 pub_topics 字段时 (老设备), 回退到 s.pub 单条填 snStPub, snStExtraTopics='--'
 //   显示格式跟 manual 档的 mMqStXxx 一致 (kv-grid + kv + pre), 字段名也对齐
 //   (snStDevId / snStSubed / snStExtraTopics)
@@ -314,10 +317,17 @@ function renderSnStatus(s, c, pubTopics) {
   // 生效发布: pubTopics[0] (主 topic), 没连上是 '未连接'
   if (pubTopics && pubTopics.length) {
     setKv('snStPub', pubTopics[0], false);
-    // 其他生效 Topic: pubTopics[1..] 多行, 只有 1 条时 '--'
+    // 其他生效 Topic: pubTopics[1..] 多行, 尾部再拼 D2/D2n 两条下行服务调用
+    //   (D2 = /gw/service/invoke/{sn}; D2n = 子设备级 /node/.../{sn}-N,
+    //    -N 与 U4 上报同序列, 设备端按档案从机精确订, 无通配)
     //   用 <pre class="kv-pre"> 容器 (跟 manual 档 mMqStExtraTopics 同套), 多行可读
-    if (pubTopics.length > 1) {
-      setKv('snStExtraTopics', pubTopics.slice(1).join('\n'), false);
+    const did = s.device_id || s.sn || '';
+    const invokeLines = (window.VKBoxTopics && did)
+      ? VKBoxTopics.formatListAsLines(VKBoxTopics.sniffExtraTopics(did))
+      : '';
+    const extrasAll = pubTopics.slice(1).concat(invokeLines ? [invokeLines] : []);
+    if (extrasAll.length) {
+      setKv('snStExtraTopics', extrasAll.join('\n'), false);
     } else {
       setKv('snStExtraTopics', '--', true);
     }

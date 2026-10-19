@@ -15,7 +15,9 @@
 //
 // 下行 (平台/用户 broker → 设备):
 //   D1 get         主下行, 配置下发 + 普通指令
-//   D2 func        服务调用
+//   D2 invoke    gw 服务调用
+//   D2n invoke   node 服务调用, 到 {sn}-N 子设备 (N=子设备序号, 与 U4 的
+//                 -{n} 同序列; 设备实际订阅按档案从机精确定制, 无通配)
 //   D3 pset        属性设置
 //   D4 pget        属性查询
 //
@@ -45,7 +47,9 @@ const VKBoxTopics = (function () {
     // D1
     PLATFORM_GET_TOPIC: '/sys/thing/gw/config/get/{sn}',
     // D2
-    PLATFORM_FUNC_TOPIC: '/sys/thing/gw/function/get/{sn}',
+    PLATFORM_FUNC_TOPIC: '/sys/thing/gw/service/invoke/{sn}',
+    // D2n (子设备级, -N=子设备序号, 与 U4 上报 -{n} 同序列; 设备订精确 -1..-K, 无通配)
+    PLATFORM_FUNC_NODE_TOPIC: '/sys/thing/node/service/invoke/{sn}-N',
     // D3
     PLATFORM_PSET_TOPIC: '/sys/thing/gw/property/set/{sn}',
     // D4
@@ -76,7 +80,7 @@ const VKBoxTopics = (function () {
   // 24-fix: 平台档额外生效的 topic 列表 (除 mqStPub/mqStSub 已显示的 2 条之外).
   //   mqStPub = U4 pub   (PLATFORM_PUB_TOPIC)
   //   mqStSub = D1 get   (PLATFORM_GET_TOPIC)
-  //   本表列出其余 9 条: U1/U2/U3/U5/U6/U7 + D2/D3/D4
+  //   本表列出其余 10 条: U1/U2/U3/U5/U6/U7 + D2/D2n/D3/D4
   //   U2 info: meta (不带 nodes) + topo (带 nodes) 共用同一 topic, 这里只列一次
   function platformExtraTopics(sn) {
     if (!sn) return [];
@@ -87,16 +91,28 @@ const VKBoxTopics = (function () {
       { code: 'U5', name: 'event', topic: format(TOPICS.PLATFORM_EVENT_TOPIC, sn) },
       { code: 'U6', name: 'reply', topic: format(TOPICS.PLATFORM_REPLY_TOPIC, sn) },
       { code: 'U7', name: 'fpost', topic: format(TOPICS.PLATFORM_FPOST_TOPIC, sn) },
-      { code: 'D2', name: 'func',  topic: format(TOPICS.PLATFORM_FUNC_TOPIC, sn) },
-      { code: 'D3', name: 'pset',  topic: format(TOPICS.PLATFORM_PSET_TOPIC, sn) },
-      { code: 'D4', name: 'pget',  topic: format(TOPICS.PLATFORM_PGET_TOPIC, sn) },
+      { code: 'D2',  name: 'invoke', topic: format(TOPICS.PLATFORM_FUNC_TOPIC, sn) },
+      { code: 'D2n', name: 'invoke', topic: format(TOPICS.PLATFORM_FUNC_NODE_TOPIC, sn) },
+      { code: 'D3',  name: 'pset',  topic: format(TOPICS.PLATFORM_PSET_TOPIC, sn) },
+      { code: 'D4',  name: 'pget',  topic: format(TOPICS.PLATFORM_PGET_TOPIC, sn) },
+    ];
+  }
+
+  // sniff 状态卡片「其他生效 Topic」尾部要拼的 2 条下行服务调用 topic
+  // (sniff 卡的 snStExtraTopics 主体仍是设备回传的 pub 上行列表, 这 2 行
+  //  以 code 标签形式附在后面, 方便现场核对 gw/node 两级 invoke 的订法)
+  function sniffExtraTopics(sn) {
+    if (!sn) return [];
+    return [
+      { code: 'D2',  name: 'invoke', topic: format(TOPICS.PLATFORM_FUNC_TOPIC, sn) },
+      { code: 'D2n', name: 'invoke', topic: format(TOPICS.PLATFORM_FUNC_NODE_TOPIC, sn) },
     ];
   }
 
   // 把 topic 列表格式化成多行字符串 (给前端 <pre> 显示)
   function formatListAsLines(items) {
     if (!items || items.length === 0) return '';
-    // 取最长 code 标签做对齐 (U1..U7 都是 2 字符, D1..D4 也是, 不需要 padding)
+    // 取最长 code 标签做对齐 (U1..U7/D1..D4 都是 2 字符, D2n 3 字符, 差 1 格可接受)
     return items.map(it => `${it.code} (${it.name}): ${it.topic}`).join('\n');
   }
 
@@ -104,6 +120,7 @@ const VKBoxTopics = (function () {
     format,
     manualExtraTopics,
     platformExtraTopics,
+    sniffExtraTopics,
     formatListAsLines,
   });
 })();
