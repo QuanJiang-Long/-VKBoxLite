@@ -69,7 +69,7 @@ M.PLATFORM_RES_TOPIC = "/sys/thing/gw/property/post/%s"
 M.PLATFORM_FPOST_TOPIC = "/sys/thing/gw/function/post/%s"
 -- U5 资源告警: 上升沿触发(ram>=85 / cpu>=90 / disk>=90), manual/idle 不发
 M.PLATFORM_EVENT_TOPIC = "/sys/thing/gw/event/post/%s"
-M.PLATFORM_FUNC_TOPIC = "/sys/thing/gw/function/get/%s"
+M.PLATFORM_FUNC_TOPIC = "/sys/thing/gw/service/invoke/%s"
 M.PLATFORM_PSET_TOPIC = "/sys/thing/gw/property/set/%s"
 M.PLATFORM_PGET_TOPIC = "/sys/thing/gw/property/get/%s"
 M.PULL_TIMEOUT_MS = 15000
