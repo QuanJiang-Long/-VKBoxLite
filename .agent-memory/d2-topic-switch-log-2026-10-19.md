@@ -33,11 +33,14 @@
 - 附注: 同段 log 485 轮询 addr=4096/4161/4160/97/141/142 全 `Rx n=0` timeout,
   与 MQTT 无关 (总线侧没收到仪表响应), 烧现场时留意总线接线/表是否在线
 
-## Step3 计划 (按结果分支)
+## Step3a (4ee142a): 新增 node 级精确订 {sn}-1 (5 条订阅)
 
-- 3a: 新增 node 精确订 `/node/service/invoke/{sn}-1` (不带通配) → 验证 node 前缀本身
-- 3b: 改成 `-+` 通配 → 若切 platform 断连复现, 则坐实 broker 拒通配,
-  回退 3b 用精确逐从机订 (拓扑对口) 或平台侧放开通配权限
-- 验证判据: 切 platform 后 `conack ok` 无 `subscribe fail`, MQTT 稳定不断连
+- 烧录验证: 稳定 ✅ (用户确认, 切 platform 不断连)
+
+## Step3b (4f0791d → d962314 revert): node 级订换 -+ 通配
+
+- **烧录验证: 切 platform 断连复现 ❌**
+- **定论: broker (dz.voltkun.com) 不接受 {sn}-+ 单层通配订阅**
+- 设备端已回退到 Step3a 精确订版本; 通配方案弃用, 后续按档案从机逐条精确订
 
 ## 前端 (topics.js/mqtt.js 展示 + README + test_22) 待设备端全部验证通过后统一跟改
