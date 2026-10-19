@@ -649,9 +649,8 @@ local function func_reply(rs)
     return true
 end
 
--- conack 时的订阅清单。文档"订阅关系"明确下行 topic 三路同（sniff/platform/
--- manual 都是 /sys/thing/gw/function/get/{target} 等 4 条），所以除 idle 外
--- 所有档都订同一份，不再按模式分流：
+-- conack 时的订阅清单。下行 topic 只随平台常量变（sniff/platform 都订同一份），
+-- 不再按模式分流：
 --
 -- idle：什么都不订。idle 是"未接任务"的原始态，此时 MQTT 连接可以是通的
 --   （凭证、broker 都与模式无关），但订阅意味着接收平台下行，而拉取配置
@@ -659,11 +658,13 @@ end
 --   下才有意义。idle 订着 = 设备还没开始采数就先挂在平台的接收侧，
 --   看着像已经接了任务，实际一个字节都不会用上。
 --
--- 其余三档：4 条 gw 平台前缀，一条都不能少：
+-- 其余三档：5 条平台 topic（4 条 gw 前缀 + 1 条 node 前缀通配），一条都不能少：
 --   ① D1(/gw/config/get/{sn}) 是"拉取配置"链路唯一的入口
---   ② function/get + property/set + property/get 是平台侧另外三类下行，
+--   ② service/invoke + property/set + property/get 是平台侧另外三类下行，
 --      不订就收不到服务调用/属性设置/全量查询，且无报错
---   这 4 条是 core/config.lua 的平台常量，不随配置变
+--   ③ D2-node(/node/service/invoke/{sn}-+) 是子设备级服务调用的下行，
+--      -+ 通配一次订到所有 {sn}-N 从机段，从机增减不用重订
+--   这些 topic 是 core/config.lua 的平台常量，不随配置变
 --
 -- ⚠️ 手动档额外还要订用户填的 sub_topic：手动档连的是用户自己的 broker，
 --    平台那套 /sys/thing/gw/{sn} 拼出来也没人往那儿发。不订用户那条 =
@@ -682,10 +683,13 @@ local function build_subs()
     if get_mode() == "idle" then return subs end
     local did = S.device_id
     if not did or did == "" then return subs end
-    -- 手动档不订 4 条平台下行：manual 完全独立于平台, 唯一入口是用户 sub_topic
+    -- 手动档不订平台下行：manual 完全独立于平台, 唯一入口是用户 sub_topic
     if not mqttcfg.load().manual_on then
         add(string.format(cfg.PLATFORM_GET_TOPIC, did))
+        -- D2 服务调用：gw 级 + node 级两条。node 级用 -+ 通配一次订到
+        -- 所有 {sn}-N 从机段（订阅循环逐条 pcall, 单条被拒不连坐其他 4 条）
         add(string.format(cfg.PLATFORM_FUNC_TOPIC, did))
+        add(string.format(cfg.PLATFORM_FUNC_NODE_TOPIC, did) .. "-+")
         add(string.format(cfg.PLATFORM_PSET_TOPIC, did))
         add(string.format(cfg.PLATFORM_PGET_TOPIC, did))
     end

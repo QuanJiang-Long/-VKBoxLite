@@ -53,8 +53,8 @@ M.PLATFORM_REPLY_TOPIC = "/sys/thing/gw/config/reply/%s"
 -- 平台文档明确这些 topic 三路同（sniff/platform/manual 完全一样），可配只会
 -- 让三个档画出不同的清单，平台那头对不上。
 -- 发布/订阅两条（PUB_T/SUB_T）同理，已从配置项删除，见下面。
--- hello 是拉配置时的自述通道；func/pset/pget 是平台三类下行的订阅通道，
--- 少订一条平台那类下发就永远收不到且无报错。
+-- hello 是拉配置时的自述通道；service/invoke/pset/pget 是平台三类下行的
+-- 订阅通道，少订一条平台那类下发就永远收不到且无报错。
 M.PLATFORM_HELLO_TOPIC = "/sys/thing/gw/config/hello/%s"
 -- U4 子设备数据上报: 带 -{n} 发到子设备名上。少了它, 平台认不出数据归属
 -- 哪个子设备, 上报等于白发。{sn} 段是【网关 SN】, -{n} 是从机序号
@@ -69,7 +69,12 @@ M.PLATFORM_RES_TOPIC = "/sys/thing/gw/property/post/%s"
 M.PLATFORM_FPOST_TOPIC = "/sys/thing/gw/function/post/%s"
 -- U5 资源告警: 上升沿触发(ram>=85 / cpu>=90 / disk>=90), manual/idle 不发
 M.PLATFORM_EVENT_TOPIC = "/sys/thing/gw/event/post/%s"
-M.PLATFORM_FUNC_TOPIC = "/sys/thing/gw/function/get/%s"
+M.PLATFORM_FUNC_TOPIC = "/sys/thing/gw/service/invoke/%s"
+-- D2-node 子设备级服务调用: {sn}-N 的 N 是从机序号。设备实际订阅用 MQTT
+-- 单层通配 ({did}-+): 一条订阅罩住所有从机, 拓扑增减不用重订。收到的
+-- {sn}-N 报文处理与 gw 级同一套 (handle_downlink 只看 payload 形状,
+-- claim_ok 对 -N 结尾的天然放行), U7 回执仍发 /gw/function/post/{sn}
+M.PLATFORM_FUNC_NODE_TOPIC = "/sys/thing/node/service/invoke/%s"
 M.PLATFORM_PSET_TOPIC = "/sys/thing/gw/property/set/%s"
 M.PLATFORM_PGET_TOPIC = "/sys/thing/gw/property/get/%s"
 M.PULL_TIMEOUT_MS = 15000
