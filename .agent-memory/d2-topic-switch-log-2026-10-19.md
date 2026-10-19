@@ -43,4 +43,13 @@
 - **定论: broker (dz.voltkun.com) 不接受 {sn}-+ 单层通配订阅**
 - 设备端已回退到 Step3a 精确订版本; 通配方案弃用, 后续按档案从机逐条精确订
 
+## Step4 (最终方案): node 级按 U4 的 -{n} 同语义动态生成精确订阅
+
+- 定论: broker 不允许通配 → 弃 -+; {sn}-N 的 N 与 U4 上报 PLATFORM_PUB_TOPIC
+  的 -{n} 同序列 = 子设备序号 (从机地址升序 1..K, 非 slave 地址;
+  快照 devices[i].name = {gwSn}-{序号})
+- 实现: iot.lua 新增 node_invoke_topics(did) → 当前单从机恒 {sn}-1;
+  扩展点 TODO(pullcfg 多从机): pullcfg 存 devices[] 台数后展开 -1..-K
+- 拓扑/从机变化: build_subs 在切档与重连时本来就会重建, 订阅自动跟上
+
 ## 前端 (topics.js/mqtt.js 展示 + README + test_22) 待设备端全部验证通过后统一跟改

@@ -663,9 +663,9 @@ end
 --   ① D1(/gw/config/get/{sn}) 是"拉取配置"链路唯一的入口
 --   ② service/invoke + property/set + property/get 是平台侧另外三类下行，
 --      不订就收不到服务调用/属性设置/全量查询，且无报错
---   ③ D2-node(/node/service/invoke/{sn}-1, Step3a 精确订) 是子设备级
---      服务调用的下行；-+ 通配版在 Step3b 通过后再替换 (历史: 通配
---      出过切 platform 断 MQTT, 记录见 .agent-memory/d2-topic-switch-log)
+--   ③ D2-node(/node/service/invoke/{sn}-1) 是子设备级服务调用的下行：
+--      {-N} 跟 U4 上报的 -{n} 同序列(子设备序号), 按档案从机数精确展开,
+--      broker 不支持通配(Step3b 实证, 见 .agent-memory/d2-topic-switch-log)
 --   这些 topic 是 core/config.lua 的平台常量，不随配置变
 --
 -- ⚠️ 手动档额外还要订用户填的 sub_topic：手动档连的是用户自己的 broker，
@@ -673,6 +673,17 @@ end
 --    用户配的下行永远收不到。自动档的 sub 与 config/get 同形，上面已去重
 -- ⚠️ 曾按 manual_on 分流过，导致 sniff 沿用切入前那份清单：从 idle 进 sniff
 --    会是空的，从手动配置进 sniff 又少订 4 条平台 topic，平台下发到设备全丢。
+-- D2-node 订阅清单: 与 U4 上报的 -{n} 同语义 (n=子设备序号, 从机地址升序
+-- 1..K; 不是 slave 地址)。broker 不支持通配 (Step3b 实证), 按档案从机数
+-- 精确展开。当前架构单从机 (pullcfg 只解析 devices[0]) → 恒订 -1;
+-- 多从机扩展点: pullcfg 存下 devices[] 列表后, 在这里展开成 -1..-K
+local function node_invoke_topics(did)
+    local topics = {}
+    -- TODO(pullcfg 多从机): 平台快照 devices 台数 → 序号 1..#devices
+    topics[1] = string.format(cfg.PLATFORM_FUNC_NODE_TOPIC, did) .. "-1"
+    return topics
+end
+
 local function build_subs()
     local subs = {}
     local function add(t)
@@ -688,10 +699,12 @@ local function build_subs()
     -- 手动档不订平台下行：manual 完全独立于平台, 唯一入口是用户 sub_topic
     if not mqttcfg.load().manual_on then
         add(string.format(cfg.PLATFORM_GET_TOPIC, did))
-        -- D2 服务调用：gw 级 + node 级两条。Step3a node 级先精确订 -1
-        -- （订阅循环逐条 pcall, 单条被拒不连坐其他 4 条）
+        -- D2 服务调用：gw 级 + node 级。node 级按档案从机动态生成精确订阅
+        -- （订阅循环逐条 pcall, 单条被拒不连坐其他订阅）
         add(string.format(cfg.PLATFORM_FUNC_TOPIC, did))
-        add(string.format(cfg.PLATFORM_FUNC_NODE_TOPIC, did) .. "-1")
+        for _, t in ipairs(node_invoke_topics(did)) do
+            add(t)
+        end
         add(string.format(cfg.PLATFORM_PSET_TOPIC, did))
         add(string.format(cfg.PLATFORM_PGET_TOPIC, did))
     end
