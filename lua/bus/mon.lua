@@ -385,11 +385,16 @@ function M.infer()
                             dtype = dtype,
                             conf = (e and e.conf) or 0,
                             status = (e and e.status) or "uncertain",
+                            -- 最新值: 旁听应答解析出的最后一次 value (该地址
+                            -- 没被解出过时为 nil, 前端推断表显示 --)
+                            value = (e and e.value) or nil,
                         }
                         agg[key] = a
                         slaves[f.slave] = true
                     end
                     a.hits = a.hits + 1
+                    -- 值保持最新: e 逐次请求查缓存, 后到的应答把旧值顶上去
+                    if e and e.value ~= nil then a.value = e.value end
                     j = j + width  -- 32bit 跳 2, 16bit 跳 1
                 end
             else

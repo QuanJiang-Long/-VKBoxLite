@@ -97,7 +97,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:NET / R:MEM | 网络/内存诊断 |
 | W:GC | 强制 GC + 重连 |
 | R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20） |
-| R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits}], slaves, stat}`（**只读参考**，不写任何配置） |
+| R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits,value}], slaves, stat}`（**只读参考**，不写任何配置；`value` = 旁听应答最新解析值，地址没被解出过时缺省） |
 | R:AUTODETECT | 识别 sniff 通讯参数 `{baud,databits,stopbits,parity}`（**只用于本次会话**，不写 fskv）。**非阻塞**：回 `BUSY` / 参数 / `RET:FAIL:not in sniff mode`，由前端轮询 |
 | W:MODE=poll\|pollpull\|sniff\|idle | 切换 485 运行模式。`sniff` 会**自动起一轮识别**（非阻塞），立即回 OK；`pollpull` 会自动 hello 拉平台配置 |
 | W:BOOTMODE=idle\|poll\|pollpull\|sniff | 开机默认模式（大小写不敏感）。`sniff` 同样自动识别，但不堵开机流程 |
