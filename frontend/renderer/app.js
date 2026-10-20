@@ -927,6 +927,9 @@ async function applyMode(mode) {
     // 错参数的乱码, 所以这里必须说清"还在识别", 别让用户以为已经在听了
     if (mode === 'sniff') {
       status('已进入旁听，正在识别通讯参数（最坏 21 秒，完成后自动开始旁听）…', true);
+      // sniff 卡的 MQTT 连接/状态信息同步刷一次 (R:MQTT): 别让用户切进来
+      // 看到的是上一次会话的残影, 后来有人点「刷新」才更新
+      readMqtt(true);
       const d = await pollDetect(25);
       if (d) {
         status('识别成功，开始旁听：' + serialDesc(d), true);
@@ -1356,7 +1359,7 @@ function serialDesc(d) {
 
 function renderDetected() {
   const d = S.detected;
-  if (!d || d.baud == null) { el.detectHint.textContent = ''; return; }
+  if (!d || d.baud == null) { el.detectHint.className = 'hint'; el.detectHint.textContent = ''; return; }
   // 从站号另起一段并标明"观测": 被动旁听拿不到从站号, 它是从报文里数出来的,
   // 和上面 4 个"识别"出来的参数不是一个性质, 含混写成一个"已识别"会误导
   const sl = observedSlave();
@@ -1365,9 +1368,12 @@ function renderDetected() {
   //   兜底 baud 是 cfg.BAUD 默认值 (例如 9600/8/N/1), 跟总线上没流量时一致,
   //   user 看不出"识别到了", 写出来会误导. 等真识别命中后再显示 baud.
   if (d.fallback) {
+    el.detectHint.className = 'hint';
     el.detectHint.textContent = '待识别(未接总线或无流量)';
     return;
   }
+  // 已识别: 绿色加粗, 与下面状态栏位 (.kv span / ro-val 的 #0a7d2c) 一致
+  el.detectHint.className = 'hint ok';
   el.detectHint.textContent = '已识别：' + serialDesc(d) +
     (sl != null ? ' · 观测到从站 ' + sl : ' · 从站未观测到（先听一会儿报文）');
 }
@@ -1376,6 +1382,7 @@ function renderDetected() {
 // renderDetected() 共用同一个 span, 所以两者互斥 —— 识别中不显示"已识别",
 // 认出来了才显示
 function renderDetecting(st) {
+  el.detectHint.className = 'hint';   // 识别中回灰色 (成功时 renderDetected 才转绿)
   const round = st.detect_round || 0;
   const fail = st.detect_fail || 0;
   el.detectHint.textContent = '正在识别通讯参数…（第 ' + round + ' 轮' +

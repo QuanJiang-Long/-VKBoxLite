@@ -65,6 +65,9 @@ body.mq-manual .auto-only{display:none !important;}
     padding:4px;flex:1;max-width:400px;border:1px solid #ccc;
 }
 .form-row .hint{color:#999;font-size:12px;}
+/* sniff 检测提示的状态双色: 已识别=绿(与下面状态栏位 #0a7d2c 同色),
+   未识别/识别中保持灰 (走 hint 基础色), 由 app.js 按态切换 hint/hint ok */
+.hint.ok{color:#0a7d2c;font-weight:bold;}
 /* 密码框 + 右侧小眼睛。span 占位和 input 原先一样大(flex:1 + 400px 上限)，
    眼睛绝对定位在右侧，不占布局也不改变输入框宽度。
    ⚠️ padding-right 必须写成 .form-row .pw-wrap input：.form-row input[type]
