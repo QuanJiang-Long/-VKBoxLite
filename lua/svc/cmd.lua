@@ -312,8 +312,19 @@ local function reg_cmds()
         M.reply("RET:INFER=" .. jencode(iot.attach_names(mon.infer())))
     end)
 
-    -- R:AUTODETECT: 非阻塞, 由前端轮询
-    M.reg("R:AUTODETECT", function()
+    -- R:AUTODETECT: 非阻塞, 由前端轮询; 带 =restart 参数则强制作废上一轮
+    --   结果并重扫 (前端「重新识别通讯参数」按钮用)。裸发时若已有 last
+    --   结果设备会直接回旧值 —— 用户点"重新识别"结果只是复读旧参数,
+    --   设备根本没重新扫 (2026-10 定性); 所以重扫必须显式走 restart,
+    --   这与 request_detect 的语义一致: 清 detect_result + 重启 detect_loop
+    M.reg("R:AUTODETECT", function(arg)
+        if arg and tostring(arg) ~= "" then
+            if not mon.is_running() then
+                return M.reply("RET:FAIL:AUTODETECT:not in sniff mode")
+            end
+            mon.request_detect()
+            return M.reply("RET:AUTODETECT=BUSY")
+        end
         if not mon.is_running() then
             return M.reply("RET:FAIL:AUTODETECT:not in sniff mode")
         end

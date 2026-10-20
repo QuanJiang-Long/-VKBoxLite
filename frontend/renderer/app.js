@@ -1327,7 +1327,12 @@ async function pollDetect(maxSec) {
 async function autoDetect() {
   try {
     status('正在识别通讯参数…', true);
-    const r = await sendCmd(Protocol.Enc.autoDetect(), 'AUTODETECT', 4000);
+    // 2026-10: 重新识别 ≠ 读当前结果。裸发 R:AUTODETECT 时, 设备若已有
+    //   last 结果会头答直接回旧值 —— 现象就是"点了没重扫, 只是复读参数"。
+    //   改发 R:AUTODETECT=restart: 设备作废上一轮 (清 monitor 结果) 并从
+    //   第一个候选重扫, 头答 BUSY, 下面 pollDetect 等到的是新扫出来的参数
+    autoInferDone = '';   // 强扫成功后允许 maybeAutoInfer 再推一轮(新结果会触发)
+    const r = await sendCmd(Protocol.Enc.autoDetect() + '=restart', 'AUTODETECT', 4000);
     const raw = typeof r.raw === 'string' ? r.raw : '';
     if (raw.indexOf('RET:FAIL') === 0) {
       status('识别失败：先进旁听模式（运行模式页选 sniff）', false);
