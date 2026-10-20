@@ -168,7 +168,7 @@ const mappings = [
   ['snStManual', 'manual_on'],
   ['snStPub', 'pubTopics'],
   ['snStSub', 'sub'],
-  ['snStExtraTopics', 'slice'],
+  ['snStExtraTopics', 'platformExtraTopics'],
   ['snStSubed', 'subscribed'],
   ['snStKeepSession', 'keep_session'],
 ];
