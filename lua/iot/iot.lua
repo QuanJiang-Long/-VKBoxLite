@@ -650,7 +650,7 @@ local function func_reply(rs)
 end
 
 -- conack 时的订阅清单。文档"订阅关系"明确下行 topic 三路同（sniff/platform/
--- manual 都是 /sys/thing/gw/function/get/{target} 等 4 条），所以除 idle 外
+-- manual 都是 /service/invoke 系列 + config/pset/pget 等 5 条），所以除 idle 外
 -- 所有档都订同一份，不再按模式分流：
 --
 -- idle：什么都不订。idle 是"未接任务"的原始态，此时 MQTT 连接可以是通的

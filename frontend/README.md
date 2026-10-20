@@ -84,7 +84,7 @@ mklink /J D:\VKBox_Lite\VKBoxLite_sniff\frontend\node_modules D:\VKBox_Lite\VKBo
 | MQTT 显示"平台拒绝连接(CONACK 0x05 未授权)" | 本平台是 B 模型鉴权：`clientId`=`设备SN_`（SN 加下划线，尾部空）、`username`=设备SN、`password`=平台签发的凭证密码（默认 `VKBOXGW2026KEY`）。先看首页「用户名/ClientID」两行和「连接与上报状态」的 **ClientID/用户名** 两栏确认发出去的是什么，再确认该 SN 在平台侧凭证是「生效中」。详见 `../lua/README.md` 的「MQTT 连不上排查」 |
 | 点「拉取配置」提示"平台未下发配置(超时)" | 设备已连上 MQTT 并发过 hello，但平台 15s 内没回。检查平台是否在线、topic 是否匹配、SN 是否已烧 |
 | 拉取成功了但平台还在反复推配置 | 不正常。回执 U6 由设备在自动落盘成功后自动发；平台还在推说明回执没成功（MQTT 断开/无 SN/msgId 不匹配），或仍在重推上一份。「连接与上报状态」的 **配置回执** 显示次数，为 0 = 尚未回执 |
-| 连上 broker 但「订阅Topic」是空的 | 没连上 broker。连上后固定 4 条（config/get + function/get + property/set + property/get），除 idle 外三档都订；手动档再多订一条「订阅Topic」输入框填的那条 |
+| 连上 broker 但「订阅Topic」是空的 | 没连上 broker。连上后固定 5 条（config/get + service/invoke 两条（gw 级 + node 级 `-1`）+ property/set + property/get），除 idle 外三档都订；手动档再多订一条「订阅Topic」输入框填的那条 |
 | 拉取后有的点是中文乱码/别名栏莫名变成 id | 平台把中文 `name` 按 GBK（非 UTF-8）下发。设备判为非法 UTF-8 后退回 id 并提示"N 个平台别名不可用已退用 id"，同时日志有 `alias 非 UTF-8(平台编码问题), 退回 id: xxx`。MQTTX 独立订阅同样看到乱码 → 是平台的编码问题，不是设备；要平台侧改成 UTF-8 |
 | 拉取后某条寄存器少了，状态行说"忽略 1 条" | 该条平台配置不合法（如 `dataType` 用了 `-CDAB` 这类非大端字节序后缀、`address` 越界、`id` 含非字母数字），明细在"忽略"的 toast/日志。不会整包失败 |
 | 485 页顶部出现黄条"平台重新下发了配置" | 平台侧点了「重新下发配置」按钮，设备已接住并**自动落盘生效、自动回执平台**，横幅只是通知你设备被平台改过。点「查看详情」可把当前生效的那份读出来看。详见「平台主动重新下发配置」 |
@@ -275,7 +275,7 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 拉取流程与字段映射详见 `../lua/README.md` 的「平台配置拉取」章节。要点：
 
 - 设备 publish `hello` 到 `/sys/thing/gw/config/hello/{SN}`（固定平台常量，不可改），payload 带 `topicFormat:"v3"` 与 `onboardingMode:"platform"`
-- conack 时订 4 条 gw 前缀下行：`config/get` + `function/get` + `property/set` + `property/get`（全量见「连接与上报状态」的 **订阅Topic** 一栏）。除 idle 外三档都订，**手动档再多订一条**「订阅Topic」输入框填的那条（用户自己的 broker 往那儿发）
+- conack 时订 5 条下行：`config/get` + `service/invoke`（gw 级）+ `service/invoke/{SN}-1`（node 级，按档案从机精确订）+ `property/set` + `property/get`（全量见「连接与上报状态」的 **订阅Topic** 一栏）。除 idle 外三档都订，**手动档再多订一条**「订阅Topic」输入框填的那条（用户自己的 broker 往那儿发）
 - 非本机 SN（或 `{SN}-{n}`）的下行直接丢弃，不会拿去写寄存器
 - 只提取 `commInterfaces`（串口参数）与 `tsl.properties`（寄存器表），其余全部丢弃
 - 拉取结果里回的 topic 只有两个：上报 `/sys/thing/node/property/post/{SN}-1`，下行 `/sys/thing/gw/config/get/{SN}`（均 SN 已代入）。hello 与另外 3 条下行已是设备端固定常量，不回显
@@ -584,11 +584,11 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
    下行发 `{"cmd":"REPORT"}` 可触发设备立即上报；
    自动档下 MQTT 配置页的用户名/密码/ClientID/发布/订阅 Topic 和「保存」按钮是藏掉的 —— 要自己接管就点
    左上角「手动配置」，那几项出现且 Topic 可编辑，保存后连用户名/密码一起下发，设备按这套建连，
-    **在 4 条 gw 平台前缀之外再多订一条「订阅Topic」填的那条**；关掉「手动配置」再保存，
-    设备回到 SN + 首页凭证密码，订阅回到 4 条平台前缀；
-    发布/订阅 Topic、上报周期、会话管理已在「MQTT 连接」面板给输入框；hello/服务调用/属性设置/属性查询 4 条已删除，设备走固定平台常量；
+    **在 5 条平台常量（4 条 gw + 1 条 node 级）之外再多订一条「订阅Topic」填的那条**；关掉「手动配置」再保存，
+    设备回到 SN + 首页凭证密码，订阅回到 5 条平台前缀（gw 4 条 + node 级 1 条）；
+    发布/订阅 Topic、上报周期、会话管理已在「MQTT 连接」面板给输入框；hello/服务调用/属性设置/属性查询等下行已删除，设备走固定平台常量；
 8. **拉配置**：点「拉取配置」→ 状态走完显示"设备已自动保存并生效、已回执平台"，
-   「订阅Topic」应出 4 条（config/get + function/get + property/set + property/get），
+   「订阅Topic」应出 5 条（config/get + service/invoke（gw）+ service/invoke/{sn}-1（node）+ property/set + property/get），
    「配置回执」次数 +1；断电重启后 485 参数表应是平台给的那套；
 9. 「保存配置」后断电重启，验证手动改的配置是否保留。
 

@@ -9,7 +9,7 @@
 | 谁先知道档案 | 网关先知道（嗅探得出）→ 上报让平台也自动建 | 平台先知道（预配+快照源）→ 下发网关落库 | 网关先知道（本地手配）；平台不预知，靠上报 auto-provision 补建 |
 | 拓扑上报 | 接受后指纹变化自动发 | 应用后指纹变化自动发 | 设备上线后自动发 |
 | 数据上报 topic | \| \| \| **三路同**：`/sys/thing/gw/property/post/{sn}` + `/sys/thing/node/property/post/{gwSn}-{n}` \| \| \| |
-| 下行 topic | \| \| \| **三路同**：`/sys/thing/gw/function/get/{target}` 等 4 条 \| \| \| |
+| 下行 topic | \| \| \| **三路同**：`/sys/thing/gw/service/invoke/{sn}`（gw 级）+ `/sys/thing/node/service/invoke/{sn}-1`（node 级，通配被 broker 拒，按从机精确订）+ config/pset/pget 共 5 条 \| \| \| |
 | ack 回执 | \| \| \| **三路同**：`/sys/thing/gw/function/post/{target}` \| \| \| |
 | 平台鉴权 | onboard 下发（或出厂预烧录）：clientId 兼容 4/5/6 段 + `gw_<sn>` + 密码 | 同左（同一条控制连接） | 用户手填 broker + clientId 兼容 4/5/6 段 + 账密；同样受白名单三条件约束 |
 | 平台侧门槛 | 网关产品已发布 + 凭证 + devcom_gateway 三条件 | 同左 + 子设备产品/映射表 | 同左；username 非 `gw_` 老形态可跳过认证白名单，但 auto-provision 门禁仍查表 |

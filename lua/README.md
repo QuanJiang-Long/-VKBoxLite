@@ -736,12 +736,13 @@ handle_downlink
 | 指令回执（发布） | `/sys/thing/gw/function/post/{targetSN}` | U7，D2/D3 执行后回 `[{id,value}]`，失败项 `value:null`。**固定平台常量**（`cfg.PLATFORM_FPOST_TOPIC`），不可改 |
 | 订阅（下行） | `/sys/thing/gw/config/get/{sn}` | 主下行通道：平台配置下发 + 普通指令都走它。**固定平台常量**（`cfg.PLATFORM_GET_TOPIC`），不可改 |
 | hello | `/sys/thing/gw/config/hello/{sn}` | 拉取握手，`{sn}` = 设备 SN。**固定平台常量**（`cfg.PLATFORM_HELLO_TOPIC`），不可改 |
-| 服务调用 | `/sys/thing/gw/function/get/{sn}` | 平台三类下行之一，conack 时订阅。**固定平台常量**（`cfg.PLATFORM_FUNC_TOPIC`） |
+| 服务调用（gw 级） | `/sys/thing/gw/service/invoke/{sn}` | 平台三类下行之一，conack 时订阅。**固定平台常量**（`cfg.PLATFORM_FUNC_TOPIC`）。旧名 `/gw/function/get/{sn}`，2026-10 改 |
+| 服务调用（node 级） | `/sys/thing/node/service/invoke/{sn}-N` | 子设备级服务调用。`N` = 子设备序号（与上报 `{sn}-{n}` 同一序列），按档案从机精确订阅（当前单从机恒 `-1`）。**broker 拒绝 `{sn}-+` 通配**，见 `iot.node_invoke_topics`。固定平台常量（`cfg.PLATFORM_FUNC_NODE_TOPIC`） |
 | 属性设置 | `/sys/thing/gw/property/set/{sn}` | 同上（`cfg.PLATFORM_PSET_TOPIC`） |
 | 属性查询 | `/sys/thing/gw/property/get/{sn}` | 同上（`cfg.PLATFORM_PGET_TOPIC`） |
 | 配置下发 | `/sys/thing/gw/config/get/{SN}` | conack 时与下行 topic 一起订阅 |
 | 上报（平台） | `/sys/thing/node/property/post/{SN}-1` | 拉取结果里回给前端展示，当前不订阅 |
-| 下行命令（平台） | `/sys/thing/gw/function/get/{SN}` | 拉取结果里回给前端展示，当前不订阅 |
+| 下行命令（平台） | `/sys/thing/gw/service/invoke/{SN}`（gw 级）+ `/sys/thing/node/service/invoke/{SN}-N`（node 级） | 拉取结果里回给前端展示，node 级按档案从机精确订阅 |
 
 > **除发布/订阅两条外，全部是固定平台常量，一条都不可从前端改。**
 > 平台文档明确这些 topic **三路同**（sniff / platform / manual 三个档位完全一样），
@@ -792,19 +793,20 @@ handle_downlink
 | 档位 | 订几条 | 清单 |
 |---|---|---|
 | idle | 0 条 | 什么都不订 |
-| poll（手配） | **4 + 1** | 4 条 gw 平台前缀 + `mqttcfg.sub_topic`（`{sn}` 已代入） |
-| pollpull / sniff | **4 条** | `config/get` + `function/get` + `property/set` + `property/get` |
+| poll（手配） | **5 + 1** | 5 条平台前缀（4 条 gw + 1 条 node）+ `mqttcfg.sub_topic`（`{sn}` 已代入） |
+| pollpull / sniff | **5 条** | `config/get` + `service/invoke`（gw 级）+ `service/invoke/{sn}-1`（node 级）+ `property/set` + `property/get` |
 
 平台下发恒用 **gw 前缀**（`node` 前缀是子设备上行专用，不能混），末段是目标裸 SN：
 
 | topic | 用途 |
 |---|---|
 | `/sys/thing/gw/config/get/{SN}` | **无条件订阅**。拉取链路 + 普通指令都走它 |
-| `/sys/thing/gw/function/get/{SN}` | 服务调用，固定平台常量（`cfg.PLATFORM_FUNC_TOPIC`） |
+| `/sys/thing/gw/service/invoke/{SN}` | 服务调用（gw 级），固定平台常量（`cfg.PLATFORM_FUNC_TOPIC`） |
+| `/sys/thing/node/service/invoke/{SN}-1` | 子设备级服务调用（node 级），按档案从机逐条精确订，多从机则 `-1..-K`（`cfg.PLATFORM_FUNC_NODE_TOPIC`） |
 | `/sys/thing/gw/property/set/{SN}` | 属性设置，固定平台常量（`cfg.PLATFORM_PSET_TOPIC`） |
 | `/sys/thing/gw/property/get/{SN}` | 属性查询，固定平台常量（`cfg.PLATFORM_PGET_TOPIC`） |
 
-那 4 条**是固定常量**，不读任何配置；手动档那条读 `mqttcfg.sub_topic`。
+那 5 条**是固定常量**，不读任何配置；手动档那条读 `mqttcfg.sub_topic`。
 曾按 `manual_on` 分流（手动档只订用户填的那条），导致 sniff 沿用切入前那份清单：
 从 idle 进 sniff 会是空的，从手动配置进 sniff 又少订 4 条平台 topic，平台下发到
 设备全丢。三档统一后这条歧路没有了。
@@ -909,7 +911,7 @@ sniff 档的寄存器表本来就来自本地旁听推断。要验证拉取链�
 点「拉取配置」后 OS log 里依次出现：
 
 ```
-I/iot: conack ok, subscribed=true, topics=[/sys/thing/gw/config/get/11802026092600016 /sys/thing/gw/function/get/11802026092600016 /sys/thing/gw/property/set/11802026092600016 /sys/thing/gw/property/get/11802026092600016]
+I/iot: conack ok, subscribed=true, topics=[/sys/thing/gw/config/get/11802026092600016 /sys/thing/gw/service/invoke/11802026092600016 /sys/thing/node/service/invoke/11802026092600016-1 /sys/thing/gw/property/set/11802026092600016 /sys/thing/gw/property/get/11802026092600016]
 I/iot: pullcfg hello topic=/sys/thing/gw/config/hello/11802026092600016 sn=11802026092600016 imei=86xxxxxxxxxxxxx body={"vendor":"VKBoxLite",...,"topicFormat":"v3","onboardingMode":"platform"}
 I/iot: pullcfg recv topic=/sys/thing/gw/config/get/11802026092600016 len=812
 I/pullcfg: alias 非 UTF-8(平台编码问题), 退回 id: Ua      ← 有平台中文名才出现
@@ -931,7 +933,7 @@ I/iot: push recv msgId=hello-6e86d9f7 regs=3 skipped=0 (已自动保存)
 不是本机 SN 的下行会被丢掉，日志：
 
 ```
-I/iot: downlink dropped, not ours: /sys/thing/gw/function/get/V239342435
+I/iot: downlink dropped, not ours: /sys/thing/gw/service/invoke/V239342435
 ```
 
 **平台主动重新下发**（没点「拉取配置」时平台自己推一份）的日志：
