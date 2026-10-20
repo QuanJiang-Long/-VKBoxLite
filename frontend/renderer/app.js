@@ -1235,7 +1235,7 @@ function renderInfer() {
       + (inf.ignored ? '；已过滤 ' + inf.ignored + ' 条无应答的请求（从机可能不在线）' : '')
     : '';
   if (regs.length === 0) {
-    el.inferTbody.innerHTML = '<tr><td colspan="8" style="color:#999;">暂无推断结果</td></tr>';
+    el.inferTbody.innerHTML = '<tr><td colspan="9" style="color:#999;">暂无推断结果</td></tr>';
     return;
   }
   el.inferTbody.innerHTML = regs.map(r => {
@@ -1251,6 +1251,10 @@ function renderInfer() {
     '<td title="' + esc(r.dtype || '-') + '" style="font-family:monospace;font-size:12px;color:#0066cc;">' + esc(r.dtype || '-') + '</td>' +
     '<td title="旁听应答最新解析值" style="font-family:monospace;font-size:12px;">' +
       (v != null ? esc(v) : '<span style="color:#999;">--</span>') + '</td>' +
+    // 参数名称: 与 U4 上报 payload 的 name 同一字段 (设备端 attach_names 给的);
+    // 老固件不带 name 时退显示建议标识符同款 reg<addr>
+    '<td title="U4 上报 payload 的 name 字段" style="font-family:monospace;font-size:12px;">' +
+      (r.name != null ? esc(r.name) : 'reg' + esc(r.addr)) + '</td>' +
     '<td>reg' + esc(r.addr) + '</td>' +
     '</tr>';
   }).join('');
@@ -2097,7 +2101,7 @@ if (el.btnInferClear) {
   el.btnInferClear.onclick = () => {
     // 推断表清空: inferTbody 还原到初始"点击'推断轮询表'从已监听到的报文反推"
     if (el.inferTbody) {
-      el.inferTbody.innerHTML = '<tr><td colspan="8" style="color:#999;">点击"推断轮询表"从已监听到的报文反推</td></tr>';
+      el.inferTbody.innerHTML = '<tr><td colspan="9" style="color:#999;">点击"推断轮询表"从已监听到的报文反推</td></tr>';
     }
     if (el.inferHint) el.inferHint.textContent = '';
     if (el.detectHint) el.detectHint.textContent = '';
@@ -2389,8 +2393,8 @@ function mockReply(line) {
   ]);
   else if (line === 'R:INFER') resp = 'RET:INFER=' + JSON.stringify({
     regs: [
-      { slave: 1, addr: 100, count: 2, fc: 3, hits: 12, value: 42 },
-      { slave: 2, addr: 0, count: 10, fc: 3, hits: 5, value: null }
+      { slave: 1, addr: 100, count: 2, fc: 3, hits: 12, value: 42, name: 'reg100' },
+      { slave: 2, addr: 0, count: 10, fc: 3, hits: 5, value: null, name: 'reg0' }
     ],
     slaves: [1, 2],
     stat: { frames: 24, reqs: 12, rsps: 11, errs: 0, paired: 10, orphans: 1, detect_round: 0, detect_fail: 0 }

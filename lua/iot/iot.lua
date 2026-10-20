@@ -95,6 +95,7 @@ local M = {}
 
 local S = {}
 
+
 local function reset_state()
     S = {
         want_run = false, connected = false, subscribed = false,
@@ -162,6 +163,20 @@ local function alias_map()
     local m = {}
     for _, r in ipairs(c.regs) do m[r.name] = r.alias or r.name end
     return m
+end
+
+-- 推断结果补"参数名称": 与 build_items 的 U4 name 同一套算法
+-- (name = amap[k] or k, k = "reg<addr>")。cmd.lua 的 R:INFER 处理器调用。
+-- 为什么要放 iot 出: 上报侧 name 怎么映射只有这里知道 (alias_map 按
+-- 生效槽位取 cfg), mon.infer 自己拼会跟实际上报不一致
+function M.attach_names(inf)
+    if type(inf) ~= "table" or type(inf.regs) ~= "table" then return inf end
+    local amap = alias_map()
+    for _, a in ipairs(inf.regs) do
+        local k = "reg" .. tostring(a.addr or "")
+        a.name = amap[k] or k   -- 没配 alias 时 = 本身, 与 U4 上报完全一致
+    end
+    return inf
 end
 
 -- ===== 收拢重复样板的 helper =====
