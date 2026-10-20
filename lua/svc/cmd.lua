@@ -283,13 +283,62 @@ local function reg_cmds()
         local sysc = cfgstore and cfgstore.load_sys()
         M.reply("RET:BOOTMODE=" .. (sysc and sysc.boot_mode or "idle"))
     end)
+
+    -- ===== 2026-10 转正: 以下 3 条原在 B 类调试组 (发布版不注册) =====
+    -- 但它们已是 sniff 档前端的正式依赖:
+    --   R:AUTODETECT = 识别通讯参数的唯一入口 (切档自动识别/手动重识别全走它)
+    --   R:INFER      = 推断轮询表 (识别成功自动推 / 最新值/参数名称两列都在它)
+    --   R:FRAMES     = 总线报文卡的 2s 轮询 + 手动刷新
+    -- 留在调试组的话, _build_flag=true 的发布固件里这仨查无此键:
+    -- 平台上报不受影响 (设备内部 mon 照常跑), 但上位机三个诊断面板全灭,
+    -- 且报错文案 ("21 组候选都没解出") 引导排查往 AB 线上去 = 误导现场。
+    -- 所以挪进正式组。真要减表的瘦身面, 瘦的是 UI 入口而不是指令注册;
+    -- 闭包只捕获 mon/iot, 开销可忽略。剩下确属探针/诊断的 4 条仍留 B 组
+    -- R:FRAMES[=n]  n 取 1..50, 默认 20
+    M.reg("R:FRAMES", function(arg)
+        local n = 20
+        if arg then
+            local v = tonumber(arg)
+            if v then n = math.floor(v) end
+        end
+        if n < 1 then n = 1 end
+        if n > 50 then n = 50 end
+        M.reply("RET:FRAMES=" .. jencode(mon.recent_frames(n)))
+    end)
+
+    -- R:INFER: 从旁听帧反推轮询表 (attach_names 给每行补 name 字段, 与
+    --   U4 上报的 name 同一套映射, 前端推断表"参数名称"列直接显示)
+    M.reg("R:INFER", function()
+        M.reply("RET:INFER=" .. jencode(iot.attach_names(mon.infer())))
+    end)
+
+    -- R:AUTODETECT: 非阻塞, 由前端轮询
+    M.reg("R:AUTODETECT", function()
+        if not mon.is_running() then
+            return M.reply("RET:FAIL:AUTODETECT:not in sniff mode")
+        end
+        if mon.is_detecting() then
+            return M.reply("RET:AUTODETECT=BUSY")
+        end
+        local last = mon.detect_result()
+        if last then
+            return M.reply("RET:AUTODETECT=" .. jencode({
+                baud = last.baud, databits = last.databits,
+                stopbits = last.stopbits, parity = last.parity,
+                fallback = last.fallback or false,  -- Q2: 区分命中 vs 兜底 cfg.BAUD
+            }))
+        end
+        mon.request_detect()
+        M.reply("RET:AUTODETECT=BUSY")
+    end)
 end
 
--- B 类：仅开发调试用的 9 条指令。发布版整个函数不调用,
--- 9 个字符串键 + 9 个闭包 + 闭包内捕获的 mon/poll/iot 等 upvalue
--- 全部不进注册表, 出厂固件更小、也不接受任何探针/总线诊断入口。
+-- B 类：仅开发调试用的 4 条指令。发布版整个函数不调用,
+-- 键 + 闭包 + 闭包内捕获的 poll/iot 等 upvalue 全部不进注册表,
+-- 出厂固件更小、也不接受任何探针/总线诊断入口。
 -- 注: R:NET/R:MEM 信息已合并到 R:STAT 的 iot/guard 段, 这里
 -- 留独立指令仅供现场外挂调试工具(PC 串口)调, 产线/前端均不调
+-- (R:FRAMES/R:INFER/R:AUTODETECT 已转正进 reg_cmds, 见上面的说明)
 local function reg_debug_cmds()
     M.reg("R:NET", function()
         M.reply("RET:NET=" .. jencode(iot and iot.net_state() or {}))
@@ -334,45 +383,7 @@ local function reg_debug_cmds()
         end
     end)
 
-    -- R:FRAMES[=n]  n 取 1..50, 默认 20
-    M.reg("R:FRAMES", function(arg)
-        local n = 20
-        if arg then
-            local v = tonumber(arg)
-            if v then n = math.floor(v) end
-        end
-        if n < 1 then n = 1 end
-        if n > 50 then n = 50 end
-        M.reply("RET:FRAMES=" .. jencode(mon.recent_frames(n)))
-    end)
-
-    -- R:INFER: 从旁听帧反推轮询表 (attach_names 给每行补 name 字段, 与
-    --   U4 上报的 name 同一套映射, 前端推断表"参数名称"列直接显示)
-    M.reg("R:INFER", function()
-        M.reply("RET:INFER=" .. jencode(iot.attach_names(mon.infer())))
-    end)
-
-    -- R:AUTODETECT: 非阻塞, 由前端轮询
-    M.reg("R:AUTODETECT", function()
-        if not mon.is_running() then
-            return M.reply("RET:FAIL:AUTODETECT:not in sniff mode")
-        end
-        if mon.is_detecting() then
-            return M.reply("RET:AUTODETECT=BUSY")
-        end
-        local last = mon.detect_result()
-        if last then
-            return M.reply("RET:AUTODETECT=" .. jencode({
-                baud = last.baud, databits = last.databits,
-                stopbits = last.stopbits, parity = last.parity,
-                fallback = last.fallback or false,  -- Q2: 区分命中 vs 兜底 cfg.BAUD
-            }))
-        end
-        mon.request_detect()
-        M.reply("RET:AUTODETECT=BUSY")
-    end)
-
-end
+end -- R:FRAMES/R:INFER/R:AUTODETECT 已转正到 reg_cmds (2026-10, 见上面说明)
 
 function M.handle(line)
     if type(line) ~= "string" then return false end
@@ -392,7 +403,8 @@ end
 
 function M.init()
     reg_cmds()
-    -- 发布版: 9 条 B 类调试指令整组不注册
+    -- 发布版: 调试组 4 条 (R:NET/R:MEM/W:GC/W:RAWTEST) 整组不注册;
+    -- R:FRAMES/R:INFER/R:AUTODETECT 已转正在 reg_cmds, 发布版仍可用
     if _G.DEBUG then reg_debug_cmds() end
     local names = {}
     for k in pairs(g_cmds) do names[#names + 1] = k end

@@ -90,20 +90,20 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:VAL | 实时值快照 |
 | R:STAT | 运行状态汇总（mode/data/guard/mqtt）；`mqtt` 段另带 `push_pending`/`push_n`/`push_seen`/`push_err`（平台主动重推横幅用） |
 | W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt,msg_id,replied,src,seen,autosaved,autosave_at,autosave_regs,push_n,push_err}`，`mqtt` 段含 `pub`/`sub` 两个拼好的 topic；`autosaved`=解析成功即已落盘生效并自动回执；`msg_id`/`replied` 反映回执；`src`=`pull`/`push`）。平台主动重推的配置也走这个返回（`src=push`）。前提只需配好 MQTT 服务器地址和端口，设备会自己连 |
-| W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配” |
+| W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配”（**仅开发版注册**，发布版不可用） |
 | R:MQTT / W:MQTT={json} | MQTT 配置读写，读返回 `{cfg,auto_pass,manual_on,pub,sub,ready,err,stat}`。`cfg`=手动档表单原值，`auto_pass`=首页凭证密码，`manual_on`=当前档位，`pub`/`sub`=当前档次实际生效的成品 topic |
 | W:MQTTRC | 只重连不动配置（等价 `iot.kick()`：销毁 client 后 backoff 归 1 立刻重连） |
 | R:REPORT | 立即上报 |
-| R:NET / R:MEM | 网络/内存诊断 |
-| W:GC | 强制 GC + 重连 |
-| R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20） |
+| R:NET / R:MEM | 网络/内存诊断（**仅开发版注册**） |
+| W:GC | 强制 GC + 重连（**仅开发版注册**） |
+| R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20，**正式注册**，sniff 报文卡依赖） |
 | R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits,value,name}], slaves, stat}`（**只读参考**，不写任何配置；`value` = 旁听应答最新解析值，地址没被解出过时缺省；`name` = U4 上报 payload 的 name（`alias` 映射,同 `iot.build_items` 一套，没配 alias 时 = `reg<addr>`） |
 | R:AUTODETECT | 识别 sniff 通讯参数 `{baud,databits,stopbits,parity}`（**只用于本次会话**，不写 fskv）。**非阻塞**：回 `BUSY` / 参数 / `RET:FAIL:not in sniff mode`，由前端轮询 |
 | W:MODE=poll\|pollpull\|sniff\|idle | 切换 485 运行模式。`sniff` 会**自动起一轮识别**（非阻塞），立即回 OK；`pollpull` 会自动 hello 拉平台配置 |
 | W:BOOTMODE=idle\|poll\|pollpull\|sniff | 开机默认模式（大小写不敏感）。`sniff` 同样自动识别，但不堵开机流程 |
 | R:SN / R:ID / W:SN=xxx[,FORCE] / C:SN / LOCK:SN / UNLOCK:SN / R:SNEN / W:SNEN=n,0\|1[,P] | SN 产线指令（VUART_0 通道） |
 
-> 指令集与 `frontend/protocol.js` 的 `Enc` 一一对应。`W:RAWTEST`/`R:NET`/`R:MEM`/`W:GC` 是前端不调用的现场诊断入口。
+> 指令集与 `frontend/protocol.js` 的 `Enc` 一一对应。`W:RAWTEST`/`R:NET`/`R:MEM`/`W:GC` 是前端不调用的现场诊断入口，且**仅开发版注册**（`_build_flag.lua` = true 的发布固件里没有）。`R:FRAMES`/`R:INFER`/`R:AUTODETECT` 源自调试组，但已是 sniff 面板的正式依赖，2026-10 已**转正注册**（`cmd.lua` 的 `reg_cmds`，发布版可用）。
 >
 > **`R:SN` 不是死代码**：前端确实不用它，但产线烧写软件（`pc_tool/device.py` 的 `read_sn()`）拿它做 `W:SN` 之后的回读校验，`burner.py` 比对不过就判失败、不上锁。曾按"前端零调用"删过一次，现场表现为「设备无响应（发送了 R:SN）」+ SN 写进去了但锁没上。**删任何指令前，先确认仓库外没有别的调用方。**
 >
