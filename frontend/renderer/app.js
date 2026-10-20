@@ -719,11 +719,15 @@ function renderMode() {
   } else if (devMode === 'sniff') {
     // 刷新页面后 S.detected 是空的, 但设备还记着上一轮的结果(mon.status 的
     // detected 段) —— 拿它兜底, 否则用户会看到"已识别"凭空消失
-    if (!S.detected && m.detected && m.detected.baud != null) S.detected = m.detected;
+    if (!S.detected && m.detected && m.detected.baud != null) {
+      S.detected = m.detected;
+      maybeAutoInfer(m.detected);   // 页面刷新后兜底采纳, 也补一次自动推断
+    }
     if (S.detected) renderDetected();
     else el.detectHint.textContent = '';
   } else {
     S.detected = null;      // 离开 sniff 就作废: 下次进去会重新识别
+    autoInferDone = '';     // 自动推断的"已推签名"跟着清: 再进 sniff 重新识别后要再推一次
     el.detectHint.textContent = '';
   }
   syncTabs();
@@ -1268,6 +1272,24 @@ function observedSlave() {
   return best;
 }
 
+// 识别成功后自动推断一次 (2026-10 需求): 原本推断得手动点「推断轮询表」,
+// 现在识别到位就先推一遍, 少一次手动操作。
+// 触发口有 3 个, 都收口到这里:
+//   ① 切档自动识别 (applyMode sniff → pollDetect 成功)
+//   ② 手动「重新识别」(autoDetect, 头答/轮询两条路)
+//   ③ 5s 状态轮询兜底采纳 (页面刷新后设备已识别的场景)
+// fallback (21 组候选没认出、兜底 cfg.BAUD) 不算识别成功, 不触发;
+// 同一参数签名只自动推一次, 防止 5s 轮询反复弹「推断完成」
+let autoInferDone = '';
+function maybeAutoInfer(d) {
+  if (!d || d.baud == null || d.fallback) return;
+  const sign = serialDesc(d);
+  if (autoInferDone === sign) return;
+  autoInferDone = sign;
+  status('识别成功，自动推断轮询表…', true);
+  doInfer();   // 不 await: 调用方流程继续, 推断自己走命令队列
+}
+
 // 轮询等识别结果。设备侧 R:AUTODETECT 是非阻塞的: 立即回 BUSY 或上一次的结果,
 // 真正的扫描在后台跑(最坏 21s, 失败还会每 3s 重来一轮直到成功)。
 // 所以这里不能死等一条应答 —— 那会把命令分发循环占住, 前端别的指令全卡
@@ -1286,6 +1308,7 @@ async function pollDetect(maxSec) {
       // 它不是识别出来的, 是从报文里观测的
       S.detected = { baud: d.baud, databits: d.databits, parity: d.parity, stopbits: d.stopbits };
       renderDetected();
+      maybeAutoInfer(d);
       return d;
     }
   }
@@ -1314,6 +1337,7 @@ async function autoDetect() {
     }
     status('识别成功：' + serialDesc(d) + '（仅本次会话，未改配置）', true);
     toast('已识别 ' + serialDesc(d) + '（仅本次会话，未改配置）');
+    maybeAutoInfer(d);
   } catch (e) {
     status('识别失败：' + e.message, false);
     toast('识别失败：21 组候选都没解出合法帧，查 AB 线/从机是否在报');

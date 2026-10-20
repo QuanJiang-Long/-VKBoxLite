@@ -503,7 +503,7 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
 | 前端动作 | 指令 | 应答 | 说明 |
 |---|---|---|---|
 | 读最近解译帧 | `R:FRAMES[=n]` | `RET:FRAMES=[json]` | n 默认 20，最大 50 |
-| 推断轮询表 | `R:INFER` | `RET:INFER={json}` | `{regs,slaves,stat}`，从监听到的 REQ 帧反推，`regs` 项带 `value`（旁听应答最新解析值，没解出过为空显示 `--`）。**只读**：不给"一键应用"，dtype 猜不准（旁听拿不到类型信息，全按 uint16 会解错电压类寄存器），需人工核对后自行配置 |
+| 推断轮询表 | `R:INFER` | `RET:INFER={json}` | `{regs,slaves,stat}`，从监听到的 REQ 帧反推，`regs` 项带 `value`（旁听应答最新解析值，没解出过为空显示 `--`）。**识别成功后自动推一次**（含手动"重新识别"、页面刷新兜底；fallback 不触发），按钮仍可手动重推。**只读**：不给"一键应用"，dtype 猜不准（旁听拿不到类型信息，全按 uint16 会解错电压类寄存器），需人工核对后自行配置 |
 | 静默侦听总线 | `R:SNIFF=ms` | `RET:SNIFF=帧数` | ms 500~15000，不切模式纯收听 |
 | **识别通讯参数** | `R:AUTODETECT` | `RET:AUTODETECT={json}` | 扫 21 组候选定 baud/parity，最坏 21s。**只用于本次会话**，不写任何配置 |
 | 手动发帧 | `W:TX=<hex>` | `RET:TX=OK` | 验证发送链路（DE 自动切换） |
