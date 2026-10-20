@@ -208,13 +208,18 @@ function renderMqtt() {
     if (fillOk(E(pre, 'mqSub'))) E(pre, 'mqSub').value = c.sub_topic || '';
     // sniff 页面简版: 同步 broker 地址/端口 (只读) + 周期 (可编辑)
     // snMqHost/Port/Interval 是 sniff 页面独立元素, 跟 m/p 无关
-    if (fillOk(el.snMqHost)) el.snMqHost.value = c.host || '';
-    if (fillOk(el.snMqPort)) el.snMqPort.value = c.port != null ? c.port : 1883;
+    // ⚠️ 不能走 fillOk: 它有"所在 tab-pane 不可见就不填"的回显守卫, 而切入
+    //   sniff 档时的自动刷新 (readMqtt) 常在 sniff 面板还没显示时落地 ——
+    //   结果表现为"进 sniff 有时刷新有时没刷" (2026-10 实测定性)。这三栏
+    //   是只读回显, 不可编辑, 只防"焦点正在上面时被冲字"即可
+    if (document.activeElement !== el.snMqHost) el.snMqHost.value = c.host || '';
+    if (document.activeElement !== el.snMqPort) el.snMqPort.value = c.port != null ? c.port : 1883;
     // user/client_id 留空是故意的: 设备兜底填 SN (user→SN, client_id→SN_)
     // topic 留空也是故意的: Step 2k 起不再有默认路径, 设备不订不发
     // 显示空属正常。实际生效值看下面的连接状态面板。
     if (fillOk(E(pre, 'mqInterval'))) E(pre, 'mqInterval').value = c.interval_s != null ? c.interval_s : 120;
-    if (fillOk(el.snMqInterval)) el.snMqInterval.value = c.interval_s != null ? c.interval_s : 120;
+    // snMqInterval 同理 (点击弹窗改周期, 弹窗期间焦点在弹窗输入上, 不冲)
+    if (document.activeElement !== el.snMqInterval) el.snMqInterval.value = c.interval_s != null ? c.interval_s : 120;
     // QoS 已从界面移除：设备端发布/订阅固定用 QoS 1，
     // 这里不再显示也不再下发（设备 normalize 会退回默认值 1）。
     // 18-fix: 删除 no_SN 建连 字段后, 也不再有 allow_no_sn 下发

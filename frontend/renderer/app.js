@@ -178,7 +178,7 @@ const el = new Proxy({
   //   总线报文子分段新加 [刷新] [清空] 按钮, id 同 frameLog 命名;
   //   sniff-3 g: 总线报文加滑动开关 frameSectionOn, 控制 frameButtons + frameBody 显隐)
   btnFrameRefresh: $('btnFrameRefresh'), btnFrameClear: $('btnFrameClear'),
-  btnInferClear: $('btnInferClear'),
+  btnInferClear: $('btnInferClear'), btnInferRefresh: $('btnInferRefresh'),
   frameSectionOn: $('frameSectionOn'),
   frameButtons: $('frameButtons'),
   frameBody: $('frameBody'),
@@ -2095,7 +2095,8 @@ if (el.btnHomeMqttPassEye) el.btnHomeMqttPassEye.onclick = togglePassEye;
 
 // 报文页 (sniff-3 f: 重新分配按钮绑定)
 //   btnFrameRefresh/btnFrameClear 在总线报文子分段, 绑 frameLog
-//   btnInferClear 在 sniff嗅探 panel-title, 绑 inferTbody (推断表)
+//   btnInferRefresh/btnInferClear 在 sniff嗅探 panel-title (刷新=重推一轮, 清空=推断表还原)
+if (el.btnInferRefresh) el.btnInferRefresh.onclick = doInfer;
 el.btnFrameRefresh.onclick = () => {
   // sniff-3 i: 总开关 (frameSectionOn) 关时手动刷新也不发 R:FRAMES
   if (el.frameSectionOn && !el.frameSectionOn.checked) return;

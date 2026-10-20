@@ -893,6 +893,9 @@ body.mq-manual .auto-only{display:none !important;}
                         <div class="spacer"></div>
                         <!-- sniff-3 f: panel-title 的 [刷新] 删除, [清空] 改绑推断结果
                              (推断表清空) -->
+                        <!-- 2026-10: [刷新] 恢复到 [清空] 前, 绑 doInfer 重推一轮
+                             (面板标题处就近重推, 不用跑去点右下"推断轮询表") -->
+                        <button class="sm" id="btnInferRefresh">刷新</button>
                         <button class="sm" id="btnInferClear">清空</button>
                     </div>
                     <!-- sniff-3 h: 推断结果上方加一条 border-top 分隔线 (跟总线报文那条同款) -->
