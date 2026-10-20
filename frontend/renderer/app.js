@@ -1214,6 +1214,26 @@ async function readFrames() {
   } catch (e) { /* 静默：可能未进 sniff 模式 */ }
 }
 
+// 重新识别前的界面复位 (2026-10)。
+// 设备端 R:AUTODETECT=restart 已经把旧帧/旧值/旧识别结果清空了, 前端这边
+// 必须同步清掉对应的缓存与画面, 否则:
+//   - "已识别: 19200/8/N/1" 继续挂着旧参数 (识别期间参数还没定, 挂着像结论)
+//   - 推断表挂着一张旧参数下推出来的表, 容易被当成新一轮的结果
+//   - 总线报文表挂着旧参数下抓的帧
+// 注意顺序: 复位放在设备回"已受理"之后 —— 万一设备回 FAIL(不在 sniff 档),
+// 什么都没发生, 画面就不该被动过
+function resetSniffView() {
+  S.detected = null;      // 已识别参数
+  S.infer = null;         // 推断结果
+  S.frames = [];          // 总线报文(设备端也清了)
+  if (el.inferHint) el.inferHint.textContent = '';
+  if (el.inferTbody) {
+    el.inferTbody.innerHTML = '<tr><td colspan="9" style="color:#999;">点击"推断轮询表"从已监听到的报文反推</td></tr>';
+  }
+  renderFrames();         // 报文表回到空态
+  renderDetected();       // S.detected=null → 提示清空 + 颜色回灰
+}
+
 async function doInfer() {
   try {
     const r = await sendCmd(Protocol.Enc.infer(), 'INFER', 4000);
@@ -1346,7 +1366,13 @@ async function autoDetect() {
       toast('识别失败：当前不在旁听模式');
       return;
     }
-    // 头一次问就带回结果: 说明上一轮已经识别过了, 直接用
+    // 设备已受理重扫(并清空旧帧/旧值/旧结果), 前端同步复位画面:
+    // 旧"已识别"参数、旧推断表、旧报文全部撤掉, 免得被当成这一轮的结果
+    resetSniffView();
+    el.detectHint.className = 'hint';
+    el.detectHint.textContent = '正在识别通讯参数…';
+    // restart 的头答一定是 BUSY(设备刚开始扫), 所以正常都走 pollDetect 等新结果;
+    // 留着 r.data 分支只是兜底(万一设备已经扫完了, 直接用)
     const d = (r.data && r.data.baud != null) ? r.data : await pollDetect(25);
     if (!d) {
       // 25s 还没出结果 ≠ 失败: 设备会一直重试, 这里只告知"还没认出来"
