@@ -172,9 +172,20 @@ end
 function M.attach_names(inf)
     if type(inf) ~= "table" or type(inf.regs) ~= "table" then return inf end
     local amap = alias_map()
+    -- sniff 别名表 (2026-10): 用户在推断表里给 reg<addr> 起的 id/name。
+    -- 前端推断表的"参数名称/建议标识符"两列直接显示这里的值, 编辑后
+    -- 平台物模型(U2)与数据项(U4)也用同一套, 看到的就是上报的
+    local smap = cfgstore.alias_map()
     for _, a in ipairs(inf.regs) do
         local k = "reg" .. tostring(a.addr or "")
-        a.name = amap[k] or k   -- 没配 alias 时 = 本身, 与 U4 上报完全一致
+        local sa = smap[k]
+        if sa then
+            a.id = (sa.id ~= "" and sa.id) or k
+            a.name = (sa.name ~= "" and sa.name) or a.id
+        else
+            a.id = k
+            a.name = amap[k] or k   -- 没配 alias 时 = 本身, 与 U4 上报完全一致
+        end
     end
     return inf
 end
@@ -243,6 +254,9 @@ local function build_items()
         for _, r in ipairs(c.regs) do allowed[r.name] = true end
     end
     local by_slave, order = {}, {}
+    -- sniff 别名表: 用户在推断表里给 reg<addr> 起的名字 (2026-10)。
+    -- 优先于一切: 别名表里配过的 id/name 就是平台物模型里显示的那个
+    local smap = cfgstore.alias_map()
     for k, d in pairs(collector.get_all_latest()) do
         local vs = MqttUtil.jnum(d.value)
         if vs then
@@ -254,9 +268,16 @@ local function build_items()
                     by_slave[slave] = {}
                     order[#order + 1] = slave
                 end
+                -- id: 别名表配了用别名, 否则用键本身 (poll 档是 cfg.regs.name)
+                -- name: 别名表的名字 > 别名的 id > cfg.regs 的 alias > 键本身
+                local sa = smap[k]
+                local pid = (sa and sa.id ~= "" and sa.id) or k
+                local pname = (sa and sa.name ~= "" and sa.name)
+                    or (sa and sa.id ~= "" and sa.id)
+                    or amap[k] or k
                 by_slave[slave][#by_slave[slave] + 1] =
                     string.format('{"id":%s,"name":%s,"value":%s,"ts":%s}',
-                        MqttUtil.jstr(k), MqttUtil.jstr(amap[k] or k), vs, MqttUtil.ms_of(d.ts))
+                        MqttUtil.jstr(pid), MqttUtil.jstr(pname), vs, MqttUtil.ms_of(d.ts))
             end
         end
     end
@@ -371,15 +392,20 @@ local function node_json(idx, slave, c, regs)
         local dt = r.dtype or "uint16"
         -- 嗅探时 r.name 通常 nil (put 不传), 兜底走 reg<addr> 跟 U4 key 对齐
         -- 轮询时 r.name 是用户配的真名, 走 r.name 路径
+        -- ⚠️ p.pid/p.pname 是 sniff 别名表直接指定的 id/name (2026-10):
+        --   用户在推断表里给 reg<addr> 起了名, 平台物模型要按这个建属性,
+        --   不能再走下面的启发式 (那个会把 alias 当 id 用)
         local id
-        if r.name and r.name ~= "" and not r.name:match("^r%d+$") then
+        if r.pid and r.pid ~= "" then
+            id = r.pid
+        elseif r.name and r.name ~= "" and not r.name:match("^r%d+$") then
             id = r.alias or r.name
         else
             -- 嗅探模式: 跟 U4 上报 collector key (reg<addr>) 对齐
             -- 平台按 id 匹配 property, 嗅探的 id 跟 U4 key 一致才能归属
             id = "reg" .. r.addr
         end
-        local name = r.alias or id
+        local name = (r.pname and r.pname ~= "" and r.pname) or r.alias or id
         -- address 是嗅探到的 Modbus 寄存器地址, 嗅探到什么发什么
         -- V3 例子是 40001 是 PLC 1-based, 但嗅探帧是协议 0-based (即 100)
         props[#props + 1] = string.format(
@@ -407,16 +433,21 @@ local function build_nodes()
     local nodes, err = {}, nil
     if mode == "sniff" then
         local at, by = {}, {}
+        -- sniff 别名表 (2026-10): 用户在推断表里给 reg<addr> 起的名字,
+        -- 直接作为平台物模型的 id/name (pid/pname), 不走 node_json 的启发式
+        local smap = cfgstore.alias_map()
         local function put(slave, r)
             local k = slave .. ":" .. r.addr
             local p = at[k]
             if p then
                 p.count, p.name, p.alias, p.dtype = r.count, r.name, r.alias, r.dtype or "uint16"
+                p.pid, p.pname = r.pid, r.pname
                 return
             end
             -- 不记 slave: 分组已经由 by[] 的键承载, node_json 拿的是循环
             -- 变量 s, 再存一份是只写不读
-            p = { addr = r.addr, count = r.count, name = r.name, alias = r.alias, dtype = r.dtype or "uint16" }
+            p = { addr = r.addr, count = r.count, name = r.name, alias = r.alias, dtype = r.dtype or "uint16",
+                  pid = r.pid, pname = r.pname }
             at[k] = p
             by[slave] = by[slave] or {}
             by[slave][#by[slave] + 1] = p
@@ -424,7 +455,14 @@ local function build_nodes()
         for _, r in ipairs(mon.infer().regs or {}) do
             -- 用 mon.infer 推的 dtype_summary 首项当 reg dtype (启发式已给)
             local dt = r.dtype_summary and r.dtype_summary:match("^([^,]+)") or "uint16"
-            put(r.slave, { addr = r.addr, count = r.count, fc = r.fc, dtype = dt })
+            -- 别名表命中: id/name 用用户起的; 没命中就还是 reg<addr>
+            local sa = smap["reg" .. tostring(r.addr or "")]
+            local pid, pname
+            if sa then
+                pid = (sa.id ~= "" and sa.id) or ("reg" .. tostring(r.addr or ""))
+                pname = (sa.name ~= "" and sa.name) or pid
+            end
+            put(r.slave, { addr = r.addr, count = r.count, fc = r.fc, dtype = dt, pid = pid, pname = pname })
         end
         local pc = cfgstore.load_pull()
         for _, r in ipairs((pc and pc.regs) or {}) do

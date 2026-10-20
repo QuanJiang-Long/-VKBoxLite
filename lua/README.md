@@ -99,6 +99,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20，**正式注册**，sniff 报文卡依赖） |
 | R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits,value,name}], slaves, stat}`（**只读参考**，不写任何配置；`value` = 旁听应答最新解析值，地址没被解出过时缺省；`name` = U4 上报 payload 的 name（`alias` 映射,同 `iot.build_items` 一套，没配 alias 时 = `reg<addr>`） |
 | R:AUTODETECT[=restart] | 识别 sniff 通讯参数 `{baud,databits,stopbits,parity}`（**只用于本次会话**，不写 fskv）。**非阻塞**：回 `BUSY` / 参数 / `RET:FAIL:not in sniff mode`，由前端轮询。带 `=restart` = 强制重扫（先清旧帧旧值与旧结果，再从头扫），前端「重新识别通讯参数」按钮用 |
+| R:SALIAS / W:SALIAS={key,id,name} | sniff 侧别名表（`ds_alias` 槽）：用户在推断表里给 `reg<addr>` 起的**参数名称**(`name`)与**建议标识符**(`id`)。`W:SALIAS` 单条 upsert，`id`/`name` 都空 = 删掉这条（恢复默认 `reg<addr>`）。生效范围：sniff 档的 **U2 拓扑属性 id/name** 与 **U4 数据项 id/name** —— 平台上显示的就是用户起的名字 |
 | W:MODE=poll\|pollpull\|sniff\|idle | 切换 485 运行模式。`sniff` 会**自动起一轮识别**（非阻塞），立即回 OK；`pollpull` 会自动 hello 拉平台配置 |
 | W:BOOTMODE=idle\|poll\|pollpull\|sniff | 开机默认模式（大小写不敏感）。`sniff` 同样自动识别，但不堵开机流程 |
 | R:SN / R:ID / W:SN=xxx[,FORCE] / C:SN / LOCK:SN / UNLOCK:SN / R:SNEN / W:SNEN=n,0\|1[,P] | SN 产线指令（VUART_0 通道） |
@@ -159,6 +160,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | `poll` | `ds_poll` | 串口参数 + slave + interval + timeout + **regs 寄存器表** | `W:CFG`（非 `pollpull` 模式下） |
 | `pull` | `ds_pull` | 同 `ds_poll`（复用同一份 normalize/default） | `W:CFG`（`pollpull` 模式下）+ 平台配置落地 `iot.auto_apply` |
 | `sys` | `ds_sys` | boot_mode | `W:BOOTMODE` |
+| `alias` | `ds_alias` | `regs:[{key="reg263", id, name}]` —— sniff 推断出的寄存器被用户起的名字 | `W:SALIAS` |
 
 设计约束（改动前先读这里）：
 
@@ -170,6 +172,10 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 - **sniff 不持有寄存器表**。旁听是纯被动接收，解出的帧不代表"要采哪些点"。
   给 sniff 加 regs 是错的——那会让"旁听到什么"和"采集什么"耦合，改一侧污染另一侧。
   寄存器表的唯一来源是 `W:CFG` 与平台 `ds_pull`。
+- **`ds_alias` 是另一回事，不违反上面那条**（2026-10）。它存的不是"采哪些点"，
+  而是**用户给已推断出的点起的名字**（`reg263` → "A相电流"）。名字不参与采集，
+  只影响上报时的 id/name，让平台物模型显示人看得懂的字。切 idle 的复位**不清**它
+  ——名字是用户在现场攒下的成果，跟手配的寄存器表不是一回事。
 - **`R:INFER` 只读，禁止回写 poll**。曾有过 `W:APPLYINFER` 把推断结果盖掉 poll 的
   regs，两个问题：① dtype 猜不准（旁听拿不到类型信息，全写 uint16，电压类 float 会被
   解成整数）；② 用户手配的寄存器表被一整份覆盖。现已删除该指令，推断结果仅作参考，

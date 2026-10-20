@@ -17,6 +17,13 @@ local K_POLL, K_SYS = "ds_poll", "ds_sys"
 -- 必须分开: 原本共用一槽, 拉一次平台配置就覆盖手配的寄存器表(见 lua/README.md 配置来源隔离)。
 -- 没有 sniff 槽: auto_detect 结果只存本次会话(mon.bootCfg), 不落 fskv, 从结构上堵住误存
 local K_PULL = "ds_pull"
+-- ds_alias: sniff 侧别名表 (2026-10)。存的是【用户在推断表里给 reg<addr>
+-- 起的名字】(id + name), 不是识别出来的串口参数 —— 那些仍然只存本次会话。
+-- 用途: 决定 sniff 档 U2 拓扑属性与 U4 数据项的 id/name, 让平台物模型里
+-- 显示的是人看得懂的名字而不是 reg263。
+-- 为什么不复用 ds_poll: 那是"手配的寄存器表", 会被平台下发覆盖, 也会被
+-- 切 idle 的复位清掉; 别名是用户在 sniff 现场攒下来的成果, 得留住
+local K_ALIAS = "ds_alias"
 
 local function num(v, d)
     if v == nil then return d end
@@ -76,6 +83,76 @@ M.default_poll = {
 }
 
 M.default_sys = { boot_mode = MODE_IDLE }
+
+-- 别名表上限: 推断出来的寄存器地址不会太多, 128 条足够覆盖现场, 也能挡住
+-- 异常输入把 fskv 撑爆
+local MAX_ALIAS = 128
+
+M.default_alias = { regs = {} }
+
+-- sniff 别名表归一化。结构 { regs = { {key="reg263", id="CT1", name="A相电流"} } }
+--   - key 只认 reg<addr>: 这是旁听推断出来的寄存器键(poll 档的配置名走
+--     另一套 alias_map), 别的键进来直接忽略, 免得把两套东西搅在一起
+--   - id/name 都空 = 用户把这行清掉了(删除该条), 归一化时直接不收
+function M.normalize_alias(c)
+    c = c or {}
+    local out = { regs = {} }
+    local seen = {}
+    local regs = c.regs
+    if type(regs) == "table" then
+        for _, r in ipairs(regs) do
+            if type(r) == "table" then
+                local key = str(r.key, "")
+                if key:match("^reg%d+$") then
+                    local id = str(r.id, "")
+                    local nm = str(r.name, "")
+                    if id ~= "" or nm ~= "" then
+                        if #id > 64 then return nil, "alias id 太长(64 字符内)" end
+                        if #nm > 64 then return nil, "alias name 太长(64 字符内)" end
+                        if not seen[key] then
+                            seen[key] = true
+                            out.regs[#out.regs + 1] = { key = key, id = id, name = nm }
+                            if #out.regs >= MAX_ALIAS then return nil, "别名条数过多" end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- 别名表查表: key -> {id=..., name=...}, 供 iot 侧上报时套用
+function M.alias_map()
+    local m = {}
+    local c = M.load_alias()
+    for _, r in ipairs((c and c.regs) or {}) do
+        m[r.key] = { id = r.id, name = r.name }
+    end
+    return m
+end
+
+-- 别名表单条 upsert (2026-10): 前端弹窗保存走这里。
+-- id/name 都空 = 删掉这条 (用户把名字清空了)
+function M.set_alias(key, id, name)
+    local c = M.load_alias()
+    local out = { regs = {} }
+    local found = false
+    for _, r in ipairs((c and c.regs) or {}) do
+        if r.key == key then
+            found = true
+            if id ~= "" or name ~= "" then
+                out.regs[#out.regs + 1] = { key = key, id = id, name = name }
+            end
+        else
+            out.regs[#out.regs + 1] = r
+        end
+    end
+    if not found and (id ~= "" or name ~= "") then
+        out.regs[#out.regs + 1] = { key = key, id = id, name = name }
+    end
+    return M.save_alias(out)
+end
 
 local function normalize_reg(r)
     if type(r) ~= "table" then return nil, "not table" end
@@ -153,6 +230,7 @@ local SECTIONS = {
     poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll },
     pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll },
     sys = { key = K_SYS, norm = M.normalize_sys, default = M.default_sys },
+    alias = { key = K_ALIAS, norm = M.normalize_alias, default = M.default_alias },
 }
 
 for name, sec in pairs(SECTIONS) do

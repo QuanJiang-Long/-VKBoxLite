@@ -1234,6 +1234,86 @@ function resetSniffView() {
   renderDetected();       // S.detected=null → 提示清空 + 颜色回灰
 }
 
+// 推断表里给某个寄存器起名字的弹窗 (2026-10)。
+// 两个输入: 参数名称(= 上报 name, 平台显示用) / 建议标识符(= 上报 id, 平台
+// 物模型按它建属性)。留空 = 恢复默认(名称跟标识符都退回 reg<addr>)。
+// 下面有实时预览: 存下去之后上报给平台的长什么样, 免得存完才发现填错。
+// 风格参考 askEditInterval (.modal.modal-open + .modal-content)
+function askEditRegName(row) {
+  return new Promise(resolve => {
+    const key = 'reg' + row.addr;
+    const curId = row.id || key;
+    const curName = row.name || '';
+    const modal = document.createElement('div');
+    modal.className = 'modal modal-open';
+    modal.innerHTML = `
+      <div class="modal-content" style="text-align:left;width:420px;">
+        <h3 style="margin:0 0 4px 0;">给寄存器起名</h3>
+        <div style="font-size:12px;color:#666;margin-bottom:12px;">
+          从机 ${esc(row.slave)} · 寄存器地址 ${esc(row.addr)} · 功能码 0x${esc(String(row.fc == null ? '?' : row.fc).padStart(2, '0').toUpperCase())}
+        </div>
+        <div style="margin-bottom:10px;">
+          <div style="font-size:12px;color:#666;margin-bottom:3px;">参数名称（上报 name，平台上显示的名字）</div>
+          <input id="edName" type="text" maxlength="64" placeholder="例：A相电流" value="${esc(curName)}"
+                 style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #dde2ea;border-radius:4px;font-size:13px;">
+        </div>
+        <div style="margin-bottom:10px;">
+          <div style="font-size:12px;color:#666;margin-bottom:3px;">建议标识符（上报 id，平台按它建属性）</div>
+          <input id="edId" type="text" maxlength="64" placeholder="例：CT1" value="${esc(curId)}"
+                 style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #dde2ea;border-radius:4px;font-size:13px;">
+        </div>
+        <div id="edPreview" style="font-family:Menlo,Consolas,monospace;font-size:12px;color:#0a7d2c;
+             background:#f4f6f9;border:1px solid #e6eaf0;border-radius:4px;padding:8px;margin-bottom:12px;"></div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button id="edSave" class="primary" style="flex:1;padding:9px;">保存</button>
+          <button id="edReset" style="padding:9px 12px;">恢复默认</button>
+          <button id="edCancel" style="padding:9px 12px;background:transparent;color:#666;border:1px solid #dde2ea;">取消</button>
+        </div>
+        <div style="font-size:11px;color:#999;margin-top:8px;">
+          保存后设备会按新名字上报；改标识符会让平台按新标识符重建物模型。
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const nameEl = modal.querySelector('#edName');
+    const idEl = modal.querySelector('#edId');
+    const prevEl = modal.querySelector('#edPreview');
+    const preview = () => {
+      const id = idEl.value.trim() || key;
+      const nm = nameEl.value.trim() || id;
+      prevEl.textContent = '上报: { id: "' + id + '", name: "' + nm + '" }';
+    };
+    preview();
+    nameEl.addEventListener('input', preview);
+    idEl.addEventListener('input', preview);
+    const close = v => { document.body.removeChild(modal); resolve(v); };
+    modal.querySelector('#edSave').onclick = () => close({
+      id: idEl.value.trim(),
+      name: nameEl.value.trim(),
+    });
+    // 恢复默认: 两个都清空 = 设备端删掉这条别名, 回到 reg<addr>
+    modal.querySelector('#edReset').onclick = () => close({ id: '', name: '' });
+    modal.querySelector('#edCancel').onclick = () => close(null);
+    modal.addEventListener('click', e => { if (e.target === modal) close(null); });
+    setTimeout(() => nameEl.focus(), 30);
+  });
+}
+
+// 保存一条别名并刷新推断表
+async function saveAlias(row, id, name) {
+  const key = 'reg' + row.addr;
+  try {
+    await sendCmd(Protocol.Enc.aliasWrite({ key: key, id: id, name: name }), 'SALIAS', 4000);
+    status('已保存 ' + key + ' 的名字，下次上报生效', true);
+    toast('已保存：' + (name || id || key) + '（下次上报生效）');
+    await doInfer();          // 重推一轮推断表，把新名字显示出来
+    return true;
+  } catch (e) {
+    status('保存失败：' + e.message, false);
+    toast('保存失败：' + e.message);
+    return false;
+  }
+}
+
 async function doInfer() {
   try {
     const r = await sendCmd(Protocol.Enc.infer(), 'INFER', 4000);
@@ -1269,6 +1349,7 @@ function renderInfer() {
     // 最新值: 设备只带被解出过的地址; 浮点显示截 4 位小数(纯展示, 不改数据)
     const v = (r.value != null && typeof r.value === 'number' && !Number.isInteger(r.value))
       ? Math.round(r.value * 1e4) / 1e4 : r.value;
+    const akey = 'reg' + r.addr;
     return '<tr>' +
     '<td>' + esc(r.slave) + '</td>' +
     '<td>' + esc(r.addr) + '</td>' +
@@ -1279,12 +1360,30 @@ function renderInfer() {
     '<td title="旁听应答最新解析值" style="font-family:monospace;font-size:12px;">' +
       (v != null ? esc(v) : '<span style="color:#999;">--</span>') + '</td>' +
     // 参数名称: 与 U4 上报 payload 的 name 同一字段 (设备端 attach_names 给的);
-    // 老固件不带 name 时退显示建议标识符同款 reg<addr>
-    '<td title="U4 上报 payload 的 name 字段" style="font-family:monospace;font-size:12px;">' +
-      (r.name != null ? esc(r.name) : 'reg' + esc(r.addr)) + '</td>' +
-    '<td>reg' + esc(r.addr) + '</td>' +
+    // 可点击改名 (2026-10)。老固件不带 name 时退显示 reg<addr>
+    '<td class="ed-cell" data-alias-key="' + esc(akey) + '" data-alias-field="name" ' +
+      'title="点击编辑上报用的参数名称">' + esc(r.name || akey) + '</td>' +
+    // 建议标识符: 上报用的 id。改名会让平台按新 id 重建物模型
+    '<td class="ed-cell" data-alias-key="' + esc(akey) + '" data-alias-field="id" ' +
+      'title="点击编辑上报用的标识符(id)">' + esc(r.id || akey) + '</td>' +
     '</tr>';
   }).join('');
+}
+
+// 推断表里点"参数名称 / 建议标识符"单元格 → 弹窗改名 (2026-10)
+// 事件委托: 表格是 innerHTML 重绘的, 绑在 tbody 上最省事
+if (el.inferTbody) {
+  el.inferTbody.addEventListener('click', async e => {
+    const td = e.target && e.target.closest ? e.target.closest('.ed-cell') : null;
+    if (!td) return;
+    const key = td.getAttribute('data-alias-key');
+    const regs = toArr(S.infer && S.infer.regs);
+    const row = regs.find(r => 'reg' + r.addr === key);
+    if (!row) return;
+    const v = await askEditRegName(row);
+    if (!v) return;
+    await saveAlias(row, v.id, v.name);
+  });
 }
 
 //---------------------------------------------------------------------
@@ -2320,7 +2419,9 @@ const MOCK = {
           sub_topic: '/sys/thing/gw/config/get/{SN}',
           interval_s: 120, keep_session: false,
           auto: { pass: 'VKBOXGW2026KEY' }, manual_on: false },
-  published: 0
+  published: 0,
+  // sniff 别名表 (2026-10): 浏览器预览里也能改名看效果
+  alias: { regs: [] }
 };
 
 function mockModeStat() {
@@ -2430,14 +2531,38 @@ function mockReply(line) {
     { slave: 2, fc: 3, kind: 'req', addr: 0, qty: 10, hex: '02 03 00 00 00 0A', len: 8, pair_state: 'req' },
     { slave: 2, fc: 3, kind: 'rsp', bc: 20, vhex: '0001000200030004', hex: '02 03 14 00 01 …', len: 25, pair_state: 'orphan' }
   ]);
-  else if (line === 'R:INFER') resp = 'RET:INFER=' + JSON.stringify({
-    regs: [
-      { slave: 1, addr: 100, count: 2, fc: 3, hits: 12, value: 42, name: 'reg100' },
-      { slave: 2, addr: 0, count: 10, fc: 3, hits: 5, value: null, name: 'reg0' }
-    ],
-    slaves: [1, 2],
-    stat: { frames: 24, reqs: 12, rsps: 11, errs: 0, paired: 10, orphans: 1, detect_round: 0, detect_fail: 0 }
-  });
+  else if (line === 'R:INFER') {
+    // 别名表里的名字要反映到推断表 (浏览器预览里改名后重推能看到变化)
+    const mregs = [
+      { slave: 1, addr: 100, count: 2, fc: 3, hits: 12, value: 42 },
+      { slave: 2, addr: 0, count: 10, fc: 3, hits: 5, value: null }
+    ].map(r => {
+      const key = 'reg' + r.addr;
+      const sa = MOCK.alias.regs.find(x => x.key === key);
+      return Object.assign({}, r, {
+        id: sa ? (sa.id || key) : key,
+        name: sa ? (sa.name || sa.id || key) : key,
+      });
+    });
+    resp = 'RET:INFER=' + JSON.stringify({
+      regs: mregs,
+      slaves: [1, 2],
+      stat: { frames: 24, reqs: 12, rsps: 11, errs: 0, paired: 10, orphans: 1, detect_round: 0, detect_fail: 0 }
+    });
+  }
+  // sniff 别名表 (2026-10): 浏览器预览里也能改名
+  else if (line === 'R:SALIAS') resp = 'RET:SALIAS=' + JSON.stringify(MOCK.alias);
+  else if (line.indexOf('W:SALIAS=') === 0) {
+    let o = null;
+    try { o = JSON.parse(line.slice('W:SALIAS='.length)); } catch (e) { o = null; }
+    if (!o || !o.key) resp = 'RET:FAIL:SALIAS:bad json';
+    else {
+      const regs = MOCK.alias.regs.filter(r => r.key !== o.key);
+      if (o.id || o.name) regs.push({ key: o.key, id: o.id || '', name: o.name || '' });
+      MOCK.alias = { regs: regs };
+      resp = 'RET:SALIAS=OK';
+    }
+  }
   // 浏览器预览: 模拟"进了 sniff 但还在识别"这一小段, 让「正在识别」提示
   // 在没接真设备时也走得到(真设备由 mon.is_detecting() 给)
   else if (line === 'R:AUTODETECT' && MOCK.detecting) {

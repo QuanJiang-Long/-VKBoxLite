@@ -55,6 +55,13 @@
     frames:  (n)  => 'R:FRAMES' + (n ? '=' + n : ''),   // 最近解译帧
     infer:   ()   => 'R:INFER',                          // 推断轮询表+从机列表（只读参考，不写配置）
     autoDetect: () => 'R:AUTODETECT',                    // 识别 baud/parity（只用于本次 sniff 会话）
+
+    // ---- sniff 别名表 (2026-10) ----
+    // 用户在推断表里给 reg<addr> 起的 id/name。存设备 fskv(ds_alias),
+    // 生效范围: sniff 档的 U2 拓扑属性 id/name + U4 数据项 id/name,
+    // 即平台上显示的就是用户起的名字
+    aliasRead:  ()   => 'R:SALIAS',
+    aliasWrite: (o) => 'W:SALIAS=' + JSON.stringify(o),   // {key,id,name}; id/name 都空 = 删这条
   };
 
   // ---------- 解码：设备 -> 前端 ----------

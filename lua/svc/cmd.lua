@@ -276,6 +276,27 @@ local function reg_cmds()
         M.reply("RET:BOOTMODE=OK")
     end)
 
+    -- R:SALIAS: 读 sniff 别名表 (用户在推断表里给 reg<addr> 起的 id/name)
+    M.reg("R:SALIAS", function()
+        M.reply("RET:SALIAS=" .. jencode(cfgstore.load_alias()))
+    end)
+
+    -- W:SALIAS={key,id,name}: 单条 upsert。id/name 都空 = 删掉这条
+    -- (用户把名字清空 = 恢复默认 reg<addr>)。校验(键格式/长度/条数)在
+    -- cfg.normalize_alias 里
+    M.reg("W:SALIAS", function(arg)
+        local t = jdecode(arg)
+        if not t then return M.reply("RET:FAIL:SALIAS:bad json") end
+        local function s(v) if type(v) == "string" then return v end return "" end
+        local key = s(t.key)
+        if not key:match("^reg%d+$") then
+            return M.reply("RET:FAIL:SALIAS:bad key(要 reg<addr>)")
+        end
+        local ok, err = cfgstore.set_alias(key, s(t.id), s(t.name))
+        if not ok then return M.reply("RET:FAIL:SALIAS:" .. tostring(err)) end
+        M.reply("RET:SALIAS=OK")
+    end)
+
     M.reg("R:BOOTMODE", function()
         -- 读开机默认模式 (fskv ds_sys.boot_mode)。前端 "运行状态总览" 卡片
         -- 用, 跟 W:BOOTMODE 配对: 改了 selBootMode 但没保存, 设备值跟本地
