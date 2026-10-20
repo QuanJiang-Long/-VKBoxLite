@@ -98,7 +98,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | W:GC | 强制 GC + 重连（**仅开发版注册**） |
 | R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20，**正式注册**，sniff 报文卡依赖） |
 | R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits,value,name}], slaves, stat}`（**只读参考**，不写任何配置；`value` = 旁听应答最新解析值，地址没被解出过时缺省；`name` = U4 上报 payload 的 name（`alias` 映射,同 `iot.build_items` 一套，没配 alias 时 = `reg<addr>`） |
-| R:AUTODETECT | 识别 sniff 通讯参数 `{baud,databits,stopbits,parity}`（**只用于本次会话**，不写 fskv）。**非阻塞**：回 `BUSY` / 参数 / `RET:FAIL:not in sniff mode`，由前端轮询 |
+| R:AUTODETECT[=restart] | 识别 sniff 通讯参数 `{baud,databits,stopbits,parity}`（**只用于本次会话**，不写 fskv）。**非阻塞**：回 `BUSY` / 参数 / `RET:FAIL:not in sniff mode`，由前端轮询。带 `=restart` = 强制重扫（先清旧帧旧值与旧结果，再从头扫），前端「重新识别通讯参数」按钮用 |
 | W:MODE=poll\|pollpull\|sniff\|idle | 切换 485 运行模式。`sniff` 会**自动起一轮识别**（非阻塞），立即回 OK；`pollpull` 会自动 hello 拉平台配置 |
 | W:BOOTMODE=idle\|poll\|pollpull\|sniff | 开机默认模式（大小写不敏感）。`sniff` 同样自动识别，但不堵开机流程 |
 | R:SN / R:ID / W:SN=xxx[,FORCE] / C:SN / LOCK:SN / UNLOCK:SN / R:SNEN / W:SNEN=n,0\|1[,P] | SN 产线指令（VUART_0 通道） |
@@ -351,6 +351,43 @@ RET:FAIL:AUTODETECT:not in sniff mode
 ```
 
 不在 sniff 模式时**不会**自动帮用户进 sniff——一条查询指令不该有切模式的副作用。
+
+### 2026-10: 重新识别 = 重新开一轮（先清再识别）+ 识别未成功前不上报
+
+**「重新识别通讯参数」按钮**发的是 `R:AUTODETECT=restart`（不是裸的 `R:AUTODETECT`）：
+
+| 动作 | 设备端做的事 |
+|---|---|
+| 清旧缓存 | `collector.clear_all()`：dataCache(值/dtype/conf) + frames + ring 全清 |
+| 作废旧结果 | `mon.request_detect()`：当前检测轮作废 + `_G.mon_detect_result = nil` |
+| 重扫 | 21 候选从头扫（最坏 21s） |
+
+裸发 `R:AUTODETECT` 只是**问**上一轮的结果（设备有结果就直接回旧值，不重扫）——
+所以按钮必须带 `=restart`，否则用户看到的是"点了没反应，只是复读参数"。
+
+> ⚠️ `restart` 的参数判断必须**精确等于** `"restart"`：`cmd.lua` 的 `M.handle`
+> 对**裸指令**也会把整行当参数传进 handler（`pcall(fn, line)`），裸发时
+> `arg == "R:AUTODETECT"`。按"非空就算 restart"写，会让每秒一次的识别轮询
+> 把自己正在跑的识别作废一轮，永远扫不出参数（2026-10 实测踩过）。
+
+**缓存清理的三个时机**（`mon.lua`）：
+
+| 时机 | 清什么 | 为什么 |
+|---|---|---|
+| 进 sniff（`mon.start`） | dataCache + frames + 旧识别结果 | 旧参数下的值/帧不能混进这一轮的推断 |
+| 重新识别（`mon.restart_detect`） | 同上 | 同上 |
+| 退出 sniff（`mon.stop`） | 同上 | 识别参数是"仅本次会话"的；不清的话下次进 sniff 的一瞬间，前端的"5s 轮询兜底采纳"会把上次的旧参数当成"已识别"显示出来 |
+
+**识别未成功前不上报**（`iot.pub_blocked`）：
+
+| 通道 | 识别未成功期间 |
+|---|---|
+| U1 hello / U2 meta / U2 拓扑 / U3 资源 / U4 数据 / U5 告警 | 🚫 全部不发 |
+| U6 配置回执 / U7 指令回执 / `claim_ok` / `func_reply` | ✅ 照发（控制面回执，平台在等应答，压了会一直等/重推） |
+
+- **"未成功"** = 正在识别 / 压根没有识别结果 / 识别失败（兜底 `cfg.BAUD`）
+- **原因**：识别期间串口参数还是默认值或候选值，这期间发出去的东西，平台会按错波特率建一次模型（拓扑）、收到脏值（数据），白推一次配置还得重建
+- **恢复**：识别成功后，下一轮周期任务自然恢复——门闸是"当轮跳过"且**不推进 `last_pub`**，识别一结束下一轮立刻补发，不需要额外的"恢复"逻辑
 
 ### 已修：识别失败后串口停在最后一个候选
 

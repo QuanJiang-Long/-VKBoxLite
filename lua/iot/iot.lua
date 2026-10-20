@@ -271,6 +271,24 @@ local function build_items()
     return items
 end
 
+-- 识别闸门 (2026-10): sniff 档"识别未成功"期间一律不上报。
+--   什么叫未成功: 正在识别 / 压根没有识别结果 / 识别失败(兜底 cfg.BAUD)。
+--   为什么挡: 识别期间串口参数还是默认值或候选值, 这期间发出去的东西
+--   平台会按错波特率建模型(拓扑)、收到脏值(数据), 白推一次配置还得重建。
+--   识别成功后自然恢复: 门闸是"当轮跳过"且不推进 last_pub, 识别一结束
+--   下一轮立刻补发, 不需要额外的"恢复"逻辑。
+--   不挡的: U6 配置回执 / U7 指令回执 / claim_ok / func_reply ——
+--   控制面回执, 平台在等应答, 压了会一直等/重推(2026-10 定: 只压数据面)
+local function pub_blocked()
+    if get_mode() ~= "sniff" then return false end
+    local st = mon.status()
+    if st.detecting then return true end
+    local d = st.detected
+    if not d or d.baud == nil then return true end
+    if d.fallback then return true end
+    return false
+end
+
 -- U4 子设备数据上报。topic = profile 出的 base, 是否加 -{n} 后缀看档位:
 --   自动档 = PLATFORM_PUB_TOPIC 固定常量, 按 V3 契约拼 -{n}
 --   手动档 = 用户填的 pub_topic, 原样用不加后缀
@@ -279,6 +297,8 @@ end
 -- 加个 -1 之后平台那头什么都收不到(实测踩过), 所以手动档不加
 local function publish()
     if not S.client or not S.connected then return false end
+    -- 识别未成功前不上报 (见 pub_blocked)
+    if pub_blocked() then return false end
     -- idle 模式短路: collector.dataCache 可能残留之前切档前的数据, idle 不该发
     -- (跟 should_pub_platform 一样, idle 不上送任何平台数据, 包括 U4)
     if get_mode() == "idle" then return false end
@@ -473,6 +493,8 @@ end
 local function send_meta()
     local did = cur_did()
     if not did then return false, "无 SN" end
+    -- 识别未成功前不上报 (见 pub_blocked)
+    if pub_blocked() then return false, "识别未完成" end
     local csq = MqttUtil.mcall(mobile, "csq")
     if type(csq) ~= "number" then csq = nil end
     local p = {}
@@ -519,6 +541,9 @@ end
 local function send_topo()
     local did = cur_did()
     if not did then return false, "无 SN" end
+    -- 识别未成功前不发拓扑 (见 pub_blocked)。旧门闸只看 detecting, 兜底失败
+    -- 之后 detecting=false 但其实没识别成功, 照样会发 —— 现在统一按"未成功"判
+    if pub_blocked() then return false, "识别未完成" end
     local nodes, err = build_nodes()
     if not nodes then return false, err end
     return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did),
@@ -620,6 +645,10 @@ end
 local function send_gw_res()
     local did = cur_did()
     if not did then return false end
+    -- 识别未成功前不上报 (见 pub_blocked)。U5 资源告警的判定在函数末尾
+    -- (check_event_threshold), 这里一并挡掉 —— 识别扫描吃 CPU, 忙碌占比
+    -- 虚高容易撞 cpu>=90 阈值, 误发一条资源告警给平台
+    if pub_blocked() then return false end
     local total, used = heap_info()
     local ts = MqttUtil.ms_of(os.time())
     local ram = 0
@@ -1351,6 +1380,9 @@ end
 -- 返回 true, onboardingMode / false, err
 local function send_hello()
     if not S.client or not S.connected then return false, "未连接" end
+    -- 识别未成功前不上报 (见 pub_blocked): hello 是平台建档的入口, 识别期间
+    -- 串口参数还是默认值, 这时报到等于让平台按错波特率建一次模型
+    if pub_blocked() then return false, "识别未完成" end
     local did = device_id()
     if not did or did == "" then return false, "无 SN" end
     -- hello topic 走固定平台常量(不再可配)。上面已经判过无 SN, 这里
@@ -1632,8 +1664,10 @@ local function task_main()
             -- detect 跑完之前不发拓扑: 这期间 serial 参数还是上一轮的默认值
             -- (9600), 发出去平台就按错波特率建一次模型, detect 完还得再重建 ——
             -- 白推一次配置, 白占一次 info/post
+            -- 2026-10: 判据从"正在识别"升级成"识别未成功"(含兜底失败), 与
+            -- pub_blocked 同一口径
             local sig = nil
-            if pub_topo and not mon.status().detecting then sig = topo_sig() end
+            if pub_topo and not pub_blocked() then sig = topo_sig() end
             if sig and sig ~= S.topo_sig then
                 local ok, e = send_topo()
                 if ok then

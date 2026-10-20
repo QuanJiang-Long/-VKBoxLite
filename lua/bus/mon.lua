@@ -423,6 +423,12 @@ end
 
 function M.start(c)
     if running then return true end
+    -- 2026-10: 进 sniff 先把上一轮的东西清干净再开始。
+    --   dataCache/frames 是上一轮(可能是旧参数)留下的值与请求帧, 留着会
+    --   混进这一轮的推断表; 识别结果也要清, 否则前端会先看到上次的旧参数
+    --   (S.detected 采纳兜底那路径), 造成"刚进 sniff 就显示已识别"的假象
+    collector.clear_all()
+    _G.mon_detect_result = nil
     -- sniff-2 fix: 重新进 sniff 时清 forceStop, 否则上次的 stop 标志会让
     --   auto_detect 立刻 return "stopped" (detect_loop 也会跟着退)
     forceStop = false
@@ -571,6 +577,17 @@ function M.request_detect()
     return true
 end
 
+-- 2026-10: 「重新识别通讯参数」= 重新开一轮识别。
+--   先把上一轮清干净(帧/值/dtype/旧结果), 再重扫 —— 否则旧参数下的请求帧
+--   和旧值会混进新一轮推断表, 参数变了更是彻底对不上。
+--   request_detect 本身只作废当前轮 + 清识别结果, 不碰 collector 缓存,
+--   所以这里补一次 clear_all
+function M.restart_detect()
+    if not running then return false, "not running" end
+    collector.clear_all()
+    return M.request_detect()
+end
+
 function M.is_detecting() return detecting end
 
 function M.detect_result() return _G.mon_detect_result end
@@ -592,6 +609,14 @@ function M.stop()
     pcall(uart.close, mbus.UART_ID)
     rxbuf = ""
     pendingReqs, lastReqs = {}, {}
+    -- 2026-10: 退出 sniff 也清干净:
+    --   - dataCache/frames: sniff 期间的值/帧留着会跟别的档位混在一起
+    --     (切到 manual/platform 时这些值不该被当成本档的数据)
+    --   - _G.mon_detect_result: 识别参数是"仅本次会话"的, 离开就失效。
+    --     不清的话下次进 sniff 的一瞬间, 前端的"5s 轮询兜底采纳"会把
+    --     上次的旧参数当成"已识别"显示出来(用户实测: 旧参数闪现)
+    collector.clear_all()
+    _G.mon_detect_result = nil
     log.info("mon", "sniff stopped")
     return true
 end

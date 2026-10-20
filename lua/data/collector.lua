@@ -103,4 +103,20 @@ function M.trim_cache()
     return n
 end
 
+-- 全量清缓存: dataCache(值/dtype/conf) + 记账表 + frames + ring。
+-- sniff 换参数/重新识别时用 (2026-10):
+--   - 旧参数下解出来的值/dtype 是按旧参数算的, 参数一变就可能是错的
+--   - 旧参数下的请求帧会混进新一轮推断表(出现次数/寄存器地址重复)
+-- ⚠️ 清 dataCache 会让平台侧看到数据断档 —— 但 sniff 识别期间本来就不上报
+--    (iot.pub_blocked), 识别成功后从零开始, 语义一致
+function M.clear_all()
+    local n = #dataCache + #frames
+    dataCache = {}
+    dataOrder = {}
+    frames = {}
+    ring, ringIdx = {}, 0
+    stat.pushed, stat.frames = 0, 0
+    return n
+end
+
 return M

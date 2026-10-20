@@ -317,12 +317,17 @@ local function reg_cmds()
     --   M.handle 对裸指令也把整行当参数传进来 (pcall(fn, line), 裸发时
     --   arg = "R:AUTODETECT"), 判空会让每次轮询都被当成 restart —— 实测
     --   后果就是轮询自己把识别轮每秒作废一次, 永远扫不出参数 (2026-10 踩过)
+    --   restart 走 mon.restart_detect: 先清旧帧旧值(旧参数下的东西不能混进
+    --   新一轮推断), 再重扫 (2026-10)
     M.reg("R:AUTODETECT", function(arg)
         if arg == "restart" then
             if not mon.is_running() then
                 return M.reply("RET:FAIL:AUTODETECT:not in sniff mode")
             end
-            mon.request_detect()
+            local ok, err = mon.restart_detect()
+            if not ok then
+                return M.reply("RET:FAIL:AUTODETECT:" .. tostring(err))
+            end
             return M.reply("RET:AUTODETECT=BUSY")
         end
         if not mon.is_running() then
