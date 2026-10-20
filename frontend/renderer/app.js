@@ -1011,9 +1011,16 @@ async function readBootMode() {
     const r = await sendCmd(Protocol.Enc.readBootMode(), 'BOOTMODE', 2000);
     // r 是 Protocol.decode 返的 {cmd, ok, data, raw}, r.data 是应答字面
     // "idle"/"manual"/"platform"/"sniff" 直返字面
-    if (r && r.data) S.bootMode = r.data;
-    // 同步 selBootMode 跟设备值, 刷新 dirty 状态
-    snapBootClean();
+    if (r && r.data) {
+      S.bootMode = r.data;
+      // 同步 selBootMode 跟设备值, 刷新 dirty 状态
+      // ⚠️ 只在"不脏"时同步: readBootMode 走 5s 定时器 (readHome) 也会到
+      //   这里, 用户改了开机默认模式还没保存时, snapBootClean 会拿设备
+      //   旧值覆盖下拉框并把 dirty 清掉 —— 表现为"没保存的修改过一会自己
+      //   变回去, 保存按钮也回蓝" (2026-10 用户实测报出)。脏的时候只
+      //   更新设备真值 S.bootMode, 不动用户的选择与按钮状态
+      if (!S.bootDirty) snapBootClean();
+    }
   } catch (e) { /* 读失败不打扰用户, 卡片显示 -- 即可 */ }
 }
 
