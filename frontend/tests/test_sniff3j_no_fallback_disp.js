@@ -8,7 +8,9 @@ const fs = require('fs');
 const path = require('path');
 const { assertEq } = require('./setup');
 
-const appJs = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
+const appJs = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8')
+  // 换行归一化: Windows 下 git autocrlf 检出 CRLF, 断言里的 '\n' 字面会全落空
+  .replace(/\r\n/g, '\n');
 
 // 1. renderDetected 函数体内含 fallback 分支
 const fnStart = appJs.indexOf('function renderDetected()');

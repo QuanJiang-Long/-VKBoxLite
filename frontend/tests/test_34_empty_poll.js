@@ -13,11 +13,13 @@ const fs = require('fs');
 const path = require('path');
 const { assertEq } = require('./setup');
 
-const cfgLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'cfg.lua'), 'utf8');
-const ctrlLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'bus', 'ctrl.lua'), 'utf8');
-const cmdLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'svc', 'cmd.lua'), 'utf8');
-const iotLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'iot', 'iot.lua'), 'utf8');
-const appJs = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
+// 换行归一化: Windows 下 git autocrlf 检出 CRLF, 断言里的 '\n' 字面会全落空
+const norm = s => s.replace(/\r\n/g, '\n');
+const cfgLua = norm(fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'cfg.lua'), 'utf8'));
+const ctrlLua = norm(fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'bus', 'ctrl.lua'), 'utf8'));
+const cmdLua = norm(fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'svc', 'cmd.lua'), 'utf8'));
+const iotLua = norm(fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'iot', 'iot.lua'), 'utf8'));
+const appJs = norm(fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8'));
 
 // === 1. cfg.lua: has_poll_cfg / has_pull_cfg 函数存在 ===
 assertEq(/function M\.has_poll_cfg\(\)/.test(cfgLua), true,
@@ -67,10 +69,14 @@ if (wcfgHandler) {
   assertEq(/not\s+poll\.is_running\(\)/.test(body), true,
     'W:CFG: poll 没起时补起 (34-fix 副作用)');
   // 注释: 34-fix
-  // 在 wcfgHandler 之前留的 34-fix 注释块 (不在 handler 内部, 是更上方的)
-  // 直接在 cmd.lua 全文中找
-  assertEq(/34-fix:[\s\S]{0,200}W:CFG[\s\S]{0,200}补起|34-fix:[\s\S]{0,200}补起[\s\S]{0,100}poll/.test(cmdLua), true,
-    'W:CFG: 有 34-fix 注释 (补起 poll)');
+  // 在 handler 全文找 34-fix 注释 + poll.start 调用 (语义断言)。
+  // 不再用 "34-fix[|..200]补起[|..100]poll" 的字符窗口 —— 限近距离搜词
+  // 会被注释重排/深缩进/换行符挤爆 (实测超窗 9 字符, 与代码对错无关)
+  const wcfgStart = cmdLua.indexOf('M.reg("W:CFG"');
+  const wcfgNext = cmdLua.indexOf('M.reg("', wcfgStart + 10);
+  const wcfgRegion = cmdLua.substring(wcfgStart, wcfgNext > 0 ? wcfgNext : wcfgStart + 3000);
+  assertEq(/34-fix/.test(wcfgRegion) && /poll\.start/.test(wcfgRegion), true,
+    'W:CFG: handler 区间内有 34-fix 注释 + poll.start 补起');
 }
 
 // === 4. iot.lua: apply_fail 状态 ===
