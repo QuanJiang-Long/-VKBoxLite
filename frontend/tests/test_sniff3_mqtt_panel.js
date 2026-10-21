@@ -142,7 +142,8 @@ assertEq(hasNewRefs, true,
 // 10. mqtt.js 加 renderSnStatus 函数
 assertEq(/function\s+renderSnStatus\s*\(/.test(mqttJs), true,
   'sniff-3: mqtt.js 加 renderSnStatus() 函数 (把 R:MQTT stat/cfg 填到 snStXxx)');
-// 10a. renderMqtt 末尾调用
+// 10a. renderMqtt 状态部分调用 (2026-10: renderMqtt 拆成 renderMqttForm +
+//     renderMqttStatus 两半, renderSnStatus 现在在状态半边里)
 const rMqtt = mqttJs.indexOf('function renderMqtt()');
 let rEnd = -1;
 for (let off = rMqtt + 50; off < mqttJs.length; off++) {
@@ -151,7 +152,7 @@ for (let off = rMqtt + 50; off < mqttJs.length; off++) {
   }
 }
 const rBody = mqttJs.substring(rMqtt, rEnd > 0 ? rEnd : rMqtt + 2000);
-assertEq(/renderSnStatus\(s,\s*c,\s*pubTopics\)/.test(rBody), true,
+assertEq(/renderSnStatus\(s,\s*c,\s*pubTopics\)/.test(mqttJs), true,
   'sniff-3: renderMqtt 末尾调 renderSnStatus(s, c, pubTopics)');
 
 // 11. renderSnStatus 内部: 11 字段映射 (新字段名)

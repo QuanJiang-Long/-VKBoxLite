@@ -188,7 +188,18 @@ async function saveHomeMqtt() {
 //=====================================================================
 // MQTT 配置
 //=====================================================================
+// renderMqtt 拆成两半 (2026-10):
+//   renderMqttForm   —— 写输入框 (MQTT 表单 + sniff 三栏), 只在 readMqtt 读全量时调
+//   renderMqttStatus —— 只画状态卡(连接状态/已订阅/生效 topic/首页总览), 一个输入框都不碰
+// 拆开是为了让状态卡能被 5s 定时器的 R:STAT 刷新: 那条应答本来就带 mqtt 段,
+// 不用额外发指令; 而整包 renderMqtt 会把用户正在编辑的表单冲掉(Step 2l 的坑)。
 function renderMqtt() {
+  renderMqttForm();
+  renderMqttStatus();
+}
+
+// 表单部分: 写输入框。fillOk 守卫"正在输入的框不能抢"。
+function renderMqttForm() {
   const r = S.mqtt || {};
   const c = r.cfg || {};
   // Step 2b: 取当前档位 prefix (m-/p-/), 业务用 E() 写对应 tab 内元素
@@ -236,6 +247,17 @@ function renderMqtt() {
   if (document.activeElement !== el.snMqHost) el.snMqHost.value = c.host || '';
   if (document.activeElement !== el.snMqPort) el.snMqPort.value = c.port != null ? c.port : 1883;
   if (document.activeElement !== el.snMqInterval) el.snMqInterval.value = c.interval_s != null ? c.interval_s : 120;
+
+}
+
+// 状态部分: 只画状态卡, 不碰任何输入框。
+//   5s 定时器(R:STAT)把最新 mqtt 段并进 S.mqtt.stat 后调它, 状态卡就跟着设备实时走
+//   (切 sniff 档时 MQTT 会断开重连, 那期间读到的 connected=false; 重连成功后
+//    没有重画就一直显示"连接中/已断开" —— 2026-10 用户报出的现象)。
+function renderMqttStatus() {
+  const r = S.mqtt || {};
+  const c = r.cfg || {};
+  const pre = mqttPrefix();
   const s = r.stat || {};
   // Step 2b: 17 字段状态写 m/p 各自 tab
   setKvPre(pre, 'mqStConn', s.connected ? '已连接' : (s.want_run ? '连接中/已断开' : '未启动'), !s.connected);
@@ -295,7 +317,8 @@ function renderMqtt() {
   // 当前档次: 手动 = 用本页填的凭证；自动 = 首页那份凭证 + SN
   // 当前档次: 手动档显示"手动配置" —— 用强调色(蓝)而不是错误红:
   //   手动配置不是错, 只是与"自动(设备拼接)"区分开 (2026-10 用户要求)
-  setKvPre(pre, 'mqStMode', c.manual_on ? '手动配置' : '自动（设备拼接）', false, c.manual_on ? 'info' : '');
+  const manualOn = (s.manual_on !== undefined) ? !!s.manual_on : !!c.manual_on;
+  setKvPre(pre, 'mqStMode', manualOn ? '手动配置' : '自动（设备拼接）', false, manualOn ? 'info' : '');
   setKvPre(pre, 'mqStSubed', s.subscribed ? '是' : '否', !s.subscribed);
   // Step 2i: 17 字段 → 9 字段, 删 8 个 setKvPre (面板也对应删了):
   //  - mqStSubs 订阅Topic / mqStReplied 配置回执 / mqStPubed 已上报条数

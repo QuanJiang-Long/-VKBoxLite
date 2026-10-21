@@ -1197,6 +1197,13 @@ async function readHome() {
     // 开机模式不在 R:STAT 4 段里, 单独发 R:BOOTMODE 读
     await readBootMode();
     renderHome();
+    // 状态卡跟着设备实时状态走 (2026-10): R:STAT 的 mqtt 段已经并进
+    // S.mqtt.stat 了, 这里只重画状态卡(不碰任何输入框)。
+    // 起因: 切 sniff 档时 MQTT 会断开重连, 那一刻读到的 connected=false,
+    // 而状态卡只在 readMqtt(读全量)时才重画 → 重连成功后卡片一直显示
+    // "连接中/已断开", 切走再切回来才刷新(用户实测报出)。
+    // renderMqttStatus 只画状态部分, 用户正在编辑的 MQTT 表单不会被冲掉。
+    if (typeof renderMqttStatus === 'function') renderMqttStatus();
   } catch (e) { /* 首页刷新失败不打扰用户 */ }
 }
 
