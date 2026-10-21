@@ -168,7 +168,6 @@ const el = new Proxy({
   snStUser: $('snStUser'),
   snStDevId: $('snStDevId'),
   snStMode: $('snStMode'),
-  snStManual: $('snStManual'),
   snStPub: $('snStPub'),
   snStSub: $('snStSub'),
   snStExtraTopics: $('snStExtraTopics'),

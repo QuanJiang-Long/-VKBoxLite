@@ -987,7 +987,9 @@ body.mq-manual .auto-only{display:none !important;}
                         <div class="kv"><b>用户名</b><span id="snStUser">--</span></div>
                         <div class="kv"><b>设备编号</b><span id="snStDevId">--</span></div>
                         <div class="kv"><b>当前档次</b><span id="snStMode">--</span></div>
-                        <div class="kv"><b>手动配置</b><span id="snStManual">--</span></div>
+                        <!-- 2026-10: "手动配置"行删掉 —— sniff 档现在恒为自动档
+                             (设备端切 sniff 会复位 manual_on, 见 ctrl.lua), 这行
+                             永远是"否", 占位置还让人以为切错了档 -->
                         <div class="kv"><b>生效发布</b><span id="snStPub">--</span></div>
                         <div class="kv"><b>生效订阅</b><span id="snStSub">--</span></div>
                         <div class="kv kv-wide"><b>其他生效 Topic</b><pre id="snStExtraTopics" class="kv-pre">--</pre></div>

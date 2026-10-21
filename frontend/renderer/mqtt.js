@@ -206,6 +206,7 @@ function renderMqtt() {
     // 设备端 publish()/build_subs() 对空串各自有守卫, 这里直接照填 c.pub_topic
     if (fillOk(E(pre, 'mqPub'))) E(pre, 'mqPub').value = c.pub_topic || '';
     if (fillOk(E(pre, 'mqSub'))) E(pre, 'mqSub').value = c.sub_topic || '';
+    // user/client_id 留空是故意的: 设备兜底填 SN (user→SN, client_id→SN_)
     // sniff 页面简版: 同步 broker 地址/端口 (只读) + 周期 (可编辑)
     // snMqHost/Port/Interval 是 sniff 页面独立元素, 跟 m/p 无关
     // ⚠️ 不能走 fillOk: 它有"所在 tab-pane 不可见就不填"的回显守卫, 而切入
@@ -214,18 +215,27 @@ function renderMqtt() {
     //   是只读回显, 不可编辑, 只防"焦点正在上面时被冲字"即可
     if (document.activeElement !== el.snMqHost) el.snMqHost.value = c.host || '';
     if (document.activeElement !== el.snMqPort) el.snMqPort.value = c.port != null ? c.port : 1883;
-    // user/client_id 留空是故意的: 设备兜底填 SN (user→SN, client_id→SN_)
+    if (document.activeElement !== el.snMqInterval) el.snMqInterval.value = c.interval_s != null ? c.interval_s : 120;
     // topic 留空也是故意的: Step 2k 起不再有默认路径, 设备不订不发
     // 显示空属正常。实际生效值看下面的连接状态面板。
     if (fillOk(E(pre, 'mqInterval'))) E(pre, 'mqInterval').value = c.interval_s != null ? c.interval_s : 120;
-    // snMqInterval 同理 (点击弹窗改周期, 弹窗期间焦点在弹窗输入上, 不冲)
-    if (document.activeElement !== el.snMqInterval) el.snMqInterval.value = c.interval_s != null ? c.interval_s : 120;
     // QoS 已从界面移除：设备端发布/订阅固定用 QoS 1，
     // 这里不再显示也不再下发（设备 normalize 会退回默认值 1）。
     // 18-fix: 删除 no_SN 建连 字段后, 也不再有 allow_no_sn 下发
     // MQTT 会话管理（select）：'1'=持久会话  '0'=离线自动销毁（默认）
     const keepEl = E(pre, 'mqKeepSession'); if (keepEl) keepEl.value = c.keep_session ? '1' : '0';
   }
+  // sniff 页面简版: 同步 broker 地址/端口 (只读) + 周期 (可编辑)
+  // snMqHost/Port/Interval 是 sniff 页面独立元素, 跟 m/p 无关
+  // ⚠️ 不能走 fillOk: 它有"所在 tab-pane 不可见就不填"的回显守卫, 而切入
+  //   sniff 档时的自动刷新 (readMqtt) 常在 sniff 面板还没显示时落地 ——
+  //   结果表现为"进 sniff 有时刷新有时没刷" (2026-10 实测定性)。这三栏
+  //   是只读回显, 不可编辑, 只防"焦点正在上面时被冲字"即可
+  // ⚠️ 放在 c.host !== undefined 守卫【外面】: 守卫不成立(设备回的 cfg 没
+  //   host 字段)时若跟着跳过, 面板就一直空着, 看着像"没刷新"
+  if (document.activeElement !== el.snMqHost) el.snMqHost.value = c.host || '';
+  if (document.activeElement !== el.snMqPort) el.snMqPort.value = c.port != null ? c.port : 1883;
+  if (document.activeElement !== el.snMqInterval) el.snMqInterval.value = c.interval_s != null ? c.interval_s : 120;
   const s = r.stat || {};
   // Step 2b: 17 字段状态写 m/p 各自 tab
   setKvPre(pre, 'mqStConn', s.connected ? '已连接' : (s.want_run ? '连接中/已断开' : '未启动'), !s.connected);
@@ -317,8 +327,8 @@ function renderSnStatus(s, c, pubTopics) {
   // 当前档次: 跟 m/p 卡片同步, 但 sniff 模式下都是设备实际生效值
   //   c.manual_on=true 表示手动档在跑 (本页填的凭证/topic), false=自动档 (首页 MQTT + SN 拼)
   setKv('snStMode', c.manual_on ? '手动配置' : '自动（设备拼接）', !!c.manual_on);
-  // 手动配置字段: 直接告诉用户当前是不是手动档, 不要混淆
-  setKv('snStManual', c.manual_on ? '是' : '否');
+  // 2026-10: "手动配置"字段已从 sniff 状态卡删掉 (设备端切 sniff 会复位
+  //   manual_on → sniff 恒为自动档, 那行永远是"否")
   // 生效发布: pubTopics[0] (主 topic), 没连上是 '未连接'
   if (pubTopics && pubTopics.length) {
     setKv('snStPub', pubTopics[0], false);
@@ -361,6 +371,19 @@ async function readMqtt(quiet) {
     }
     snapMqClean();                 // 读完了，当前表单就是干净基线
   } catch (e) {
+    // 串口单未决(上一条指令还没回)时 sendCmd 直接失败 → sniff 面板的
+    // "MQTT 服务器地址/端口"就一直是空的(2026-10 实测"有时刷新有时没刷")。
+    // 撞上的那条指令通常几百毫秒内就回, 等一下重试一次
+    if (/尚未返回/.test(e.message || '')) {
+      await new Promise(r => setTimeout(r, 400));
+      try {
+        const r2 = await sendCmd(Protocol.Enc.mqtt(), 'MQTT');
+        S.mqtt = r2.data;
+        renderMqtt();
+        snapMqClean();
+        return;
+      } catch (e2) { /* 仍失败就落到下面的提示 */ }
+    }
     // Step 2i fix: 之前 setKvPre(mqttPrefix(), 'mqStErr', ...), 但 mqStErr
     // 字段已从面板删除, 改成走 status 底部条 (用户看得到, 又不依赖字段)
     status('读取 MQTT 状态失败：' + e.message, false);

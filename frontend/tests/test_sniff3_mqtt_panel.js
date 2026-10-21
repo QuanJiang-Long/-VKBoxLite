@@ -74,14 +74,19 @@ assertEq(/el\.mqInterval\.value\s*=\s*String\(v\)/.test(appJs), true,
 assertEq(/await\s+saveMqtt\(\)/.test(appJs), true,
   'sniff-3: 弹窗确认后调 saveMqtt 走 W:MQTT');
 
-// 5. 状态卡片: 11 字段, 字段名跟 manual 档 mMqStXxx 对齐 (DevId/Subed/ExtraTopics)
+// 5. 状态卡片: 10 字段, 字段名跟 manual 档 mMqStXxx 对齐 (DevId/Subed/ExtraTopics)
+//    2026-10: 原来是 11 个 (多一个"手动配置"snStManual), 那行删了 ——
+//    设备端切 sniff 会复位 manual_on(ctrl.lua), sniff 恒为自动档, 那行永远是"否"
 const statusFields = [
   'snStConn', 'snStClientId', 'snStUser', 'snStDevId', 'snStMode',
-  'snStManual', 'snStPub', 'snStSub', 'snStExtraTopics', 'snStSubed', 'snStKeepSession'
+  'snStPub', 'snStSub', 'snStExtraTopics', 'snStSubed', 'snStKeepSession'
 ];
 const allFields = statusFields.every(id => html.indexOf('id="' + id + '"') > 0);
 assertEq(allFields, true,
-  'sniff-3: 状态卡片 11 字段全有 (snStConn/ClientId/User/DevId/Mode/Manual/Pub/Sub/ExtraTopics/Subed/KeepSession)');
+  'sniff-3: 状态卡片 10 字段全有 (snStConn/ClientId/User/DevId/Mode/Pub/Sub/ExtraTopics/Subed/KeepSession)');
+// 5b. "手动配置"字段已删 (2026-10)
+assertEq(html.indexOf('id="snStManual"') < 0, true,
+  'sniff-3: 状态卡片已删"手动配置"字段 (sniff 恒自动档)');
 // 5a. 旧字段名 (snStSn/snStPubTopics/snStSubscribed) 都不应再出现
 const oldIds = ['snStSn', 'snStPubTopics', 'snStSubscribed'];
 const noOld = oldIds.every(id => html.indexOf('id="' + id + '"') < 0);
@@ -96,14 +101,13 @@ assertEq(/<div class="kv"><b>连接状态<\/b><span id="snStConn">/.test(html), 
 assertEq(/<div class="kv kv-wide"><b>其他生效 Topic<\/b><pre id="snStExtraTopics" class="kv-pre">/.test(html), true,
   'sniff-3: 其他生效 Topic 用 kv-wide + pre (跟 manual 档 mMqStExtraTopics 同套)');
 
-// 7. 字段 label 名称 (11 个)
+// 7. 字段 label 名称 (10 个)
 const labels = [
   ['连接状态', 'snStConn'],
   ['ClientID', 'snStClientId'],
   ['用户名', 'snStUser'],
   ['设备编号', 'snStDevId'],
   ['当前档次', 'snStMode'],
-  ['手动配置', 'snStManual'],
   ['生效发布', 'snStPub'],
   ['生效订阅', 'snStSub'],
   ['其他生效 Topic', 'snStExtraTopics'],
@@ -165,7 +169,6 @@ const mappings = [
   ['snStUser', 'user'],
   ['snStDevId', 'device_id'],
   ['snStMode', 'manual_on'],
-  ['snStManual', 'manual_on'],
   ['snStPub', 'pubTopics'],
   ['snStSub', 'sub'],
   ['snStExtraTopics', 'platformExtraTopics'],
@@ -174,7 +177,7 @@ const mappings = [
 ];
 const allMapped = mappings.every(([id, hint]) => rsBody.indexOf(id) > 0 && rsBody.indexOf(hint) > 0);
 assertEq(allMapped, true,
-  'sniff-3: renderSnStatus 把 stat/cfg 11 字段映射到 snStXxx (新字段名)');
+  'sniff-3: renderSnStatus 把 stat/cfg 10 字段映射到 snStXxx (新字段名)');
 // 11a. 旧字段名不再用
 const rsOldRefs = ['snStSn', 'snStPubTopics', 'snStSubscribed'];
 const rsNoOld = rsOldRefs.every(id => rsBody.indexOf("'" + id + "'") < 0);

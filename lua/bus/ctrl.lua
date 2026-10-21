@@ -129,6 +129,16 @@ function M.switch_mode(mode, from_boot)
             switch_delay()
         end
         if mon.is_running() then mon.stop() end
+        -- ⚠️ sniff 也要复位 manual_on (2026-10 修): 之前只有 manual/platform
+        --   分支调 set_manual, 从 manual 切到 sniff 时 manual_on 仍是 true ——
+        --   后果不止是上位机"当前档次"显示成"手动配置":
+        --     ① 订阅清单错: build_subs 在 manual_on=true 时只订用户那条 sub,
+        --        平台那 5 条(config/get + service/invoke ×2 + pset + pget)全不订
+        --        → 平台在 sniff 档下发的东西设备一条都收不到
+        --     ② 上报 topic 错: profile() 走用户 pub_topic, sniff 的数据/建档
+        --        报给用户自己的 broker, 平台那头看不到设备
+        --   set_manual(false) 会断开重连换订阅清单, 必须在识别起来之前做
+        if iot then pcall(iot.set_manual, false) end
         if mon.start() then
             -- 识别必须放后台: switch_mode 是同步的, 而且在开机路径(main.lua 的
             -- boot_mode)上也会被调用。同步等识别会把开机流程堵住, 而识别失败是
