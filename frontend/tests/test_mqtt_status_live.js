@@ -29,6 +29,15 @@ assertEq(!/\.value\s*=/.test(st), true, 'mqtt: renderMqttStatus 不写任何输�
 // 3. 5s 定时器的 readHome 里调用 renderMqttStatus (R:STAT 已带 mqtt 段)
 assertEq(/renderMqttStatus\(\)/.test(appJs), true, 'app: readHome 会调 renderMqttStatus 重画状态卡');
 
+// 3b. 定时器不能在串口忙时整轮跳过 (2026-10 用户实测: 识别期间前端每秒轮询
+//     R:AUTODETECT, 串口几乎一直忙, 跳过就意味着状态卡永远不重画)
+const timer = appJs.substring(appJs.indexOf('homeTimer = setInterval'),
+  appJs.indexOf('homeTimer = setInterval') + 900);
+assertEq(/while \(S\.pending && Date\.now\(\) - t0 < 3000\)/.test(timer), true,
+  'app: 定时器等串口空闲(最多3s)而不是整轮跳过');
+assertEq(!/if \(S\.pending\) return;/.test(timer), true,
+  'app: 定时器不再"忙就整轮跳过"');
+
 // 4. 状态卡的"当前档次"优先用 stat 段的 manual_on (R:STAT 5s 就更新, cfg 的慢)
 assertEq(/const manualOn = \(s\.manual_on !== undefined\)/.test(mqttJs), true,
   'mqtt: 当前档次优先取 stat.manual_on (实时), cfg 兜底');

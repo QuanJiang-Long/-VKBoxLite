@@ -1197,14 +1197,22 @@ async function readHome() {
     // 开机模式不在 R:STAT 4 段里, 单独发 R:BOOTMODE 读
     await readBootMode();
     renderHome();
-    // 状态卡跟着设备实时状态走 (2026-10): R:STAT 的 mqtt 段已经并进
-    // S.mqtt.stat 了, 这里只重画状态卡(不碰任何输入框)。
-    // 起因: 切 sniff 档时 MQTT 会断开重连, 那一刻读到的 connected=false,
-    // 而状态卡只在 readMqtt(读全量)时才重画 → 重连成功后卡片一直显示
-    // "连接中/已断开", 切走再切回来才刷新(用户实测报出)。
-    // renderMqttStatus 只画状态部分, 用户正在编辑的 MQTT 表单不会被冲掉。
-    if (typeof renderMqttStatus === 'function') renderMqttStatus();
   } catch (e) { /* 首页刷新失败不打扰用户 */ }
+  // 状态卡跟着设备实时状态走 (2026-10): R:STAT 的 mqtt 段已经并进
+  //   S.mqtt.stat 了, 这里只重画状态卡(不碰任何输入框)。
+  // 起因: 切 sniff 档时 MQTT 会断开重连, 那一刻读到的 connected=false,
+  // 而状态卡只在 readMqtt(读全量)时才重画 → 重连成功后卡片一直显示
+  //   "连接中/已断开", 切走再切回来才刷新(用户实测报出)。
+  // renderMqttStatus 只画状态部分, 用户正在编辑的 MQTT 表单不会被冲掉。
+  //
+  // ⚠️ 这一句必须放在上面的 try【外面】: R:STAT 超时/失败时(串口忙、
+  //   设备在识别), 上面整段会被 catch 掉, 状态卡就永远不重画 —— 而底栏
+  //   (renderHome)也是同一轮, 用户会看到"底栏已连接、卡片未连接"的自相矛盾。
+  try {
+    if (typeof renderMqttStatus === 'function') renderMqttStatus();
+  } catch (e) {
+    console.warn('[mqtt] 状态卡重画失败:', e);
+  }
 }
 
 
@@ -2036,8 +2044,18 @@ function startAutoRefresh() {
   // Step 2l: 拿掉 readMqtt 5s 自动调。原因: 5s 一跑 renderMqtt 会把用户正填的
   // 5 字段 (user/pass/clientId/pub/sub) 覆盖掉, fillOk 只跳过当前聚焦的 1 个,
   // 其余 4 个会被冲掉, 体验差。MQTT 面板的"读全量"走 activateTab + 手动按钮。
+  // 5s 定时器: 等串口空出来再跑, 不要"忙就整轮跳过"。
+  //   识别期间前端每秒在轮询 R:AUTODETECT, 串口几乎一直忙 —— 原来忙就
+  //   return, 于是 5s 定时器次次跳过, 状态卡永远不重画(用户实测: 识别完成
+  //   后卡片还显示"连接中/已断开")。排队等空闲最多 3s, 挤进轮询的间隙。
   homeTimer = setInterval(async () => {
-    if (S.pending) return;
+    if (S.pending) {
+      const t0 = Date.now();
+      while (S.pending && Date.now() - t0 < 3000) {
+        await new Promise(r => setTimeout(r, 200));
+      }
+      if (S.pending) return;   // 3s 还腾不出来, 这轮放弃(下轮再来)
+    }
     try { await readHome(); } catch (_) {}
   }, 5000);
   frameTimer = setInterval(() => {
