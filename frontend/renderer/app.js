@@ -1578,7 +1578,18 @@ function serialDesc(d) {
 
 function renderDetected() {
   const d = S.detected;
-  if (!d || d.baud == null) { el.detectHint.className = 'hint'; el.detectHint.textContent = ''; return; }
+  if (!d || d.baud == null) {
+    // ⚠️ 识别中【不要】清提示 (2026-10): 进度文案("正在识别通讯参数…第 N 轮,
+    //   最坏 21 秒…")是 renderDetecting 写的, 而 readFrames 每 2 秒调一次
+    //   renderDetected —— 一清就把进度抹了, 用户永远看不到识别进度
+    //   (实测: 提示一闪就没)。识别结束仍没结果(兜底失败)才清空
+    const monSt = (S.modeStat && S.modeStat.mon) || {};
+    if (!monSt.detecting) {
+      el.detectHint.className = 'hint';
+      el.detectHint.textContent = '';
+    }
+    return;
+  }
   // 从站号另起一段并标明"观测": 被动旁听拿不到从站号, 它是从报文里数出来的,
   // 和上面 4 个"识别"出来的参数不是一个性质, 含混写成一个"已识别"会误导
   const sl = observedSlave();

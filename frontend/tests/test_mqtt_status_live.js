@@ -45,4 +45,13 @@ assertEq(waitAt >= 0 && giveUpAt > waitAt, true,
 assertEq(/const manualOn = \(s\.manual_on !== undefined\)/.test(mqttJs), true,
   'mqtt: 当前档次优先取 stat.manual_on (实时), cfg 兜底');
 
-console.log('PASS: mqtt 状态卡跟随设备实时状态 (R:STAT 5s 刷新, 不碰表单) — 4 个测试点通过');
+// 5. 识别进度提示不能被 2 秒一次的报文刷新抹掉 (2026-10 用户报出: "第 N 轮,
+//    最坏 21 秒" 一闪就没)。renderDetected 在"还没结果"时要先看 detecting 状态
+const rd = appJs.substring(appJs.indexOf('function renderDetected()'),
+  appJs.indexOf('function renderDetected()') + 900);
+assertEq(/monSt\.detecting/.test(rd), true,
+  'app: renderDetected 识别中不清提示 (进度文案不被 readFrames 抹掉)');
+assertEq(/if \(!monSt\.detecting\)/.test(rd), true,
+  'app: 只有识别结束仍无结果才清空提示');
+
+console.log('PASS: mqtt 状态卡跟随设备实时状态 (R:STAT 5s 刷新, 不碰表单) + 识别进度提示不被抹 — 6 个测试点通过');
