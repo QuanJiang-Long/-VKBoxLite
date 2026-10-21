@@ -39,7 +39,7 @@ assertEq(/S\.mode\s*===\s*'sniff'/.test(exportBlockMatch[0]), false,
 //   im-3 fix: syncTabs 段内 btnExport 守卫也不含 isPlatform (平台档允许导出)
 const syncTabsBody = appJs.substring(
   appJs.indexOf('function syncTabs'),
-  appJs.indexOf('function syncTabs') + 1500);
+  appJs.indexOf('function syncTabs') + 2400);
 assertEq(/mode\s*===\s*'idle'/.test(syncTabsBody), true,
   'im-3: syncTabs 段内含 mode === "idle" 守卫');
 assertEq(/mode\s*===\s*'sniff'/.test(syncTabsBody), true,

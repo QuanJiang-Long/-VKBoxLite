@@ -549,6 +549,16 @@ function setPortState(open, path) {
     c.classList.toggle('locked', !open && c.id !== 'mcIdle');
   });
   syncPullCfgBtn();
+  // 档位标签显隐跟串口走 (2026-10): syncTabs 平时只在 mode 切换时调, 这里
+  // 断连/连上时补一次, 否则标签要等下次切档才更新
+  syncTabs();
+  // 断连时如果正停在档位页(那个标签已被收起), 切回首页 —— 否则会留一个
+  // 没有标签的页面在眼前, 看着像卡住
+  if (!open) {
+    const cur = document.querySelector('.tab-header .tab-item.active');
+    const curId = cur && cur.getAttribute('data-tab');
+    if (curId && curId !== 'tab0' && curId !== 'tabMode') activateTab('tab0');
+  }
 }
 
 //---------------------------------------------------------------------
@@ -753,11 +763,14 @@ function syncTabs() {
   // (后续 Step 1b 决定删/留)。tabManual/tabPlatform 内容跟 tabPoll
   // 一模一样, 业务 0 改 → getElementById 仍拿 tabPoll 内元素,
   // 切到新 tab 看到内容但响应跟 tabPoll 同步
+  // ⚠️ 档位标签只在【串口已连接】时显示 (2026-10): 没连设备时 S.mode
+  //   是上次会话的残留, 挂着"sniff模式"标签会让人以为设备还在 sniff
+  const conn = !!S.open;
   const show = { tab0: true, tabMode: true,
-    tabManual: isManual(mode),
-    tabPlatform: isPlatform(mode),
+    tabManual: conn && isManual(mode),
+    tabPlatform: conn && isPlatform(mode),
     tabPoll: false,
-    tabSniff: mode === 'sniff' };
+    tabSniff: conn && mode === 'sniff' };
   Object.keys(show).forEach(id => {
     const t = document.querySelector('.tab-header .tab-item[data-tab="' + id + '"]');
     if (t) t.style.display = show[id] ? '' : 'none';
