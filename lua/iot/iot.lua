@@ -309,7 +309,13 @@ local function publish()
     -- idle 模式短路: collector.dataCache 可能残留之前切档前的数据, idle 不该发
     -- (跟 should_pub_platform 一样, idle 不上送任何平台数据, 包括 U4)
     if get_mode() == "idle" then return false end
-    local items = build_items()
+    -- pcall: build_items 里拼上报 body 也是大字符串, 一次分配失败不该掀掉
+    -- 整个 task (2026-10, 与 topo_sig 同一个道理)
+    local ok, items = pcall(build_items)
+    if not ok then
+        log.warn("iot", "build_items failed, skip publish: " .. tostring(items))
+        return false
+    end
     if #items == 0 then return false end
     local base = S.pub or ""
     if base == "" then return false end
@@ -1695,7 +1701,18 @@ local function task_main()
             -- 2026-10: 判据从"正在识别"升级成"识别未成功"(含兜底失败), 与
             -- pub_blocked 同一口径
             local sig = nil
-            if pub_topo and not pub_blocked() then sig = topo_sig() end
+            -- ⚠️ pcall 包一层 (2026-10): topo_sig → build_nodes → node_json 里
+            --   有大字符串拼接, 万一某次数据异常导致一次分配失败, 未捕获的话
+            --   直接把整个 task 掀了("not enough memory for buffer allocation"
+            --   → Lua VM exit → 设备重启)。包起来最多丢一次拓扑重发, 不至于重启
+            if pub_topo and not pub_blocked() then
+                local ok, s = pcall(topo_sig)
+                if ok then
+                    sig = s
+                else
+                    log.warn("iot", "topo_sig failed, skip this round: " .. tostring(s))
+                end
+            end
             if sig and sig ~= S.topo_sig then
                 local ok, e = send_topo()
                 if ok then

@@ -97,3 +97,20 @@ if ($dstTotal -gt 262144) {
 }
 Write-Host ""
 Write-Host ("Burn from: {0}" -f (Resolve-Path $Dst).Path) -ForegroundColor Cyan
+
+# ---- 新鲜度戳 (2026-10): build\lua_burn\ 是【快照】, 改了源码不重跑就烧的是旧版。
+#   烧错过一次(烧了修 OOM 之前的版本, 设备照样崩), 所以在 build/ 下留一份戳:
+#   记录【本次生成时的 git HEAD + 源码大小 + 生成时间】。烧之前对着戳确认一下。
+$stamp = Join-Path (Split-Path $Dst -Parent) 'lua_burn.stamp.txt'
+$head = 'n/a'
+try { $head = (git rev-parse --short HEAD 2>$null) } catch { }
+$srcBytes = (Get-ChildItem $Src -Recurse -Filter *.lua | Measure-Object -Property Length -Sum).Sum
+@(
+  "生成时间 : " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+  "git HEAD : $head"
+  "源码大小 : $srcBytes 字节"
+  "瘦身版   : $dstTotal 字节 (余量 " + (262144 - $dstTotal) + " 字节)"
+  "烧之前请确认这行 HEAD 与你期望的一致 —— 快照不重跑就是旧版!"
+) | Set-Content -Path $stamp -Encoding UTF8
+Write-Host ("stamp    : {0}" -f $stamp) -ForegroundColor Cyan
+Write-Host ("HEAD     : {0}   (烧之前拿这个对一下)" -f $head) -ForegroundColor Cyan
