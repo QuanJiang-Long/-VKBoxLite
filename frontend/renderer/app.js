@@ -1611,13 +1611,11 @@ function renderDetected() {
 // 识别进行中的提示。由 renderMode() 在读到 mon.detecting 时调用, 和
 // renderDetected() 共用同一个 span, 所以两者互斥 —— 识别中不显示"已识别",
 // 认出来了才显示
+// 2026-10: 原来还带"第 N 轮 / 已失败 M 次 / 最坏 21 秒"那一串, 用户嫌吵,
+// 去掉进度细节, 只留"正在识别通讯参数…"(设备日志里照样有轮次/失败次数)
 function renderDetecting(st) {
   el.detectHint.className = 'hint';   // 识别中回灰色 (成功时 renderDetected 才转绿)
-  const round = st.detect_round || 0;
-  const fail = st.detect_fail || 0;
-  el.detectHint.textContent = '正在识别通讯参数…（第 ' + round + ' 轮' +
-    (fail > 0 ? '，已失败 ' + fail + ' 次' : '') +
-    '，最坏 21 秒，完成后自动开始旁听）';
+  el.detectHint.textContent = '正在识别通讯参数…';
 }
 
 //---------------------------------------------------------------------
