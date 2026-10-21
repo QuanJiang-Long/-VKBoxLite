@@ -280,7 +280,8 @@ function renderMqtt() {
       extras = VKBoxTopics.manualExtraTopics(did);
       placeholder = '（手动档无额外生效 topic）';
     } else if (isPlatformTab) {
-      extras = VKBoxTopics.platformExtraTopics(did);
+      // s.sub_list = 设备回报的真实订阅清单 → D2n 那条显示真值(…-1)
+      extras = VKBoxTopics.platformExtraTopics(did, s.sub_list);
       placeholder = '（平台档无额外生效 topic）';
     }
     const txt = extras.length ? VKBoxTopics.formatListAsLines(extras) : placeholder;
@@ -342,9 +343,11 @@ function renderSnStatus(s, c, pubTopics) {
     //   U1/U2/U3/U5/U6/U7 + D2/D2n/D3/D4 code 标签列表。
     //   （原 pubTopics[1..] 多余从机上报位并入去: 主 -1 已在"生效发布"行,
     //     单从机时本为空; 现场按 p 档同一版式核对订阅关系）
+    //   s.sub_list = 设备回报的真实订阅清单 → D2n 那条显示真值(…-1),
+    //   不再显示模板(…-N); 老固件没这个字段就退回模板
     const did = s.device_id || s.sn || '';
     const extras = (window.VKBoxTopics && did)
-      ? VKBoxTopics.formatListAsLines(VKBoxTopics.platformExtraTopics(did))
+      ? VKBoxTopics.formatListAsLines(VKBoxTopics.platformExtraTopics(did, s.sub_list))
       : '';
     // 不能走 setKv: 它会把 className 整个重置, 冲掉 <pre> 的 .kv-pre
     // 绿色样式 (m/p 档 mMqSt/pMqStExtraTopics 同款坑, 直接拿 el 操作)

@@ -127,6 +127,8 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 
 > 指令集与 `frontend/protocol.js` 的 `Enc` 一一对应。`W:RAWTEST`/`R:NET`/`R:MEM`/`W:GC` 是前端不调用的现场诊断入口，且**仅开发版注册**（`_build_flag.lua` = true 的发布固件里没有）。`R:FRAMES`/`R:INFER`/`R:AUTODETECT` 源自调试组，但已是 sniff 面板的正式依赖，2026-10 已**转正注册**（`cmd.lua` 的 `reg_cmds`，发布版可用）。
 >
+> **`R:MQTT` 的 stat 带 `sub_list`**（2026-10）：设备实际订阅清单（`build_subs()` 的产物，当前 5 条）。前端"其他生效 Topic"里的 **D2n** 那条用它替换模板——常量里是 `.../{sn}-N`（N=从机序号占位符），设备实际订的是 `.../{sn}-1`（多从机展开 `-1..-K`）。显示模板等于骗人：现场照着 `-N` 订阅收不到东西。老固件没有这个字段，前端退回模板。
+>
 > **`R:SN` 不是死代码**：前端确实不用它，但产线烧写软件（`pc_tool/device.py` 的 `read_sn()`）拿它做 `W:SN` 之后的回读校验，`burner.py` 比对不过就判失败、不上锁。曾按"前端零调用"删过一次，现场表现为「设备无响应（发送了 R:SN）」+ SN 写进去了但锁没上。**删任何指令前，先确认仓库外没有别的调用方。**
 >
 > **写寄存器的入口**：MQTT 下行 `{"cmd":"WRITE","items":[...]}`（设备自动排进写队列）与前端「写寄存器」。原先的 `W:WRITE`/`W:WRITEJ` 已删除——字段名与 MQTT 下行解析完全一致，属重复实现。写结果看 `R:STAT` 的 `write` 段，**不是 `enqueue_write` 的返回值**（那只代表入队）。

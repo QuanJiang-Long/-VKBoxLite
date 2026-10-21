@@ -1815,6 +1815,14 @@ function M.status()
         --   这个, 不做本地构造. 老设备 (无 pub_topics 字段) 时为 nil, 前端
         --   会回退到 s.pub
         pub_topics = prof and prof.pub_topics,
+        -- 32-fix: 设备实际发送的 topic 列表 (平台档带 -N 后缀). 前端只显示
+        --   这个, 不做本地构造. 老设备 (无 pub_topics 字段) 时为 nil, 前端
+        --   会回退到 s.pub
+        -- 实际订阅清单 (2026-10): 前端原来自己拼 D2n 那条, 显示的是模板
+        --   ".../{sn}-N"(N 是从机序号占位符), 设备实际订的是 ".../{sn}-1"
+        --   (多从机展开成 -1..-K)。现场照着模板订阅是收不到的, 所以把
+        --   build_subs() 的真实清单报上来, 前端照实显示
+        sub_list = build_subs(),
         keep_session = c.keep_session,
         manual_on = c.manual_on,
         host = c.host,

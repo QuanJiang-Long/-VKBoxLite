@@ -82,8 +82,15 @@ const VKBoxTopics = (function () {
   //   mqStSub = D1 get   (PLATFORM_GET_TOPIC)
   //   本表列出其余 10 条: U1/U2/U3/U5/U6/U7 + D2/D2n/D3/D4
   //   U2 info: meta (不带 nodes) + topo (带 nodes) 共用同一 topic, 这里只列一次
-  function platformExtraTopics(sn) {
+  // realSubs (可选): 设备回报的【真实订阅清单】(R:MQTT stat.sub_list)。
+  //   只有 D2n 那条需要它: 常量里是模板 ".../{sn}-N"(N=从机序号占位符),
+  //   设备实际订的是 ".../{sn}-1"(多从机展开 -1..-K)。显示模板等于骗人 ——
+  //   现场照着 "-N" 去订阅收不到东西(2026-10 用户问出来的)
+  function platformExtraTopics(sn, realSubs) {
     if (!sn) return [];
+    const subs = Array.isArray(realSubs) ? realSubs.filter(Boolean) : [];
+    const nodeReal = subs.find(t => t.indexOf('/node/service/invoke/') >= 0);
+    const nodeTopic = nodeReal || format(TOPICS.PLATFORM_FUNC_NODE_TOPIC, sn);
     return [
       { code: 'U1', name: 'hello', topic: format(TOPICS.PLATFORM_HELLO_TOPIC, sn) },
       { code: 'U2', name: 'info',  topic: format(TOPICS.PLATFORM_INFO_TOPIC, sn) },
@@ -92,7 +99,7 @@ const VKBoxTopics = (function () {
       { code: 'U6', name: 'reply', topic: format(TOPICS.PLATFORM_REPLY_TOPIC, sn) },
       { code: 'U7', name: 'fpost', topic: format(TOPICS.PLATFORM_FPOST_TOPIC, sn) },
       { code: 'D2',  name: 'invoke', topic: format(TOPICS.PLATFORM_FUNC_TOPIC, sn) },
-      { code: 'D2n', name: 'invoke', topic: format(TOPICS.PLATFORM_FUNC_NODE_TOPIC, sn) },
+      { code: 'D2n', name: 'invoke', topic: nodeTopic },
       { code: 'D3',  name: 'pset',  topic: format(TOPICS.PLATFORM_PSET_TOPIC, sn) },
       { code: 'D4',  name: 'pget',  topic: format(TOPICS.PLATFORM_PGET_TOPIC, sn) },
     ];
