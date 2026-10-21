@@ -1,6 +1,6 @@
 {
   "name": "VKBoxLite-Tool",
-  "version": "2.0.1",
+  "version": "1.0.0",
   "description": "VKBoxLite - Air780EP 485 采集设备配置软件",
   "main": "main.js",
   "license": "MIT",

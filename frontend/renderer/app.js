@@ -1925,15 +1925,20 @@ async function importCfg(pre) {
         }
         // im-5 6b: JSON 导入时做版本校验 (major version 不同拒绝, minor/patch 兼容)
         //   - 没 version 字段 (老格式): 接受, 兼容
-        //   - major 相同 (2.0.0 / 2.0.1): 接受
-        //   - major 不同 (1.x / 3.x): 拒绝 + 提示
+        //   - major 相同 (1.0.0 / 1.0.1): 接受; 1.x 与 2.x 互导也放行(版本重置, 导出格式一致)
+        //   - 别的 major (3.x+): 拒绝 + 提示
         //   - CSV 不校验 (CSV 没 version 字段)
         if (fmt === 'JSON') {
           const cur = (window.__APP_VERSION__ || 'unknown');
           if (data.version != null) {
             const curMajor = String(cur).split('.')[0];
             const impMajor = String(data.version).split('.')[0];
-            if (curMajor !== impMajor) {
+            // 1.0.0 是【版本重置】(从 2.x 回到 1.0), 导出格式跟 2.x 完全一样,
+            // 所以 1.x 与 2.x 的配置互导都该放行; 别的 major(3.x+) 才算不兼容
+            const compatible = (curMajor === impMajor)
+              || (curMajor === '1' && impMajor === '2')
+              || (curMajor === '2' && impMajor === '1');
+            if (!compatible) {
               throw new Error('版本不兼容 (导入 v' + data.version + ', 当前 v' + cur + ')');
             }
           }

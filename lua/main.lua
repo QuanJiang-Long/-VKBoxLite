@@ -6,8 +6,8 @@ main.lua - 启动编排
 ]]
 
 PROJECT = "VKBoxLite"
-VERSION = "2.0.1"
-BUILD_ID = "2026-10-01-new"
+VERSION = "1.0.0"
+BUILD_ID = "2026-10-21-v1.0.0"
 -- 发布版开关: true=发布, false=开发。改 lua/_build_flag.lua 即可切版本。
 _G.BUILD_RELEASE = require "_build_flag"
 _G.DEBUG = not _G.BUILD_RELEASE

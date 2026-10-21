@@ -1,13 +1,13 @@
 // test_im5_version.js
 //
 // im-5 6a: version 从 window.__APP_VERSION__ 读
-//   1. index.html 注入 window.__APP_VERSION__ = '2.0.1' (跟 package.json 同步)
+//   1. index.html 注入 window.__APP_VERSION__ = '1.0.0' (跟 package.json 同步)
 //   2. exportCfgAsJson data.version 用 window.__APP_VERSION__ (不再 hardcode '2.0.0')
 //
 // im-5 6b: importCfg 加版本校验
 //   3. JSON 导入时检查 data.version
 //   4. 没 version 字段: 接受 (兼容老格式)
-//   5. major 相同 (2.0.0 / 2.0.1): 接受
+//   5. major 相同 (1.0.0 / 1.0.1): 接受; 1.x 与 2.x 互导也放行(版本重置, 格式一致)
 //   6. major 不同 (1.x / 3.x): 拒绝 + 抛 "版本不兼容"
 //   7. CSV 不校验
 
