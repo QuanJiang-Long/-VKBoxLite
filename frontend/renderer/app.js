@@ -491,6 +491,37 @@ function syncPullCfgBtn() {
   b.title = '从 MQTT 平台重新拉取 485 配置到「拉取配置」槽（ds_pull）';
 }
 
+// 断连后把"从设备读来的值"清空 (2026-10)
+//   留着会让人以为设备还在线、还停在那个档位 —— 截图上那种"串口已关闭
+//   但页面还显示 sniff/正常/SN/IMEI"的状态最容易误判。
+//   清的: 设备信息(只读框) + 所有状态卡的显示值 + 底栏的设备/模式/MQTT
+//   保留: 首页 MQTT 的服务器地址/端口/凭证密码(本地配置, 重连还要用)
+//   用户名(设备 SN 派生)清; ClientID 只在"还是设备自动值"时清(手输的保留)
+function clearDeviceView() {
+  [el.fSn, el.fImei, el.fIccid, el.fCsq, el.fVer, el.fProj, el.fUrl].forEach(e => {
+    if (e) e.value = '';
+  });
+  // 所有 .kv-grid 里的显示值(首页总览 + 手动/平台/sniff 三张状态卡) → '--'
+  document.querySelectorAll('.kv-grid .kv span').forEach(n => {
+    n.textContent = '--';
+    n.className = '';
+  });
+  // 其他生效 Topic 那几块是 pre(10 条 topic 清单), 也得清
+  document.querySelectorAll('.kv-pre').forEach(n => {
+    n.textContent = '--';
+    n.className = 'kv-pre bad';
+  });
+  if (el.hMqUser) el.hMqUser.value = '';
+  if (el.hMqClientId && (!S.autoClientId || el.hMqClientId.value === S.autoClientId)) {
+    el.hMqClientId.value = '';
+  }
+  if (el.hMqErr) el.hMqErr.textContent = '';
+  if (el.stSn) el.stSn.textContent = '--';
+  if (el.stDev) el.stDev.textContent = '--';
+  if (el.stMode) el.stMode.textContent = '--';
+  if (el.stMqtt) el.stMqtt.textContent = '--';
+}
+
 function setPortState(open, path) {
   S.open = open;
   el.btnOpen.textContent = open ? '关闭串口' : '打开串口';
@@ -558,6 +589,8 @@ function setPortState(open, path) {
     const cur = document.querySelector('.tab-header .tab-item.active');
     const curId = cur && cur.getAttribute('data-tab');
     if (curId && curId !== 'tab0' && curId !== 'tabMode') activateTab('tab0');
+    // 设备读来的值全部清空, 别留着"看着还在线"的残影
+    clearDeviceView();
   }
 }
 
