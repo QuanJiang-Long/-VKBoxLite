@@ -21,3 +21,6 @@ dist/
 .tmp_*.py
 .tmp_*.txt
 .tmp_*.sh
+
+# 烧录瘦身版脚本 (tools\\prep_burn.ps1 生成, 不进仓库)
+build/

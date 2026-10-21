@@ -165,17 +165,11 @@ local function alias_map()
     return m
 end
 
--- 推断结果补"参数名称": 与 build_items 的 U4 name 同一套算法
--- (name = amap[k] or k, k = "reg<addr>")。cmd.lua 的 R:INFER 处理器调用。
--- 为什么要放 iot 出: 上报侧 name 怎么映射只有这里知道 (alias_map 按
--- 生效槽位取 cfg), mon.infer 自己拼会跟实际上报不一致
+-- 推断结果补 name/id: 与上报同一套映射(用户别名表优先, 再 cfg alias_map)
 function M.attach_names(inf)
     if type(inf) ~= "table" or type(inf.regs) ~= "table" then return inf end
     local amap = alias_map()
-    -- sniff 别名表 (2026-10): 用户在推断表里给 reg<addr> 起的 id/name。
-    -- 前端推断表的"参数名称/建议标识符"两列直接显示这里的值, 编辑后
-    -- 平台物模型(U2)与数据项(U4)也用同一套, 看到的就是上报的
-    local smap = cfgstore.alias_map()
+    local smap = cfgstore.alias_map()   -- sniff 别名表 (用户起的名字)
     for _, a in ipairs(inf.regs) do
         local k = "reg" .. tostring(a.addr or "")
         local sa = smap[k]
@@ -254,8 +248,7 @@ local function build_items()
         for _, r in ipairs(c.regs) do allowed[r.name] = true end
     end
     local by_slave, order = {}, {}
-    -- sniff 别名表: 用户在推断表里给 reg<addr> 起的名字 (2026-10)。
-    -- 优先于一切: 别名表里配过的 id/name 就是平台物模型里显示的那个
+    -- sniff 别名表: 用户在推断表里给 reg<addr> 起的名字, 优先于一切
     local smap = cfgstore.alias_map()
     for k, d in pairs(collector.get_all_latest()) do
         local vs = MqttUtil.jnum(d.value)
@@ -268,8 +261,7 @@ local function build_items()
                     by_slave[slave] = {}
                     order[#order + 1] = slave
                 end
-                -- id: 别名表配了用别名, 否则用键本身 (poll 档是 cfg.regs.name)
-                -- name: 别名表的名字 > 别名的 id > cfg.regs 的 alias > 键本身
+                -- id: 别名表配了用别名, 否则用键本身; name: 名字 > 别名 id > cfg alias > 键
                 local sa = smap[k]
                 local pid = (sa and sa.id ~= "" and sa.id) or k
                 local pname = (sa and sa.name ~= "" and sa.name)
@@ -292,14 +284,8 @@ local function build_items()
     return items
 end
 
--- 识别闸门 (2026-10): sniff 档"识别未成功"期间一律不上报。
---   什么叫未成功: 正在识别 / 压根没有识别结果 / 识别失败(兜底 cfg.BAUD)。
---   为什么挡: 识别期间串口参数还是默认值或候选值, 这期间发出去的东西
---   平台会按错波特率建模型(拓扑)、收到脏值(数据), 白推一次配置还得重建。
---   识别成功后自然恢复: 门闸是"当轮跳过"且不推进 last_pub, 识别一结束
---   下一轮立刻补发, 不需要额外的"恢复"逻辑。
---   不挡的: U6 配置回执 / U7 指令回执 / claim_ok / func_reply ——
---   控制面回执, 平台在等应答, 压了会一直等/重推(2026-10 定: 只压数据面)
+-- 识别闸门 (2026-10): sniff 档识别未成功(识别中/无结果/兜底失败)时不上报。
+-- 详见 lua/README.md「识别未成功前不上报」
 local function pub_blocked()
     if get_mode() ~= "sniff" then return false end
     local st = mon.status()
@@ -392,9 +378,7 @@ local function node_json(idx, slave, c, regs)
         local dt = r.dtype or "uint16"
         -- 嗅探时 r.name 通常 nil (put 不传), 兜底走 reg<addr> 跟 U4 key 对齐
         -- 轮询时 r.name 是用户配的真名, 走 r.name 路径
-        -- ⚠️ p.pid/p.pname 是 sniff 别名表直接指定的 id/name (2026-10):
-        --   用户在推断表里给 reg<addr> 起了名, 平台物模型要按这个建属性,
-        --   不能再走下面的启发式 (那个会把 alias 当 id 用)
+        -- p.pid/p.pname: sniff 别名表指定的 id/name (2026-10), 优先于下面的启发式
         local id
         if r.pid and r.pid ~= "" then
             id = r.pid
@@ -433,8 +417,7 @@ local function build_nodes()
     local nodes, err = {}, nil
     if mode == "sniff" then
         local at, by = {}, {}
-        -- sniff 别名表 (2026-10): 用户在推断表里给 reg<addr> 起的名字,
-        -- 直接作为平台物模型的 id/name (pid/pname), 不走 node_json 的启发式
+        -- sniff 别名表 (2026-10): 用户起的名字直接作为平台物模型的 id/name
         local smap = cfgstore.alias_map()
         local function put(slave, r)
             local k = slave .. ":" .. r.addr
@@ -455,7 +438,7 @@ local function build_nodes()
         for _, r in ipairs(mon.infer().regs or {}) do
             -- 用 mon.infer 推的 dtype_summary 首项当 reg dtype (启发式已给)
             local dt = r.dtype_summary and r.dtype_summary:match("^([^,]+)") or "uint16"
-            -- 别名表命中: id/name 用用户起的; 没命中就还是 reg<addr>
+            -- 别名表命中: id/name 用用户起的; 没命中还是 reg<addr>
             local sa = smap["reg" .. tostring(r.addr or "")]
             local pid, pname
             if sa then

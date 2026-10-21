@@ -17,12 +17,10 @@ local K_POLL, K_SYS = "ds_poll", "ds_sys"
 -- 必须分开: 原本共用一槽, 拉一次平台配置就覆盖手配的寄存器表(见 lua/README.md 配置来源隔离)。
 -- 没有 sniff 槽: auto_detect 结果只存本次会话(mon.bootCfg), 不落 fskv, 从结构上堵住误存
 local K_PULL = "ds_pull"
--- ds_alias: sniff 侧别名表 (2026-10)。存的是【用户在推断表里给 reg<addr>
--- 起的名字】(id + name), 不是识别出来的串口参数 —— 那些仍然只存本次会话。
--- 用途: 决定 sniff 档 U2 拓扑属性与 U4 数据项的 id/name, 让平台物模型里
--- 显示的是人看得懂的名字而不是 reg263。
--- 为什么不复用 ds_poll: 那是"手配的寄存器表", 会被平台下发覆盖, 也会被
--- 切 idle 的复位清掉; 别名是用户在 sniff 现场攒下来的成果, 得留住
+-- ds_alias: sniff 侧别名表 (2026-10)。存【用户给 reg<addr> 起的名字】(id+name),
+-- 不是识别出来的串口参数(那些只存本次会话)。决定 sniff 档 U2 拓扑属性与
+-- U4 数据项的 id/name, 让平台物模型显示人看得懂的名字。
+-- 不复用 ds_poll: 那是手配寄存器表, 会被平台下发覆盖/切 idle 复位清掉
 local K_ALIAS = "ds_alias"
 
 local function num(v, d)
@@ -91,9 +89,7 @@ local MAX_ALIAS = 128
 M.default_alias = { regs = {} }
 
 -- sniff 别名表归一化。结构 { regs = { {key="reg263", id="CT1", name="A相电流"} } }
---   - key 只认 reg<addr>: 这是旁听推断出来的寄存器键(poll 档的配置名走
---     另一套 alias_map), 别的键进来直接忽略, 免得把两套东西搅在一起
---   - id/name 都空 = 用户把这行清掉了(删除该条), 归一化时直接不收
+--   key 只认 reg<addr>; id/name 都空 = 删除该条
 function M.normalize_alias(c)
     c = c or {}
     local out = { regs = {} }
@@ -122,7 +118,7 @@ function M.normalize_alias(c)
     return out
 end
 
--- 别名表查表: key -> {id=..., name=...}, 供 iot 侧上报时套用
+-- 别名表查表: key -> {id,name}, 供 iot 上报时套用
 function M.alias_map()
     local m = {}
     local c = M.load_alias()
@@ -132,8 +128,7 @@ function M.alias_map()
     return m
 end
 
--- 别名表单条 upsert (2026-10): 前端弹窗保存走这里。
--- id/name 都空 = 删掉这条 (用户把名字清空了)
+-- 别名表单条 upsert (2026-10): 前端弹窗保存走这里; id/name 都空 = 删这条
 function M.set_alias(key, id, name)
     local c = M.load_alias()
     local out = { regs = {} }

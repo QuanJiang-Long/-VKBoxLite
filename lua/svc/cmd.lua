@@ -276,14 +276,12 @@ local function reg_cmds()
         M.reply("RET:BOOTMODE=OK")
     end)
 
-    -- R:SALIAS: 读 sniff 别名表 (用户在推断表里给 reg<addr> 起的 id/name)
+    -- R:SALIAS: 读 sniff 别名表 (用户给 reg<addr> 起的 id/name)
     M.reg("R:SALIAS", function()
         M.reply("RET:SALIAS=" .. jencode(cfgstore.load_alias()))
     end)
 
-    -- W:SALIAS={key,id,name}: 单条 upsert。id/name 都空 = 删掉这条
-    -- (用户把名字清空 = 恢复默认 reg<addr>)。校验(键格式/长度/条数)在
-    -- cfg.normalize_alias 里
+    -- W:SALIAS={key,id,name}: 单条 upsert, id/name 都空 = 删这条
     M.reg("W:SALIAS", function(arg)
         local t = jdecode(arg)
         if not t then return M.reply("RET:FAIL:SALIAS:bad json") end
