@@ -23,6 +23,43 @@
 > 删了等于把知识扔掉；烧进设备的脚本又不需要它们。瘦身发生在**烧录这一步**，
 > 源码保持完整。
 
+## 开发版 vs 发布版（`_build_flag.lua`）
+
+固件分两版，靠 `lua/_build_flag.lua` 一行开关切：
+
+```lua
+-- 发布版开关。true=发布, false=开发。改这一行就切版本
+return false        -- false=开发版 / true=发布版
+```
+
+`main.lua` 启动时读它：`_G.BUILD_RELEASE = require "_build_flag"`、`_G.DEBUG = not _G.BUILD_RELEASE`。
+
+**两版的差别只有两处**：
+
+| 差别 | 开发版 | 发布版 |
+|---|---|---|
+| 调试指令注册 | `W:GC`（强制 GC+踢连接）、`W:RAWTEST`（485 裸探针）**都注册** | **都不注册** |
+| 原始 hex 收进 ring | 收（`collector.push_raw_rx`） | 不收（省内存，也不留总线原始报文） |
+
+其余全部指令（含 sniff 三件套 `R:FRAMES`/`R:INFER`/`R:AUTODETECT`）**两版都有**。
+
+### 为什么要拆
+
+1. **暴露面**：设备挂在客户产线上是公开串口，谁都能连。`W:RAWTEST` 能**直接往客户 485 总线发原始帧**（干扰客户设备），`W:GC` 能强制断 MQTT —— 交付版不该开这些口子。
+2. **体积**：Lua 堆只有 203K，脚本区只有 256KB，能省一点是一点（调试组那几条的闭包 + upvalue 都不进注册表）。
+3. **排障需要**：现场出问题时，排障机上要有裸探针。
+
+### 该用哪个
+
+| 场景 | 用哪版 |
+|---|---|
+| 开发 / 产线排障 / 现场定位 485 问题 | **开发版**（`return false`），有 `W:RAWTEST` |
+| 交付客户 / 挂到客户产线上长期跑 | **发布版**（`return true`），不往外露总线探针 |
+
+> 现场排障的具体做法：把 `_build_flag.lua` 改成 `return false` → `tools\prep_burn.bat` → 烧 `build\lua_burn\` → 排障完改回 `return true` 再烧一次。
+>
+> `R:NET`/`R:MEM` 已在 2026-10 删除（信息早就并进 `R:STAT` 的 iot/guard 段，前端 0 引用，留着只是白占脚本区）。
+
 ## 功能
 
 | 功能 | 模块 | 说明 |
@@ -115,8 +152,8 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:MQTT / W:MQTT={json} | MQTT 配置读写，读返回 `{cfg,auto_pass,manual_on,pub,sub,ready,err,stat}`。`cfg`=手动档表单原值，`auto_pass`=首页凭证密码，`manual_on`=当前档位，`pub`/`sub`=当前档次实际生效的成品 topic |
 | W:MQTTRC | 只重连不动配置（等价 `iot.kick()`：销毁 client 后 backoff 归 1 立刻重连） |
 | R:REPORT | 立即上报 |
-| R:NET / R:MEM | 网络/内存诊断（**仅开发版注册**） |
 | W:GC | 强制 GC + 重连（**仅开发版注册**） |
+| W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配”（**仅开发版注册**——它能直接往总线上发帧，交付版不能开，见下「开发版 vs 发布版」） |
 | R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20，**正式注册**，sniff 报文卡依赖） |
 | R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits,value,name}], slaves, stat}`（**只读参考**，不写任何配置；`value` = 旁听应答最新解析值，地址没被解出过时缺省；`name` = U4 上报 payload 的 name（`alias` 映射,同 `iot.build_items` 一套，没配 alias 时 = `reg<addr>`） |
 | R:AUTODETECT[=restart] | 识别 sniff 通讯参数 `{baud,databits,stopbits,parity}`（**只用于本次会话**，不写 fskv）。**非阻塞**：回 `BUSY` / 参数 / `RET:FAIL:not in sniff mode`，由前端轮询。带 `=restart` = 强制重扫（先清旧帧旧值与旧结果，再从头扫），前端「重新识别通讯参数」按钮用 |
@@ -125,7 +162,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | W:BOOTMODE=idle\|poll\|pollpull\|sniff | 开机默认模式（大小写不敏感）。`sniff` 同样自动识别，但不堵开机流程 |
 | R:SN / R:ID / W:SN=xxx[,FORCE] / C:SN / LOCK:SN / UNLOCK:SN / R:SNEN / W:SNEN=n,0\|1[,P] | SN 产线指令（VUART_0 通道） |
 
-> 指令集与 `frontend/protocol.js` 的 `Enc` 一一对应。`W:RAWTEST`/`R:NET`/`R:MEM`/`W:GC` 是前端不调用的现场诊断入口，且**仅开发版注册**（`_build_flag.lua` = true 的发布固件里没有）。`R:FRAMES`/`R:INFER`/`R:AUTODETECT` 源自调试组，但已是 sniff 面板的正式依赖，2026-10 已**转正注册**（`cmd.lua` 的 `reg_cmds`，发布版可用）。
+> 指令集与 `frontend/protocol.js` 的 `Enc` 一一对应。`W:RAWTEST`/`W:GC` 是前端不调用的现场诊断入口，且**仅开发版注册**（`_build_flag.lua` = true 的发布固件里没有）。`R:FRAMES`/`R:INFER`/`R:AUTODETECT` 源自调试组，但已是 sniff 面板的正式依赖，2026-10 已**转正注册**（`cmd.lua` 的 `reg_cmds`，发布版可用）。
 >
 > **`R:MQTT` 的 stat 带 `sub_list`**（2026-10）：设备实际订阅清单（`build_subs()` 的产物，当前 5 条）。前端"其他生效 Topic"里的 **D2n** 那条用它替换模板——常量里是 `.../{sn}-N`（N=从机序号占位符），设备实际订的是 `.../{sn}-1`（多从机展开 `-1..-K`）。显示模板等于骗人：现场照着 `-N` 订阅收不到东西。老固件没有这个字段，前端退回模板。
 >

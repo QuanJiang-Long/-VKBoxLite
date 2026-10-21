@@ -1853,31 +1853,6 @@ function M.status()
     }
 end
 
-function M.net_state()
-    local st = {}
-    if not mobile then return st end
-    local function g(k)
-        local v = mobile[k]
-        if type(v) == "function" then
-            local ok, r = pcall(v)
-            return ok and r or nil
-        end
-        return v
-    end
-    st.csq = g("csq")
-    st.rsrp = g("rsrp")
-    st.rsrq = g("rsrq")
-    st.pci = g("pci")
-    st.reg = g("status")
-    st.imei = g("imei")
-    st.iccid = g("iccid")
-    if socket then
-        local ok, r = pcall(socket.isReady)
-        st.socket_ready = ok and r or nil
-    end
-    return st
-end
-
 reset_state()
 
 return M

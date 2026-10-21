@@ -371,28 +371,15 @@ local function reg_cmds()
     end)
 end
 
--- B 类：仅开发调试用的 4 条指令。发布版整个函数不调用,
+-- B 类：仅开发调试用的 2 条指令。发布版整个函数不调用,
 -- 键 + 闭包 + 闭包内捕获的 poll/iot 等 upvalue 全部不进注册表,
 -- 出厂固件更小、也不接受任何探针/总线诊断入口。
--- 注: R:NET/R:MEM 信息已合并到 R:STAT 的 iot/guard 段, 这里
--- 留独立指令仅供现场外挂调试工具(PC 串口)调, 产线/前端均不调
--- (R:FRAMES/R:INFER/R:AUTODETECT 已转正进 reg_cmds, 见上面的说明)
+--   W:GC      强制 GC + 踢连接 (乱用会断 MQTT, 不给客户)
+--   W:RAWTEST 485 裸探针: 能直接往总线上发原始帧 —— 交付版绝对不能开,
+--              现场排障时切开发版烧一次 (见 lua/README.md「开发版 vs 发布版」)
+-- 2026-10: R:NET/R:MEM 已删 (信息早就并进 R:STAT 的 iot/guard 段, 前端 0 引用,
+--   留着只是白占脚本区); R:FRAMES/R:INFER/R:AUTODETECT 已转正进 reg_cmds
 local function reg_debug_cmds()
-    M.reg("R:NET", function()
-        M.reply("RET:NET=" .. jencode(iot and iot.net_state() or {}))
-    end)
-
-    M.reg("R:MEM", function()
-        local st = {}
-        if rtos then
-            local t1, u1 = rtos.meminfo("sys")
-            local t2, u2 = rtos.meminfo("lua")
-            if type(u1) == "number" then st.sys = { total = t1, used = u1 } end
-            if type(u2) == "number" then st.lua = { total = t2, used = u2 } end
-        end
-        M.reply("RET:MEM=" .. jencode(st))
-    end)
-
     M.reg("W:GC", function()
         collector.trim_cache()
         collectgarbage("collect")
@@ -441,7 +428,7 @@ end
 
 function M.init()
     reg_cmds()
-    -- 发布版: 调试组 4 条 (R:NET/R:MEM/W:GC/W:RAWTEST) 整组不注册;
+    -- 发布版: 调试组 2 条 (W:GC/W:RAWTEST) 整组不注册;
     -- R:FRAMES/R:INFER/R:AUTODETECT 已转正在 reg_cmds, 发布版仍可用
     if _G.DEBUG then reg_debug_cmds() end
     local names = {}
