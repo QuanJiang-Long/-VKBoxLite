@@ -1,9 +1,18 @@
 @echo off
-REM 一键生成"烧录瘦身版"脚本: 双击即可
-REM 原理与用法见 tools\prep_burn.ps1 顶部注释
+REM ============================================================
+REM  prep_burn.bat - generate the "slim" script set for burning
+REM  (This file is intentionally pure ASCII: cmd.exe on a Chinese
+REM   Windows reads .bat as GBK, and UTF-8 Chinese in here turns
+REM   into garbage that breaks the command lines.)
+REM
+REM  Usage:
+REM   1) double-click this file (or run it from cmd)
+REM   2) burn the scripts from  build\lua_burn\   (NOT lua\)
+REM  See lua\README.md for details.
+REM ============================================================
 cd /d "%~dp0.."
 powershell -ExecutionPolicy Bypass -File "tools\prep_burn.ps1"
 echo.
-echo 上面若显示"余量"为正, 就可以用 LuaTools 烧录 build\lua_burn\ 里的脚本。
-echo (不要直接烧 lua\ 目录 —— 脚本区只有 256KB, 原始源码带注释会超限)
+echo If "FREE" above is positive, burn the scripts in build\lua_burn\ with LuaTools.
+echo Do NOT burn the lua\ folder directly - script area is only 256KB.
 pause

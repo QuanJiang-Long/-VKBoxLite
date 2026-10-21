@@ -86,14 +86,14 @@ Get-ChildItem $Src -Recurse -Filter *.lua | ForEach-Object {
     $dstTotal += (Get-Item $outFile).Length
 }
 
-Write-Host ("原始 lua/    : {0,7} 字节 ({1} KB)" -f $srcTotal, [math]::Round($srcTotal / 1kb, 1))
-Write-Host ("瘦身版       : {0,7} 字节 ({1} KB)   清掉 {2} 行整行注释" -f $dstTotal, [math]::Round($dstTotal / 1kb, 1), $stripped)
-Write-Host ("脚本区上限   :      262144 字节 (256 KB)")
+Write-Host ("source lua/   : {0,7} bytes ({1} KB)" -f $srcTotal, [math]::Round($srcTotal / 1kb, 1))
+Write-Host ("slim build    : {0,7} bytes ({1} KB)   {2} comment lines removed" -f $dstTotal, [math]::Round($dstTotal / 1kb, 1), $stripped)
+Write-Host ("script area   :      262144 bytes (256 KB) max")
 if ($dstTotal -gt 262144) {
-    Write-Host "!! 瘦身版仍然超限, 得再减代码" -ForegroundColor Red
+    Write-Host "!! slim set is STILL over the limit - cut real code" -ForegroundColor Red
     exit 1
 } else {
-    Write-Host ("余量         : {0} 字节 ({1} KB)" -f (262144 - $dstTotal), [math]::Round((262144 - $dstTotal) / 1kb, 1)) -ForegroundColor Green
+    Write-Host ("FREE          : {0} bytes ({1} KB)" -f (262144 - $dstTotal), [math]::Round((262144 - $dstTotal) / 1kb, 1)) -ForegroundColor Green
 }
 Write-Host ""
-Write-Host "烧录时脚本目录选: $Dst" -ForegroundColor Cyan
+Write-Host ("Burn from: {0}" -f (Resolve-Path $Dst).Path) -ForegroundColor Cyan
