@@ -35,8 +35,11 @@ const timer = appJs.substring(appJs.indexOf('homeTimer = setInterval'),
   appJs.indexOf('homeTimer = setInterval') + 900);
 assertEq(/while \(S\.pending && Date\.now\(\) - t0 < 3000\)/.test(timer), true,
   'app: 定时器等串口空闲(最多3s)而不是整轮跳过');
-assertEq(!/if \(S\.pending\) return;/.test(timer), true,
-  'app: 定时器不再"忙就整轮跳过"');
+// 不能"一忙就放弃": 等待循环必须在放弃判断之前
+const waitAt = timer.indexOf('while (S.pending');
+const giveUpAt = timer.indexOf('if (S.pending) return;');
+assertEq(waitAt >= 0 && giveUpAt > waitAt, true,
+  'app: 定时器先等空闲再决定放弃(不是一忙就跳过)');
 
 // 4. 状态卡的"当前档次"优先用 stat 段的 manual_on (R:STAT 5s 就更新, cfg 的慢)
 assertEq(/const manualOn = \(s\.manual_on !== undefined\)/.test(mqttJs), true,
