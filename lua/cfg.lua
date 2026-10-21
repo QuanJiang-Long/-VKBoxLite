@@ -149,9 +149,13 @@ function M.set_alias(key, id, name)
     return M.save_alias(out)
 end
 
--- 清空别名表 (2026-10, A 方案): 新一轮识别(进 sniff 档 / 重新识别)时调用。
+-- 清空别名表 (2026-10, A 方案): 离开 sniff / 新一轮识别时调用。
 -- 名字是"这一轮推断结果"的注解: 新一轮的地址可能都变了, 留着旧名字会张冠李戴
+-- ⚠️ 表本来就是空时【不写 fskv】: flash 擦写次数有限, 而"退出已清"之后
+--    "进入再清"这种兜底调用就不该再擦一次
 function M.clear_alias()
+    local c = M.load_alias()
+    if not c or not c.regs or #c.regs == 0 then return true end
     return M.save_alias({ regs = {} })
 end
 

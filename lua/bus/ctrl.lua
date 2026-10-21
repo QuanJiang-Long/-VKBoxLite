@@ -35,6 +35,15 @@ local function switch_delay()
     end)
 end
 
+-- 离开 sniff 统一入口: 停监听 + 抹掉这一轮的名字 (A 方案, 2026-10)
+--   名字只对当前这一轮有效: 退出 sniff 就抹干净, 下次进来是干净的表
+--   (clear_alias 空表不写 fskv, 所以"进 sniff 兜底再清一次"不费 flash)
+local function stop_sniff()
+    if not mon.is_running() then return end
+    mon.stop()
+    if cfgstore and cfgstore.clear_alias then pcall(cfgstore.clear_alias) end
+end
+
 function M.switch_mode(mode, from_boot)
     -- 25-fix: from_boot 默认 false, 开机自启路径 (main.lua 的 boot_mode) 传 true
     --   跳过 platform 的 MQTT 连接前置检查 —— 开机时 iot.start 还没跑, MQTT
@@ -63,7 +72,7 @@ function M.switch_mode(mode, from_boot)
         --   - 即使 host/port 没配, 也让用户进来 (前端的 pMqttHint 黄条会提示)
         -- 开机路径 (from_boot=true) 本来就没这个检查, 不受影响
         if mon.is_running() then
-            mon.stop()
+            stop_sniff()
             switch_delay()
         end
         if poll.is_running() then poll.stop() end
@@ -128,7 +137,11 @@ function M.switch_mode(mode, from_boot)
             poll.stop()
             switch_delay()
         end
-        if mon.is_running() then mon.stop() end
+        if mon.is_running() then stop_sniff() end
+        -- A 方案 (2026-10): 进 sniff = 新一轮。正常路径上"退出已清", 这里
+        --   这次是兜底(设备断电重启后开机直进 sniff, 走的是 start 不是
+        --   stop, 上次的名字还留在 fskv)。clear_alias 空表不写 fskv, 不费 flash
+        if cfgstore and cfgstore.clear_alias then pcall(cfgstore.clear_alias) end
         -- ⚠️ sniff 也要复位 manual_on (2026-10 修): 之前只有 manual/platform
         --   分支调 set_manual, 从 manual 切到 sniff 时 manual_on 仍是 true ——
         --   后果不止是上位机"当前档次"显示成"手动配置":
@@ -139,9 +152,6 @@ function M.switch_mode(mode, from_boot)
         --        报给用户自己的 broker, 平台那头看不到设备
         --   set_manual(false) 会断开重连换订阅清单, 必须在识别起来之前做
         if iot then pcall(iot.set_manual, false) end
-        -- A 方案 (2026-10): 新一轮识别 = 名字也跟着清。名字是"这一轮推断
-        --   结果"的注解, 新一轮地址可能都变了, 留着旧名字会张冠李戴
-        if cfgstore and cfgstore.clear_alias then pcall(cfgstore.clear_alias) end
         if mon.start() then
             -- 识别必须放后台: switch_mode 是同步的, 而且在开机路径(main.lua 的
             -- boot_mode)上也会被调用。同步等识别会把开机流程堵住, 而识别失败是
@@ -158,7 +168,7 @@ function M.switch_mode(mode, from_boot)
 
     elseif mode == "idle" or mode == "stop" then
         if poll.is_running() then poll.stop() end
-        if mon.is_running() then mon.stop() end
+        stop_sniff()
         local cleared = M.reset_user_cfg()
         S.cur = "idle"  -- 34-fix: 记下当前 mode
         -- 第三个返回值是给 W:MODE 拼应答的(见 cmd.lua 的 cleared: 那段),

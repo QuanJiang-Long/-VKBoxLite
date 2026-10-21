@@ -200,8 +200,12 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 - **但新一轮识别会把别名表清空**（A 方案，2026-10 定）。名字是"**这一轮**推断
   结果"的注解：重新识别 / 再进 sniff 档 = 开了新一轮，总线换了或地址变了，
   旧名字留着会张冠李戴（`reg305` 的"A相电流"可能已经是别的东西）。
-  所以 `ctrl.switch_mode(sniff)` 与 `R:AUTODETECT=restart` 都会
-  `cfgstore.clear_alias()`，与"清帧/清值/清旧识别结果"同步。
+  清的时机：**退出 sniff 就抹干净**（`ctrl.lua` 的 `stop_sniff()`：停监听 +
+  `clear_alias()`），另外两处兜底——点「重新识别」(`cmd.lua`)与**进 sniff 档**
+  (`ctrl.lua`)。进 sniff 那次是兜底：设备断电重启后开机直进 sniff 走的是
+  `start` 不是 `stop`，上次的名字还留在 fskv。
+  `cfg.clear_alias()` **表本来就空时不写 fskv**（flash 擦写次数有限），所以
+  "退出已清 → 进入再清"这第二次是零成本。
 - **`R:INFER` 只读，禁止回写 poll**。曾有过 `W:APPLYINFER` 把推断结果盖掉 poll 的
   regs，两个问题：① dtype 猜不准（旁听拿不到类型信息，全写 uint16，电压类 float 会被
   解成整数）；② 用户手配的寄存器表被一整份覆盖。现已删除该指令，推断结果仅作参考，
