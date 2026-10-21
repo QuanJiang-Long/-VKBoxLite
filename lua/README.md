@@ -500,8 +500,11 @@ RET:FAIL:AUTODETECT:not in sniff mode
 | `rx_buf` 指令行缓冲 | `sn/prov.lua` | `MAX_BUF`(16384) | 整缓冲清空 |
 | `pendingReqs` 待配对请求 | `bus/mon.lua` | 每 fc ≤ `MAX_PENDING_PER_FC`(4) | 删最早 |
 | `lastReqs` 最近请求索引 | `bus/mon.lua` | `MAX_LAST_REQ`(64) | **整表作废** |
+| 推断展开的 qty | `util.lua` `clamp_qty` | `MAX_INFER_QTY`(256) | 截到上限 |
+| 推断表行数 | `bus/mon.lua` `M.infer` | `MAX_INFER_ROWS`(512) | 不再新增行 |
+| 拓扑 properties 条数 | `iot.lua` `node_json` | 128 | 不再拼进 JSON |
 
-两个容易漏的点：
+三个容易漏的点：
 
 - **`lastReqs` 曾是缺口**：键是 `"slave:qty"`，键空间上千万且只增不减。sniff 挂在
   异常总线上会单调增长，两千条左右就吃掉大半堆。现在 `push_req` 里封顶，超限整表
@@ -509,6 +512,21 @@ RET:FAIL:AUTODETECT:not in sniff mode
   更旧的，配对结果不变，还省一份顺序数组。
 - **`pendingReqs` 的有界是间接的**：能进 `push_req` 的 fc 只有 3/5/15（`parse_frame`
   是白名单 + 强制 CRC），所以实际 ≤ 12 条。改 `decode_frame` 的 kind 判断时必须复核。
+- **推断的 qty 曾是缺口（2026-10 修的真崩溃）**：请求帧里的 qty 是 2 字节，最大
+  0xFFFF=65535，跟从机实际回了多少字节无关。`M.infer` 原来直接 `while j < f.qty`
+  展开——总线上来一个异常 qty 的帧（别的协议的帧 / 脏帧 / 误解析），一次就展开
+  6 万多项，每项一个表 + 一个字符串 key → 几十 MB → Lua 堆(203K)爆：
+  ```
+  E/user.coroutine.resume iot.lua:401: not enough memory for buffer allocation
+      [C]: in field 'concat'          ← node_json 里 table.concat(props)
+      iot.lua:466 → build_nodes
+      iot.lua:486 → topo_sig (每秒一次)
+  E/main Lua VM exit!! reboot in 15000ms
+  ```
+  现场表现：**跑着跑着莫名重启，重启后又好了**（偶发，取决于何时冒出异常 qty）。
+  现在三层封顶：`util.clamp_qty`(256) → `MAX_INFER_ROWS`(512) → `node_json` props
+  ≤128。被截断的次数记在 `mon.stat.infer_clamped`，`R:STAT` 的 `mon` 段能看到
+  ——**这个数不为 0 就说明总线上有异常 qty 的帧**，值得查现场设备。
 
 **OOM 兜底**（`iot.lua` 建连失败且报 memory 时）：`collector.trim_cache()` +
 `mon.trim_reqs()` + 强制 GC + 固定等 30s。`mon.trim_reqs()` 不能省——`lastReqs` 是

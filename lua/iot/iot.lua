@@ -374,7 +374,14 @@ end
 --    建档的子设备和上报的数据对不上, 症状是"拓扑发成功了但数据不进去"
 local function node_json(idx, slave, c, regs)
     local props = {}
+    -- ⚠️ props 条数封顶 (纵深防御, 2026-10): 推断表万一被撑大(异常 qty
+    --   的请求帧), 这里 table.concat 出来的 JSON 会是几 MB, 一个分配就把
+    --   Lua 堆(203K)顶爆 → "not enough memory for buffer allocation"
+    --   → VM 退出 → 设备重启(现场表现: 跑着跑着莫名重启)。上限按平台
+    --   物模型能接受的规模取 128 条
+    local MAX_PROPS = 128
     for _, r in ipairs(regs) do
+        if #props >= MAX_PROPS then break end
         local dt = r.dtype or "uint16"
         -- 嗅探时 r.name 通常 nil (put 不传), 兜底走 reg<addr> 跟 U4 key 对齐
         -- 轮询时 r.name 是用户配的真名, 走 r.name 路径

@@ -51,8 +51,18 @@ end
 -- guess_last_req 本来只认 10 秒内的条目, 丢掉的都是更旧的, 配对结果不变
 local MAX_LAST_REQ = 64
 local PAIR_TIMEOUT_MS = 250
+-- 推断展开的上限 (2026-10 加, 修 OOM 崩溃):
+--   一次请求的 qty 来自【请求帧的 2 字节】, 可以是 0..65535, 跟实际回了多少
+--   字节无关。总线上出现一个异常 qty 的请求(别的协议的帧/脏帧), 下面那个
+--   "while j < f.qty" 就会展开 6 万多项 —— 每个一项一个表 + 一个字符串 key,
+--   几十 MB, Lua 堆(203K)直接爆: "not enough memory for buffer allocation"
+--   → VM 退出 → 设备重启。现场表现就是"跑着跑着莫名重启, 重启后又好了"。
+--   Modbus 规范 FC03/FC04 一次最多读 125 个寄存器(0x7D), 取 256 留余量;
+--   推断表总共也封顶(多从机 × 多地址的组合), 超了不再新增行。
+--   qty 的封顶逻辑在 util.clamp_qty (能单测), 这里只留总行数上限
+local MAX_INFER_ROWS = 512
 local stat = { frames = 0, reqs = 0, rsps = 0, errs = 0, paired = 0, orphans = 0,
-               detect_round = 0, detect_fail = 0 }
+               detect_round = 0, detect_fail = 0, infer_clamped = 0 }
 
 local function key(slave, qty) return tostring(slave) .. ":" .. tostring(qty) end
 
@@ -356,6 +366,7 @@ function M.infer()
         if f.kind == "rsp" and f.slave then online[f.slave] = true end
     end
     local agg, slaves, ignored = {}, {}, 0
+    local agg_count = 0   -- agg 的条目数 (封顶用, 见 MAX_INFER_ROWS)
     -- V2.3_3 dtype 启发式 + v6 表格 alias 拆分: 每 alias 各自 1 行, key = slave:alias.
     -- 16bit 拆 2 个 alias 出 2 行 (98/99), 32bit 合并 2 个 alias 出 2 行 (2054/2055).
     -- conf 来自 push_rsp_value 多候选打分 (连续性 50% + 值域 30% + 边界 20% + 跨帧一致 +5%)
@@ -363,12 +374,22 @@ function M.infer()
     local cache = collector.get_all_latest()
     for _, f in ipairs(fs) do
         if f.kind == "req" and f.addr ~= nil and f.qty then
-            if online[f.slave] then
+            -- addr 也要合法 (0..65535): 越界的地址会让 alias 变成 "reg70000"
+            -- 这种怪 key, 推断表里出现看不懂的行
+            if f.addr < 0 or f.addr > 65535 then
+                stat.infer_clamped = stat.infer_clamped + 1
+            elseif online[f.slave] then
+                -- ⚠️ qty 必须封顶 (util.clamp_qty, 见 util.lua 注释): 请求帧里的
+                --   qty 是 2 字节, 可以到 65535, 展开下去就是几万项 → 堆爆 → 重启
+                local qty = util.clamp_qty(f.qty)
+                if qty ~= f.qty then
+                    stat.infer_clamped = stat.infer_clamped + 1
+                end
                 -- v8: 按 dtype 宽度遍历, 32bit 合并 1 个 32bit 寄存器 = 1 行
                 -- (跳过 alias1), 16bit 拆 1 个 16bit 寄存器 = 1 行. count 字段
                 -- 反映"占几个 modbus 16bit 位置" (uint16=1, float32=2).
                 local j = 0
-                while j < f.qty do
+                while j < qty do
                     local alias = "reg" .. (f.addr + j)
                     local e = cache[alias]
                     local dtype = (e and e.dtype) or "uint16"
@@ -376,6 +397,13 @@ function M.infer()
                     local key = f.slave .. ":" .. alias
                     local a = agg[key]
                     if not a then
+                        -- 推断表总行数也封顶 (MAX_INFER_ROWS): 多从机 × 多地址
+                        -- 的组合照样能把堆吃光, 超了不再新增行(hits 照常累加)
+                        if agg_count >= MAX_INFER_ROWS then
+                            stat.infer_clamped = stat.infer_clamped + 1
+                            break
+                        end
+                        agg_count = agg_count + 1
                         a = {
                             slave = f.slave,
                             addr = f.addr + j,  -- 起始地址
