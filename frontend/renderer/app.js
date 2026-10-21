@@ -1361,23 +1361,28 @@ async function saveAlias(row, id, name) {
   }
 }
 
-async function doInfer() {
+async function doInfer(silent) {
+  // silent: 自动触发(切 sniff 面板)时用 —— 每次切面板都弹一次 toast 太吵
   try {
     const r = await sendCmd(Protocol.Enc.infer(), 'INFER', 4000);
     S.infer = r.data;
     renderInfer();
     if (toArr(S.infer && S.infer.regs).length) {
-      status('推断出 ' + toArr(S.infer.regs).length + ' 个轮询项', true);
+      if (!silent) status('推断出 ' + toArr(S.infer.regs).length + ' 个轮询项', true);
       // 不能提"应用到轮询配置": 那个按钮和 W:APPLYINFER 已经删了,
       // 推断结果只作参考, 由人工核对后自行配置(见 lua/README.md 配置隔离)
-      toast('推断完成，结果仅供参考，请核对后自行配置');
+      if (!silent) toast('推断完成，结果仅供参考，请核对后自行配置');
     } else {
-      status('未监听到请求帧，先在旁听模式下观察一段时间', false);
-      toast('还没有监听到请求帧');
+      if (!silent) {
+        status('未监听到请求帧，先在旁听模式下观察一段时间', false);
+        toast('还没有监听到请求帧');
+      }
     }
   } catch (e) {
-    status('推断失败：' + e.message, false);
-    toast('推断失败：' + e.message);
+    if (!silent) {
+      status('推断失败：' + e.message, false);
+      toast('推断失败：' + e.message);
+    }
   }
 }
 
@@ -2356,6 +2361,10 @@ function activateTab(tabId) {
   if (tabId === 'tabSniff' && S.open && S.mode === 'sniff') readFrames();
   // 切到 sniff tab 时同步刷一次 MQTT 配置 (snMqHost/Port/Interval)
   if (tabId === 'tabSniff' && S.open) readMqtt();
+  // 切 sniff 面板自动重推一次推断表 (2026-10 用户要求: 每次切进来, 标题栏
+  //   那个[刷新]的动作自动做一遍)。只在 sniff 档做: 别的档位推断表本来是空的,
+  //   刷了还会弹"还没有监听到请求帧"这种没用的提示
+  if (tabId === 'tabSniff' && S.open && S.mode === 'sniff') doInfer(true);
   // pollpull 档: 进 poll tab 时静默读一份 ds_pull 填表单 —— 软件一打开
   // 就是 pollpull (没有 applyMode 这一步) 也覆盖。push 自动刷新另见
   // renderPushBanner. applyMode 钩子已删除 (窄), 这个钩子宽
