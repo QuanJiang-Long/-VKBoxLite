@@ -149,6 +149,12 @@ function M.set_alias(key, id, name)
     return M.save_alias(out)
 end
 
+-- 清空别名表 (2026-10, A 方案): 新一轮识别(进 sniff 档 / 重新识别)时调用。
+-- 名字是"这一轮推断结果"的注解: 新一轮的地址可能都变了, 留着旧名字会张冠李戴
+function M.clear_alias()
+    return M.save_alias({ regs = {} })
+end
+
 local function normalize_reg(r)
     if type(r) ~= "table" then return nil, "not table" end
     -- 范围/格式校验委托给 util.validate_reg(抽离后 ds_poll/ds_pull 共享)

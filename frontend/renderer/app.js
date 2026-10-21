@@ -1269,7 +1269,8 @@ function askEditRegName(row) {
           <button id="edCancel" style="padding:9px 12px;background:transparent;color:#666;border:1px solid #dde2ea;">取消</button>
         </div>
         <div style="font-size:11px;color:#999;margin-top:8px;">
-          保存后设备会按新名字上报；改标识符会让平台按新标识符重建物模型。
+          保存后设备会按新名字上报；改标识符会让平台按新标识符重建物模型。<br>
+          点「重新识别通讯参数」会开启新一轮识别，这些名字也会一起清空。
         </div>
       </div>`;
     document.body.appendChild(modal);
@@ -1451,7 +1452,7 @@ async function pollDetect(maxSec) {
 // 所以识别中点它等于立刻重启一轮, 不用先停再进
 async function autoDetect() {
   try {
-    status('正在识别通讯参数…', true);
+    status('正在识别通讯参数…（新一轮识别，旧的参数名称会一起清空）', true);
     // 2026-10: 重新识别 ≠ 读当前结果。裸发 R:AUTODETECT 时, 设备若已有
     //   last 结果会头答直接回旧值 —— 现象就是"点了没重扫, 只是复读参数"。
     //   改发 R:AUTODETECT=restart: 设备作废上一轮 (清 monitor 结果) 并从

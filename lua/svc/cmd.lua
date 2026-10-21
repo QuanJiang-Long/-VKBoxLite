@@ -343,6 +343,9 @@ local function reg_cmds()
             if not mon.is_running() then
                 return M.reply("RET:FAIL:AUTODETECT:not in sniff mode")
             end
+            -- A 方案 (2026-10): 重新识别 = 新一轮, 名字(别名表)一起清 ——
+            -- 名字是"这一轮推断结果"的注解, 新一轮地址变了旧名字就张冠李戴
+            if cfgstore and cfgstore.clear_alias then pcall(cfgstore.clear_alias) end
             local ok, err = mon.restart_detect()
             if not ok then
                 return M.reply("RET:FAIL:AUTODETECT:" .. tostring(err))

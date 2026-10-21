@@ -139,6 +139,9 @@ function M.switch_mode(mode, from_boot)
         --        报给用户自己的 broker, 平台那头看不到设备
         --   set_manual(false) 会断开重连换订阅清单, 必须在识别起来之前做
         if iot then pcall(iot.set_manual, false) end
+        -- A 方案 (2026-10): 新一轮识别 = 名字也跟着清。名字是"这一轮推断
+        --   结果"的注解, 新一轮地址可能都变了, 留着旧名字会张冠李戴
+        if cfgstore and cfgstore.clear_alias then pcall(cfgstore.clear_alias) end
         if mon.start() then
             -- 识别必须放后台: switch_mode 是同步的, 而且在开机路径(main.lua 的
             -- boot_mode)上也会被调用。同步等识别会把开机流程堵住, 而识别失败是
