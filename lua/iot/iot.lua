@@ -1803,8 +1803,14 @@ function M.status()
         device_id = S.device_id,
         client_id = S.client_id or (c.client_id ~= "" and c.client_id or default_client_id(device_id())),
         user = S.user or ((prof and prof.user ~= "" and prof.user) or device_id()),
-        pub = S.pub or (prof and prof.pub),
-        sub = S.sub or (prof and prof.sub),
+        -- ⚠️ 这里必须判【非空】而不是用 or: Lua 里 "" 是 truthy!
+        --   切档(manual→sniff)时 set_manual 会 kick 重连, 重连完成前 S.sub/S.pub
+        --   还是旧档位的值(手动档没配 topic 时就是空串), 用 or 会宁可空串也不
+        --   回退到 profile 现算的当前档位值 → 前端"生效订阅"显示"未连接",
+        --   而"生效发布"走 pub_topics(profile 直算)是对的, 两栏自相矛盾
+        --   (2026-10 用户实测报出)
+        pub = (S.pub and S.pub ~= "") and S.pub or (prof and prof.pub),
+        sub = (S.sub and S.sub ~= "") and S.sub or (prof and prof.sub),
         -- 32-fix: 设备实际发送的 topic 列表 (平台档带 -N 后缀). 前端只显示
         --   这个, 不做本地构造. 老设备 (无 pub_topics 字段) 时为 nil, 前端
         --   会回退到 s.pub

@@ -250,12 +250,17 @@ function renderMqtt() {
   // 32-fix: 优先用 s.pub_topics (设备返回的实际发送 topic 列表, 平台档带
   //   -{n} 后缀). 老设备没这个字段时回退到 s.pub (向后兼容).
   // 设备只告诉前端 "我发这些", 前端不构造
-  const pubTopics = (s.pub_topics && s.pub_topics.length)
+  // 没配 topic 时设备回的是 [""] (空串), 过滤掉; 两栏口径统一:
+  //   有效值就显示值, 没有值一律 '--' (红)。原来发布栏显示 '--'、订阅栏显示
+  //   "未连接", 同一件事两种说法(2026-10 用户报出)。"未连接"字面上又跟
+  //   上面那行"连接状态"撞车, 干脆统一用 '--'
+  const pubTopics = ((s.pub_topics && s.pub_topics.length)
     ? s.pub_topics
-    : (s.pub ? [s.pub] : []);
-  const pubText = pubTopics.length ? pubTopics.join('\n') : '未连接';
-  setKvPre(pre, 'mqStPub', pubText, pubTopics.length === 0);
-  setKvPre(pre, 'mqStSub', s.sub || '未连接', !s.sub);
+    : (s.pub ? [s.pub] : [])).filter(Boolean);
+  const pubText = pubTopics.length ? pubTopics.join('\n') : '--';
+  const subText = s.sub || '--';
+  setKvPre(pre, 'mqStPub', pubText, !pubTopics.length);
+  setKvPre(pre, 'mqStSub', subText, !s.sub);
   // 22-fix: 手动档额外生效的 topic (U1 hello + U2 meta).
   // 24-fix: 平台档也加 (U1/U2/U3/U5/U6/U7 + D2/D2n/D3/D4, 共 10 条;
   //         D2 服务调用已改 service/invoke, D2n 是子设备级 {sn}-N).
@@ -329,9 +334,10 @@ function renderSnStatus(s, c, pubTopics) {
   setKv('snStMode', c.manual_on ? '手动配置' : '自动（设备拼接）', !!c.manual_on);
   // 2026-10: "手动配置"字段已从 sniff 状态卡删掉 (设备端切 sniff 会复位
   //   manual_on → sniff 恒为自动档, 那行永远是"否")
-  // 生效发布: pubTopics[0] (主 topic), 没连上是 '未连接'
-  if (pubTopics && pubTopics.length) {
-    setKv('snStPub', pubTopics[0], false);
+  // 生效发布: pubTopics[0] (主 topic); 没配/没连一律 '--' (与 m/p 档同口径)
+  const pubValid = (pubTopics || []).filter(Boolean);
+  if (pubValid.length) {
+    setKv('snStPub', pubValid[0], false);
     // 其他生效 Topic: 与平台档 (p 档) pMqStExtraTopics 完全一致 —— 10 条
     //   U1/U2/U3/U5/U6/U7 + D2/D2n/D3/D4 code 标签列表。
     //   （原 pubTopics[1..] 多余从机上报位并入去: 主 -1 已在"生效发布"行,
@@ -347,10 +353,12 @@ function renderSnStatus(s, c, pubTopics) {
       el.snStExtraTopics.className = extras ? 'kv-pre' : 'kv-pre bad';
     }
   } else {
-    setKv('snStPub', '未连接', true);
+    setKv('snStPub', '--', true);
     setKv('snStExtraTopics', '--', true);
   }
-  setKv('snStSub', s.sub || '未连接', !s.sub);
+  // 生效订阅: 与"生效发布"同一口径 (没值就 '--', 不用"未连接" ——
+  // 那字面跟上面"连接状态"栏撞车, 而且两栏说法不一致看着别扭)
+  setKv('snStSub', s.sub || '--', !s.sub);
   setKv('snStSubed', s.subscribed ? '是' : '否', !s.subscribed);
   setKv('snStKeepSession',
         s.keep_session == null ? '--' : (s.keep_session ? '持久会话' : '离线自动销毁'));
