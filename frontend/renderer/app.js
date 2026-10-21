@@ -331,19 +331,20 @@ function setRadio(name, val, pre) {
     r.checked = (r.value === String(val));
   });
 }
-function setKv(id, text, bad) {
+function setKv(id, text, bad, cls) {
   const n = $(id);
   if (!n) return;
   n.textContent = (text === null || text === undefined || text === '') ? '--' : String(text);
-  n.className = bad ? 'bad' : '';
+  n.className = bad ? 'bad' : (cls || '');
 }
 // Step 2b: 跟 setKv 一样, 但指定 m-/p- 前缀, 写对应 tab 内的元素
-function setKvPre(pre, id, text, bad) {
+// cls: 可选附加类(如 'info' 蓝), 用来表达"不是错、只是想区分"
+function setKvPre(pre, id, text, bad, cls) {
   const fullId = pre ? (pre + id[0].toUpperCase() + id.slice(1)) : id;
   const n = $(fullId);
   if (!n) return;
   n.textContent = (text === null || text === undefined || text === '') ? '--' : String(text);
-  n.className = bad ? 'bad' : '';
+  n.className = bad ? 'bad' : (cls || '');
 }
 // 回填输入框前的占位判断：这个值现在能不能写进去。
 // 焦点在它上面 → 不能（会冲掉正打的字）；

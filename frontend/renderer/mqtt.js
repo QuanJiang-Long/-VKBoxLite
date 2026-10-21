@@ -293,7 +293,9 @@ function renderMqtt() {
     }
   }
   // 当前档次: 手动 = 用本页填的凭证；自动 = 首页那份凭证 + SN
-  setKvPre(pre, 'mqStMode', c.manual_on ? '手动配置' : '自动（设备拼接）', !!c.manual_on);
+  // 当前档次: 手动档显示"手动配置" —— 用强调色(蓝)而不是错误红:
+  //   手动配置不是错, 只是与"自动(设备拼接)"区分开 (2026-10 用户要求)
+  setKvPre(pre, 'mqStMode', c.manual_on ? '手动配置' : '自动（设备拼接）', false, c.manual_on ? 'info' : '');
   setKvPre(pre, 'mqStSubed', s.subscribed ? '是' : '否', !s.subscribed);
   // Step 2i: 17 字段 → 9 字段, 删 8 个 setKvPre (面板也对应删了):
   //  - mqStSubs 订阅Topic / mqStReplied 配置回执 / mqStPubed 已上报条数
@@ -332,7 +334,8 @@ function renderSnStatus(s, c, pubTopics) {
   setKv('snStDevId', s.device_id || s.sn || '--');
   // 当前档次: 跟 m/p 卡片同步, 但 sniff 模式下都是设备实际生效值
   //   c.manual_on=true 表示手动档在跑 (本页填的凭证/topic), false=自动档 (首页 MQTT + SN 拼)
-  setKv('snStMode', c.manual_on ? '手动配置' : '自动（设备拼接）', !!c.manual_on);
+  //   手动配置用强调色(蓝), 不是错误红 (2026-10 用户要求)
+  setKv('snStMode', c.manual_on ? '手动配置' : '自动（设备拼接）', false, c.manual_on ? 'info' : '');
   // 2026-10: "手动配置"字段已从 sniff 状态卡删掉 (设备端切 sniff 会复位
   //   manual_on → sniff 恒为自动档, 那行永远是"否")
   // 生效发布: pubTopics[0] (主 topic); 没配/没连一律 '--' (与 m/p 档同口径)
