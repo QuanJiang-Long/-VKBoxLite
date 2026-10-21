@@ -1363,25 +1363,36 @@ async function saveAlias(row, id, name) {
 
 async function doInfer(silent) {
   // silent: 自动触发(切 sniff 面板)时用 —— 每次切面板都弹一次 toast 太吵
-  try {
-    const r = await sendCmd(Protocol.Enc.infer(), 'INFER', 4000);
-    S.infer = r.data;
-    renderInfer();
-    if (toArr(S.infer && S.infer.regs).length) {
-      if (!silent) status('推断出 ' + toArr(S.infer.regs).length + ' 个轮询项', true);
-      // 不能提"应用到轮询配置": 那个按钮和 W:APPLYINFER 已经删了,
-      // 推断结果只作参考, 由人工核对后自行配置(见 lua/README.md 配置隔离)
-      if (!silent) toast('推断完成，结果仅供参考，请核对后自行配置');
-    } else {
-      if (!silent) {
+  // ⚠️ 撞"上一条指令尚未返回"时重试一次: 串口是单未决设计, 同一时刻只能
+  //   有一条指令在途。5s 定时器(读首页)正好在途时会撞上, 不重试的话自动
+  //   刷新会静默失败 —— 表现就是"切进 sniff 面板表没更新"
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await sendCmd(Protocol.Enc.infer(), 'INFER', 4000);
+      S.infer = r.data;
+      renderInfer();
+      if (toArr(S.infer && S.infer.regs).length) {
+        if (!silent) status('推断出 ' + toArr(S.infer.regs).length + ' 个轮询项', true);
+        // 不能提"应用到轮询配置": 那个按钮和 W:APPLYINFER 已经删了,
+        // 推断结果只作参考, 由人工核对后自行配置(见 lua/README.md 配置隔离)
+        if (!silent) toast('推断完成，结果仅供参考，请核对后自行配置');
+      } else if (!silent) {
         status('未监听到请求帧，先在旁听模式下观察一段时间', false);
         toast('还没有监听到请求帧');
       }
-    }
-  } catch (e) {
-    if (!silent) {
-      status('推断失败：' + e.message, false);
-      toast('推断失败：' + e.message);
+      return;                       // 成功就收工, 别再发第二条
+    } catch (e) {
+      if (attempt === 0 && /尚未返回/.test(e.message || '')) {
+        await new Promise(r => setTimeout(r, 500));   // 等上一条指令回完再试
+        continue;
+      }
+      if (!silent) {
+        status('推断失败：' + e.message, false);
+        toast('推断失败：' + e.message);
+      } else {
+        console.warn('[sniff] 自动推断失败:', e.message);
+      }
+      return;
     }
   }
 }
@@ -2357,14 +2368,21 @@ function activateTab(tabId) {
     S.platformMqttHintDismissed = false;
     renderPlatformHints();
   }
-  // 切到报文页时立即拉一次
-  if (tabId === 'tabSniff' && S.open && S.mode === 'sniff') readFrames();
-  // 切到 sniff tab 时同步刷一次 MQTT 配置 (snMqHost/Port/Interval)
-  if (tabId === 'tabSniff' && S.open) readMqtt();
-  // 切 sniff 面板自动重推一次推断表 (2026-10 用户要求: 每次切进来, 标题栏
-  //   那个[刷新]的动作自动做一遍)。只在 sniff 档做: 别的档位推断表本来是空的,
-  //   刷了还会弹"还没有监听到请求帧"这种没用的提示
-  if (tabId === 'tabSniff' && S.open && S.mode === 'sniff') doInfer(true);
+  // 切到 sniff 面板: 刷报文 + 刷 MQTT 信息 + 自动重推一次推断表
+  //   (2026-10 用户要求: 每次切进来, 标题栏那个[刷新]的动作自动做一遍)
+  // ⚠️ 必须【串行】不能并发: 串口是单未决设计, 同一时刻只能有一条指令在途。
+  //   三条一起发, 后两条直接撞"上一条指令尚未返回"直接失败 —— doInfer 又是
+  //   静默的, 于是切进来看着就是"自动刷新没生效"(表一直空着)。
+  //   顺序也讲究: 先 MQTT(用户最先看), 再报文, 最后推断表(最慢)
+  if (tabId === 'tabSniff' && S.open) {
+    (async () => {
+      await readMqtt();
+      if (S.mode === 'sniff') {
+        await readFrames();
+        await doInfer(true);
+      }
+    })();
+  }
   // pollpull 档: 进 poll tab 时静默读一份 ds_pull 填表单 —— 软件一打开
   // 就是 pollpull (没有 applyMode 这一步) 也覆盖。push 自动刷新另见
   // renderPushBanner. applyMode 钩子已删除 (窄), 这个钩子宽
