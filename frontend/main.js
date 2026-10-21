@@ -5,6 +5,11 @@
 //=====================================================================
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
+// 流式 UTF-8 解码器 (2026-10 修乱码): 串口来的字节要【按流】解码, 不能一块一块
+// 单独 toString('utf8') —— 一个汉字的 3 个字节经常跨 chunk 边界, 分开解码会
+// 把一个字变成 2~3 个替换符(乱码)。StringDecoder 会把不完整的尾巴缓存住,
+// 下一块来时补齐。现象: 设备回的中文错误串(平台拒绝连接…)偶发坏一个字
+const { StringDecoder } = require('string_decoder');
 
 // serialport 在打包环境里随 app 一起分发；开发时从 node_modules 加载
 // 注意：serialport v10+ 起，list() 是 SerialPort 类的静态方法，
@@ -33,6 +38,7 @@ try {
 let win = null;
 let port = null;          // 当前打开的串口实例
 let rxBuffer = '';        // 行缓冲（设备协议是一行一条指令）
+let utf8Decoder = new StringDecoder('utf8');  // 跨 chunk 的多字节字符靠它续上
 const LINE_END = ['\r\n', '\n'];
 
 function createWindow() {
@@ -146,7 +152,8 @@ ipcMain.handle('serial:send', async (evt, line) => {
 // 接收：按行切分，推送给渲染进程
 //---------------------------------------------------------------------
 function onData(chunk) {
-  rxBuffer += chunk.toString('utf8');
+  // ⚠️ 必须用流式解码: chunk.toString('utf8') 会把跨块的中文字切坏(乱码)
+  rxBuffer += utf8Decoder.write(chunk);
   let idx;
   // 注意：indexOfLineEnd 返回 {start,end} 对象或 null，不能直接和 -1 比较
   while ((idx = indexOfLineEnd(rxBuffer)) !== null) {
