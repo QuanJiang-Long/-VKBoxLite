@@ -1,0 +1,22 @@
+{
+  "sn_rule": {
+    "prefix": "VL",
+    "serial_digits": 3,
+    "date_fmt": "%Y%m%d"
+  },
+  "baud": 115200,
+  "timeout_ms": 1500,
+  "port": "COM4",
+  "auto_lock": true,
+  "confirm_before_write": true,
+  "auto_loop": false,
+  "rework_password": "8888",
+  "require_operator": true,
+  "serial_daily_reset": true,
+  "operator": "001",
+  "data_dir": "",
+  "mqtt_host": "dz.voltkun.com",
+  "mqtt_port": 1883,
+  "mqtt_pass": "VKBOXGW2026KEY",
+  "beep_on_finish": true
+}

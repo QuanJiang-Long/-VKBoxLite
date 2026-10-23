@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# pc_tool 打包产物
+pc_tool/build/
+pc_tool/dist/
+pc_tool/SnBurner.spec
+pc_tool/VKBoxLiteSn.spec
+
+# pc_tool 测试/工具脚本的临时输出
+pc_tool/_smoke*.txt
+pc_tool/_smoke*_tmp/
+pc_tool/_selftest_tmp/
+pc_tool/_pip_tmp/
+
+# pc_tool 运行期生成（台账、流水号、崩溃日志）
+pc_tool/data/
+pc_tool/crash.log
