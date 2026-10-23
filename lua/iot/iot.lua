@@ -554,7 +554,7 @@ local function send_meta()
     p[#p + 1] = string.format('"netRegister":%s', tostring(net_registered(csq)))
     p[#p + 1] = string.format('"networkAddress":%s', MqttUtil.jstr(mqttcfg.load().host))
     p[#p + 1] = string.format('"isShadow":0')
-    p[#p + 1] = string.format('"summary":%s', MqttUtil.jstr("VKBox Bootstrap"))
+    p[#p + 1] = string.format('"summary":%s', MqttUtil.jstr("VKBoxLite Bootstrap"))
     -- deviceType 固定 3 (产品定义: 网关). locationWay 0=未定位/2=LBS 成功
     p[#p + 1] = '"deviceType":3'
     p[#p + 1] = '"locationWay":' .. (S.lbs and "2" or "0")
