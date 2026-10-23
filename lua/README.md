@@ -692,28 +692,30 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 （「重连」按钮单独发 W:MQTTRC，只重连不动配置）
 ```
 
-### 平台 V3 数据面三条上行（U2 / U3 / U7）
+### 平台 V3 数据面四条上行（U2 / U3 / U5 / U7）
 
-U4（数据上报）见上面 topic 表。这三条与订阅无关，都是 `publish`：
+U4（数据上报）见上面 topic 表。这几条与订阅无关，都是 `publish`：
 
 | 编号 | topic | 时机 | 内容 |
 |---|---|---|---|
 | U3 | `/sys/thing/gw/property/post/{sn}` | 与 U4 同节奏（`interval_s`） | `ram_percent`（`rtos.meminfo("sys")`）、`uptime_sec`（`os.clock()`）、`cpu_percent`（主循环忙碌占比，**非 MCU CPU 占用率**，LuatOS 无 OS 级 CPU 接口） |
 | U7 | `/sys/thing/gw/function/post/{targetSN}` | 每次 D2/D3 下行执行后 | `[{"id":<下发 id>,"value":<值或 null>}]`。粒度只到**入队/拒绝**：`poll.enqueue_write` 是异步的，汇总 `write_status()` 分不出是哪一条，所以 `value` 非 null **不等于已写到总线** |
+| U5 | `/sys/thing/gw/event/post/{sn}` | **事件触发，与周期无关** | `resource_alarm`：ram/cpu/disk 越限。**上升沿触发**（越限瞬间发一次，持续越限不刷屏；回落后再越限才再发）+ **30 秒节流**防阈值附近抖动（`send_event` / `check_event_threshold`，阈值表 `EVENT_THRESHOLD`：ram=85、cpu=90、disk=90，disk 取不到时不参与） |
 
 **U2 是双重用途的**（`iot.lua` 的 `send_meta` / `send_topo`），靠 body 里有没有
 `nodes[]` 区分语义，所以拆成**两帧**各发一次（合成一帧平台拿不准该干嘛）：
 
 | 帧 | body | 平台行为 | 时机 |
 |---|---|---|---|
-| 元数据帧 | 不带 `nodes[]`：`sn`/`deviceSn`/`imei`/`iccid`/`fw`/`firmwareVersion`/`hw`/`capabilities`/`deviceName`/`serialNumber`/`csq`/`netRegister`/`networkAddress`/`isShadow`/`summary`/`ts` | 只更新网关属性，**不重建模型** | 元数据指纹（imei/iccid/csq/host）变化即发 |
+| 元数据帧 | 不带 `nodes[]`：`sn`/`deviceSn`/`imei`/`iccid`/`fw`/`firmwareVersion`/`hw`/`capabilities`/`deviceName`/`serialNumber`/`csq`/`netRegister`/`networkAddress`/`isShadow`/`summary`（固定 `"VKBoxLite Bootstrap"`）/`ts`；LBS 定位成功再加 `latitude`/`longitude`（`locationWay` 同步 2） | 只更新网关属性，**不重建模型** | 元数据指纹（imei/iccid/csq/host/LBS）变化即发；**另带 `interval_s` 兜底**（指纹长期不变也按周期重发一次，与 U3/U4 共享节奏）。`deviceName` 按档分流：manual/platform 留空串（用户决策 2026-10-16），sniff 用 `"VKBox-{sn}"` |
 | 拓扑帧 | 带 `nodes[]`：`sn`/`deviceSn`/`ts`/`nodes[]` | 建子设备 + 绑定 + 物模型 | 拓扑签名变化即发，**且 detect 未跑完不发**（否则 baud 是上一轮的默认值，平台按错波特率建一次模型还得再重建） |
 
-两帧都**不做定时兜底**：实测（2026-10-08）留着 60s 兜底重发会形成
+拓扑帧**不做定时兜底**：实测（2026-10-08）留着 60s 兜底重发会形成
 "我们发拓扑 → 平台推配置 → 我们再发拓扑"的闭环，每 60s 一轮；而且兜底路径不打日志，
-现象是"sniff 档平台不断下发模型配置"，难查。
+现象是"sniff 档平台不断下发模型配置"，难查。元数据帧的兜底是 `interval_s`
+（指纹没变也定期重报，防止档案一直收不到最新一次），两者口径不同。
 
-`firmwareVersion` 是纯数字（`2.0.0` → `20000`）= major\*10000 + minor\*100 + patch：
+`firmwareVersion` 是纯数字（`1.0.0` → `10000`）= major\*10000 + minor\*100 + patch：
 平台侧该字段是 BigDecimal，传字符串会**整帧被丢**。`ts` 用秒，毫秒会让平台按 1970 年解析。
 
 **U2 拓扑的两个来源保真度不同**（`iot.lua` 的 `build_nodes`）：
@@ -723,7 +725,11 @@ U4（数据上报）见上面 topic 表。这三条与订阅无关，都是 `pub
 | poll / pollpull | `active_cfg()` 平台下发的正经配置 | 全是真的（`name`/`alias`/`dtype`） |
 | sniff | `mon.infer()` ∪ `cfgstore.load_pull()`，按 `slave:addr` 合并，**平台配置覆盖推断** | 只有 slave/addr/count，id/name 按地址现造（`r<addr>`），dtype 默认 `uint16` |
 
-**U5 / U5b 告警事件（`gw/event/post`）本次未实现**，需要时按同一套方式补。
+**U5 / U5b 告警事件（`gw/event/post`）已实现**（2026-10）：`send_event` +
+`check_event_threshold`（`iot.lua`），见上面 U5 行。判定挂在 `send_gw_res`
+尾部 —— 只有周期任务真的发了 U3 才顺带判一次阈值；且受两级闸门：
+`should_pub_platform`（idle/manual 不发）+ `pub_blocked`（识别扫描吃 CPU
+会把忙碌占比推高，识别未成功期间一并挡掉，防误发一条 cpu 告警）。
 
 
 > **保存与回执都发生在设备侧（`iot.auto_apply`），不经前端**：平台主动重推
