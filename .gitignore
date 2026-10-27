@@ -24,3 +24,8 @@ dist/
 
 # çƒ§å½•ç˜¦èº«ç‰ˆè„šæœ¬ (tools\\prep_burn.ps1 ç”Ÿæˆ, ä¸è¿›ä»“åº“)
 build/
+
+# LuatOS PC ·ÂÕæÆ÷ÊÔÑé¸±²úÎï (ÎğÈë¿â)
+pcconf/
+pclogs/
+
