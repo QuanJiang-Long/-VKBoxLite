@@ -121,12 +121,14 @@ end
 -- 32bit 合并候选: 16bit conf<80 时试 32bit, 32bit conf>16bit+5 才合并
 -- 合并时 2 个 16bit alias 都标同 dtype (reg<addr> + reg<addr+1> 都是 float32)
 -- 跨帧一致 +5% 加成. conf cap 100
-local dtypeHistory = {}  -- alias -> { d1, d2, ..., d8 } FIFO 最近 8 帧 dtype
+-- dtypeHistory FIFO 深度 5 (原 8): 越短, 单帧错位字/坏帧的格子越快被干净
+-- 流量翻回去; 8 深度要 ~6 帧, 现场看起来像"判死不认错" (2026-10, 2048)
+local dtypeHistory = {}  -- alias -> { d1, d2, ..., dN } FIFO 最近 N 帧 dtype
 
 local function pushHistory(alias, dtype)
     local h = dtypeHistory[alias] or {}
     h[#h + 1] = dtype
-    if #h > 8 then table.remove(h, 1) end
+    if #h > 5 then table.remove(h, 1) end
     dtypeHistory[alias] = h
 end
 
@@ -137,7 +139,7 @@ local function clear_history()
     dtypeHistory = {}
 end
 
--- 连续性: 跟历史 dtype 一致率 (本帧 + 历史 7 帧 FIFO)
+-- 连续性: 跟历史 dtype 一致率 (本帧 + 历史最近 5 帧 FIFO)
 local function calcContinuity(alias, cand)
     local h = dtypeHistory[alias] or {}
     if #h == 0 then return 50 end  -- 首帧不给满分也不给 0, 中性
@@ -156,8 +158,9 @@ local function calcRange(dtype, v)
     elseif dtype == "float32" then
         -- 值域合理性带 (cfg.DTYPE_FLOAT_MIN/MAX): 挡 NaN/Inf, 且解出
         -- 7e-6 / 1e30 这种带外值也 0 分 —— 那多半是整数被按浮点误读 (2026-10)
+        -- 例外: 恰好 0 是合法的 float 通道值 (传感器复位/零点), 不能带外拒
         if v == v and v ~= 1/0 and v ~= -1/0
-            and math.abs(v) >= cfg.DTYPE_FLOAT_MIN and math.abs(v) <= cfg.DTYPE_FLOAT_MAX then
+            and (v == 0 or (math.abs(v) >= cfg.DTYPE_FLOAT_MIN and math.abs(v) <= cfg.DTYPE_FLOAT_MAX)) then
             return 100
         end
         return 0
@@ -179,10 +182,11 @@ local function calcBoundary(dtype, v)
     local dist = math.abs(v - av) / (range / 2)
     if dist > 1 then dist = 1 end
     local b = math.floor(dist * 100)
-    -- uint32 解出 cfg.DTYPE_UINT32_SUSPECT 以上的"亿级大数": 大概率是
-    -- float32 字节被按整数误读 (真计数/累计量极少到亿级), 边界分重罚,
-    -- 别让它借连续性滚雪球压过 float32 (2026-10, 2054 误判 uint32 对策)
-    if dtype == "uint32" and v > cfg.DTYPE_UINT32_SUSPECT then
+    -- int32/uint32 解出 cfg.DTYPE_INT32_SUSPECT 以上的"千万级大数": 大概率
+    -- 是 float32 字节被按整数误读 (真计数/累计量极少到千万级), 边界分重罚,
+    -- 别让它借连续性滚雪球压过 float32 (2026-10, 2048 误判 int32 对策;
+    -- 首轮只罚了 uint32, 实测错位字帧会以 int32 名义滚进史, 所以同罚)
+    if (dtype == "uint32" or dtype == "int32") and math.abs(v) > cfg.DTYPE_INT32_SUSPECT then
         if b > 30 then b = 30 end
     end
     return b

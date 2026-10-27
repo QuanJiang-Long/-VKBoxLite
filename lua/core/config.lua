@@ -38,7 +38,7 @@ M.AUTO_REBOOT = true
 --   级原始数), 边界分重罚到 ≤30, 防止它在连续性上滚雪球压过 float32
 M.DTYPE_FLOAT_MIN = 1e-3
 M.DTYPE_FLOAT_MAX = 1e7
-M.DTYPE_UINT32_SUSPECT = 1e7
+M.DTYPE_INT32_SUSPECT = 1e7
 
 -- VL+YYYYMMDD+NNN = 2+8+3 = 13, 上限 32 留扩展段(prefix 改长 / 加日期戳变体)
 -- 改 SN_PREFIX 时同步改 SN_MIN_LEN (前缀 2 + 日期 8 + 流水 3)

@@ -924,11 +924,11 @@ body.mq-manual .auto-only{display:none !important;}
                     <table class="param-table">
                         <thead>
                             <tr>
-                                <th>从机地址</th><th>寄存器地址</th><th>数量</th><th>功能码</th><th>出现次数</th><th>推断类型</th><th title="旁听应答解析出的最新一次值">最新值</th><th title="上报 payload 的 name 字段（平台上显示的名字）——点击可改名">参数名称</th><th title="上报 payload 的 id 字段（平台按它建属性）——点击可改">建议标识符</th>
+                                <th>从机地址</th><th>寄存器地址</th><th>数量</th><th>功能码</th><th>出现次数</th><th>推断类型</th><th title="推断置信度(0-100, <60=不确定)。持续偏低说明参型还在自愈/有坏帧干扰">置信度</th><th title="旁听应答解析出的最新一次值">最新值</th><th title="上报 payload 的 name 字段（平台上显示的名字）——点击可改名">参数名称</th><th title="上报 payload 的 id 字段（平台按它建属性）——点击可改">建议标识符</th>
                             </tr>
                         </thead>
                         <tbody id="inferTbody">
-                            <tr><td colspan="9" style="color:#999;">点击"推断轮询表"从已监听到的报文反推</td></tr>
+                            <tr><td colspan="10" style="color:#999;">点击"推断轮询表"从已监听到的报文反推</td></tr>
                         </tbody>
                     </table>
                     <!-- sniff-3 e: 总线报文作为第二个子分段, 上面用分隔线区分 -->

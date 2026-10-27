@@ -1420,7 +1420,7 @@ function renderInfer() {
       + (inf.ignored ? '；已过滤 ' + inf.ignored + ' 条无应答的请求（从机可能不在线）' : '')
     : '';
   if (regs.length === 0) {
-    el.inferTbody.innerHTML = '<tr><td colspan="9" style="color:#999;">暂无推断结果</td></tr>';
+    el.inferTbody.innerHTML = '<tr><td colspan="10" style="color:#999;">暂无推断结果</td></tr>';
     return;
   }
   el.inferTbody.innerHTML = regs.map(r => {
@@ -1435,6 +1435,12 @@ function renderInfer() {
     '<td>0x' + (r.fc != null ? r.fc.toString(16).padStart(2, '0').toUpperCase() : '?') + '</td>' +
     '<td>' + esc(r.hits) + '</td>' +
     '<td title="' + esc(r.dtype || '-') + '" style="font-family:monospace;font-size:12px;color:#0066cc;">' + esc(r.dtype || '-') + '</td>' +
+    // 置信度 + 判型状态: 设备端 R:INFER rows 自带 conf/status (0-100, 2026-10 新增列)
+    // ok=绿(≥80) review=橙(60-79) uncertain=灰(<60), 让"判型还在自愈/被坏帧干扰"直接可见
+    '<td style="font-family:monospace;font-size:12px;">' +
+      (r.conf != null ? esc(r.conf) : '<span style="color:#999;">-</span>') +
+      ' <span style="color:' + (r.status === 'ok' ? '#0a7d2c' : r.status === 'review' ? '#e6a23c' : '#999') + ';">' +
+      esc(r.status || '-') + '</span></td>' +
     '<td title="旁听应答最新解析值" style="font-family:monospace;font-size:12px;">' +
       (v != null ? esc(v) : '<span style="color:#999;">--</span>') + '</td>' +
     // 参数名称: 与 U4 上报 payload 的 name 同一字段 (设备端 attach_names 给的);
