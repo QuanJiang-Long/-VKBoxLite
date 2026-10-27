@@ -5,10 +5,9 @@
 --   "not enough memory for buffer allocation" → VM 退出 → 设备重启。
 --   修法: util.clamp_qty 把 qty 收敛到 Modbus 合理的范围。
 --
--- 跑法(仓库根目录):  lua tests/lua/test_clamp_qty.lua
---   (放 tests/ 而不是 lua/ 下: lua/ 整个目录都要烧进固件, 测试脚本不该占脚本区)
+-- 跑法(仓库根目录):  lua tests/lua/test_clamp_qty.lua  (本机 5.1 即可, 不依赖 mbus)
 
-package.path = 'lua/?.lua;' .. package.path
+if package and package.path then package.path = 'lua/?.lua;' .. package.path end
 local util = dofile('lua/util.lua')
 
 local fails = 0

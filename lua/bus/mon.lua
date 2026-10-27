@@ -2,7 +2,7 @@ local util = require "util"
 local cfg = require "core/config"
 local log = util.log()
 
-local uart = util.get("uart")
+local uart = util.try("uart")  -- try 而非 get: 纯 Lua 环境也能加载 (单测); start 时判空
 local gpio = util.try("gpio")
 local sys = util.try("sys")
 -- 心跳接入: guard 用它判 sniff 档业务是否卡死 (poll.lua 在采集档同模式接入)
@@ -130,6 +130,13 @@ local function pushHistory(alias, dtype)
     dtypeHistory[alias] = h
 end
 
+-- dtype 判型历史必须随会话清: 它决定连续性 50% 的权重, 不清的话上一轮
+-- sniff (甚至配对错位时记下的错判) 会"先入为主"绑死这一轮 —— 2054 曾因
+-- 历史 uint32 污染永远赢不回 float32 就是根因。mon.start 时调用 (2026-10)
+local function clear_history()
+    dtypeHistory = {}
+end
+
 -- 连续性: 跟历史 dtype 一致率 (本帧 + 历史 7 帧 FIFO)
 local function calcContinuity(alias, cand)
     local h = dtypeHistory[alias] or {}
@@ -146,7 +153,14 @@ local function calcRange(dtype, v)
     elseif dtype == "uint16" and v >= 0 and v <= 65535 then return 100
     elseif dtype == "int32" and v >= -2147483648 and v <= 2147483647 then return 100
     elseif dtype == "uint32" and v >= 0 and v <= 4294967295 then return 100
-    elseif dtype == "float32" and v == v and v ~= 1/0 and v ~= -1/0 then return 100  -- 非 NaN/Inf
+    elseif dtype == "float32" then
+        -- 值域合理性带 (cfg.DTYPE_FLOAT_MIN/MAX): 挡 NaN/Inf, 且解出
+        -- 7e-6 / 1e30 这种带外值也 0 分 —— 那多半是整数被按浮点误读 (2026-10)
+        if v == v and v ~= 1/0 and v ~= -1/0
+            and math.abs(v) >= cfg.DTYPE_FLOAT_MIN and math.abs(v) <= cfg.DTYPE_FLOAT_MAX then
+            return 100
+        end
+        return 0
     end
     return 0  -- 超出类型范围, 排除
 end
@@ -164,7 +178,14 @@ local function calcBoundary(dtype, v)
     local range = hi - lo
     local dist = math.abs(v - av) / (range / 2)
     if dist > 1 then dist = 1 end
-    return math.floor(dist * 100)
+    local b = math.floor(dist * 100)
+    -- uint32 解出 cfg.DTYPE_UINT32_SUSPECT 以上的"亿级大数": 大概率是
+    -- float32 字节被按整数误读 (真计数/累计量极少到亿级), 边界分重罚,
+    -- 别让它借连续性滚雪球压过 float32 (2026-10, 2054 误判 uint32 对策)
+    if dtype == "uint32" and v > cfg.DTYPE_UINT32_SUSPECT then
+        if b > 30 then b = 30 end
+    end
+    return b
 end
 
 -- 候选打分 (16bit 或 32bit 候选), 返回 (dtype, value, conf)
@@ -209,6 +230,15 @@ local function pickDtype(data, off, remaining, addr, slave, f)
     end
     return bestD, bestV, bestC, false
 end
+
+-- 导出: 单元测试 (tests/lua/test_dtype_band.lua) 用, 设备逻辑不依赖:
+--   calc_range/calc_boundary 逐分项验证; pick_dtype 端到端; seed_history
+--   模拟"历史污染"; clear_history 验证 mon.start 清幂
+M.calc_range = calcRange
+M.calc_boundary = calcBoundary
+M.pick_dtype = pickDtype
+M.clear_history = clear_history
+M.seed_history = function(alias, list) dtypeHistory[alias] = list end
 
 local function push_rsp_value(slave, addr, f)
     if not f.data or not addr then return end
@@ -458,6 +488,10 @@ end
 
 function M.start(c)
     if running then return true end
+    if not uart then return nil, "no uart" end  -- uart 弱加载后的判空 (设备恒有)
+    -- dtype 判型历史随会话清零: 连续性 50% 权重依托它, 跨会话遗留的 dtype
+    -- 判定会"先入为主"绑死新一轮推断 (2026-10, 2054 误判 uint32 根因之一)
+    clear_history()
     -- 2026-10: 进 sniff 先清上一轮的值/帧/旧识别结果(旧参数下的东西不能混进这一轮)
     collector.clear_all()
     _G.mon_detect_result = nil

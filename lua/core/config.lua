@@ -30,6 +30,16 @@ M.STALL_LIMIT_S = 120
 --   超过 STALL_LIMIT_S, 只在实际循环卡住时才可能发生(2026-10 用户确认)
 M.AUTO_REBOOT = true
 
+-- dtype 启发式打分的先验量级带 (只影响 sniff 自动猜型的打分, 不动已判型/手配):
+--   float32 解读值 |v| 落在 [FLOAT_MIN, FLOAT_MAX] 才给值域满分 —— 工业表计
+--   读数(温度/4-20mA/kPa/累计量)基本都在这个带里; 带外(7e-6 / 1e30 这种)
+--   多半是"整数字节被按浮点强行解读", 不得满分
+--   uint32 解读值 > UINT32_SUSPECT 时大概率是 float32 字节被按整数误读(亿
+--   级原始数), 边界分重罚到 ≤30, 防止它在连续性上滚雪球压过 float32
+M.DTYPE_FLOAT_MIN = 1e-3
+M.DTYPE_FLOAT_MAX = 1e7
+M.DTYPE_UINT32_SUSPECT = 1e7
+
 -- VL+YYYYMMDD+NNN = 2+8+3 = 13, 上限 32 留扩展段(prefix 改长 / 加日期戳变体)
 -- 改 SN_PREFIX 时同步改 SN_MIN_LEN (前缀 2 + 日期 8 + 流水 3)
 M.SN_PREFIX = "VL"

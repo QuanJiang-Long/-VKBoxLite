@@ -8,9 +8,9 @@
 --   sniff 循环接入 guard.alive() 心跳; idle/stop 不算 (无采集在跑,
 --   心跳停是正常状态, 不能当 stall)。
 --
--- 跑法(仓库根目录):  lua tests/lua/test_guard_modes.lua
+-- 跑法(仓库根目录):  lua tests/lua/test_guard_modes.lua (本机 5.1 即可, 不依赖 mbus)
 
-package.path = 'lua/?.lua;' .. package.path
+if package and package.path then package.path = 'lua/?.lua;' .. package.path end
 local guard = dofile('lua/svc/guard.lua')
 
 local fails = 0
