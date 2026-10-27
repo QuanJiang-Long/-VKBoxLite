@@ -167,7 +167,11 @@ function M.switch_mode(mode, from_boot)
         return false, "FAIL sniff start"
 
     elseif mode == "idle" or mode == "stop" then
-        if poll.is_running() then poll.stop() end
+        -- ⚠️ 12-fix (2026-10-27): poll.stop() 不带 is_running() 守卫了 ——
+        --   它现在无条件解绑 UART 回调 + 关串口。原来带守卫, 只跑过 mon
+        --   没跑过 poll 时这个清理根本不执行, 切 idle 后 UART 还开着,
+        --   总线上的字节照样被读走。
+        poll.stop()
         stop_sniff()
         local cleared = M.reset_user_cfg()
         S.cur = "idle"  -- 34-fix: 记下当前 mode

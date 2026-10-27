@@ -38,8 +38,18 @@ eq(guard.is_active_mode(nil), false, 'nil 不算活动')
 local ok, st = pcall(guard.status)
 eq(ok, true, 'guard.status() 无环境依赖可调')
 
+-- 12-fix (2026-10-27): stall 判据除了"档位"还要看"采集引擎是否在跑"。
+-- 起因: manual 档但寄存器表是空的 → poll 没起 → 没人喂心跳 → stall 一路
+-- 涨到 120 → AUTO_REBOOT 自动重启 (现场踩过, 设备看着好好的却自己重启)。
+-- 判据: 引擎没起 = 没有采集任务, 心跳停是正常状态, 不判 stall;
+--       引擎起了但卡死 = is_running() 仍为 true, stall 照常累积, 看门狗不退化。
+eq(guard.stall_of('idle'), nil, 'idle 档不判 stall')
+eq(guard.stall_of('manual'), nil, 'manual 档但采集引擎没起 → 不判 stall')
+eq(guard.stall_of('platform'), nil, 'platform 档但采集引擎没起 → 不判 stall')
+eq(guard.stall_of('sniff'), nil, 'sniff 档但旁听没起 → 不判 stall')
+
 if fails > 0 then
   print(string.format('FAIL: %d 个断言不过', fails))
   os.exit(1)
 end
-print('PASS: guard.is_active_mode —— stall 判定覆盖 manual/poll/platform/sniff, idle/stop 不误判 (9 个断言通过)')
+print('PASS: guard.is_active_mode —— stall 判定覆盖 manual/poll/platform/sniff, idle/stop 不误判; 引擎没起时不判 stall (13 个断言通过)')

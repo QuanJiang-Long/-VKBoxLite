@@ -346,6 +346,70 @@ MQTT 按"首页写入的算连接参数、MQTT 页写入的算手动档凭证"�
 拆键值对，写成 `cleared=...` 前端只会拿到一整条字符串、取不出清了什么。前端据此
 播报"已清空配置：xxx"，并重读 `R:CFG` / `R:MQTT` 让表单回落。
 
+## 切档必须释放 485 总线（12-fix, 2026-10-27）
+
+`W:MODE=idle` 的语义是"设备退场，释放总线"。**但原来只有 `mon.stop()` 做了这件事，
+`poll.stop()` 没做** —— 两个 stop 不对称：
+
+| | 解绑 UART 接收回调 | 关串口 |
+|---|---|---|
+| `mon.stop()`（`bus/mon.lua`） | ✅ `uart.on(id,"receive",nil)` | ✅ `uart.close` |
+| `poll.stop()`（`bus/poll.lua`） | ❌ 只置 `running=false` | ❌ |
+
+回调是在 `poll.start()`（`poll.lua` 的 `uart.on`）绑的。**poll 停过 → 回调永久残留**，
+于是 idle/manual 档下总线上每个字节都被 poll 模块读走并打 warn：
+
+```
+W/user.poll on_receive id=1 got 8 bytes but respFlag=false (raw=[01 03 00 61 00 01 d5 d4])
+```
+
+现场日志（2026-10-27）：`W:MODE=idle` **明确成功**（`RET:MODE=OK;cleared:manual 配置+mqtt_manual`，
+`R:MODE`/`R:STAT` 都报 `idle`），之后 `poll.on_receive` 仍以 ~500ms 周期持续输出。
+那些字节是**外部主站（PLC/上位机）在轮询仪表**，不是本设备发的 ——
+8 字节是请求帧（slave/fc/addrHi/addrLo/qtyHi/qtyLo/crc×2），
+7 字节是响应帧（slave/fc/byteCnt/data/crc×2）。
+
+修法：
+
+- `poll.stop()` **无条件**解绑 + 关串口。不再只在 `running` 时做：只跑过 mon 没跑过
+  poll 时，`is_running()` 守卫会让这个清理根本不执行，UART 留在开着状态。
+- `poll.probe_raw()`（`W:RAWTEST`）在不在轮询态时，测完要**解绑并关串口** ——
+  原来不 `running` 就什么都不做，`raw_on_receive` 会永久留在 UART 上，同一类泄漏。
+- `ctrl` 的 idle 分支去掉 `is_running()` 守卫，无条件 `poll.stop()`。
+- **不影响任何启动路径**：`poll.start()` 会 `ensure_uart()` + 重新绑定，`mon.start()`
+  自己也 setup + 绑定；`ensure_uart` 的"第 2 次 setup"本来就 `close+wait500`，
+  关不关串口都一样，不会多出等待。
+
+> ⚠️ `poll.stop()` 现在会关串口。从 manual 切 sniff 时，`mon.start()` 拿到的是一个
+> **已关闭**的 UART —— 这比原来（open 状态下 `uart.setup` 走快路径、只改分频不复位
+> RX/DE）更干净，正是 `poll.lua` 注释里"合宙 FAQ #32：重新 uart.setup 会重置 RX 缓冲
+> 和驱动上下文"想要的效果。
+
+### 顺带修的坑：manual 档 + 空寄存器表 → 设备自己重启
+
+`guard` 的 stall 判据原来只看**档位**：manual/poll/platform/sniff 都算"有采集在跑"，
+`stall = ticks - last_alive` 一直涨，超过 `STALL_LIMIT_S`(120) 就 `rtos.reboot()`
+（`AUTO_REBOOT=true`）。
+
+但 34-fix 定了"**档位对应的槽空着就不起轮询**"，其好处之一明确写着"看门狗不再被
+'poll 起来了但 regs=0' 误判为停滞" —— **但 guard 的判据一直没跟上，34-fix 的这个
+意图其实没落地。**
+
+后果（现场踩过）：切 idle 时 `cleared:manual 配置` 擦掉了 `ds_poll`，切回 manual 又
+没重配 → `regs=0` → poll 没起 → 没人调 `guard.alive()` → stall 无限累积 →
+**设备看起来好好的，过两分钟自己重启**。
+
+修法：`guard` 的 stall 判据加上"**采集引擎是否真的在跑**"
+（`bus/poll` / `bus/mon` 的 `is_running()`）：
+
+- 引擎**没起** = 没有采集任务在跑，心跳停是正常状态 → **不判 stall**
+- 引擎**起了但卡死** = `is_running()` 仍是 true → stall 照常累积 → 120s 后照样
+  自愈重启 —— **看门狗没有退化**
+
+`is_active_mode()` 的语义没动（单测锁着它），新判据是独立的 `stall_of()`。
+sniff 识别期不受影响：`mon.start()` 先于 `mon.request_detect()` 调用，
+`is_running()` 一直是 true，且 `sniff_wait()` 每 20ms 喂一次 `guard.alive()`。
+
 ## sniff 通讯参数自动识别（`R:AUTODETECT`）
 
 上面的缺口靠识别来补：sniff 侧不可配，那就现场试出来。
@@ -556,6 +620,17 @@ RET:FAIL:AUTODETECT:not in sniff mode
 > `collectgarbage("count")` 读真 Lua 堆用量。**别换成
 > `collectgarbage("collect")`** —— 那是真回收，有毫秒级暂停，放热路径上有让
 > UART 环形缓冲溢出的风险。
+>
+> 12-fix 起这两行加了门槛 `MEM_LOG_KB = 210`：**常态静默，超标才报**。
+> 实测水位（sniff 档，2026-10-27）：稳态 infer 起点 ~198KB / 轮内峰值 ~204KB，
+> 刚识别完那一下的瞬时峰值 ~222KB —— 改之前每轮 build 两次，峰值会再高 ~6KB
+> 撞到 231KB 上下（那边就是崩溃线）。**看不到这两行 = 水位在门槛以下。**
+
+- **`mon.infer()` 加了 2 秒 TTL 缓存**（12-fix）：`infer()` 每次都要遍历 frames +
+  重建整张 `agg` 表 + `regs` 数组 + `table.sort`，全是临时分配；插桩实测单次
+  infer 净增 **~3.1KB** Lua 堆垃圾，是 sniff 上报路径上最大的一笔。而
+  `build_nodes()` 每秒调它一次。推断结果几秒内不会变，加缓存后调用频率减半、
+  垃圾减半。`R:INFER` 走 `mon.infer(true)` 强制取当前值（前端推断表要新鲜）。
 
 **OOM 兜底**（`iot.lua` 建连失败且报 memory 时）：`collector.trim_cache()` +
 `mon.trim_reqs()` + 强制 GC + 固定等 30s。`mon.trim_reqs()` 不能省——`lastReqs` 是

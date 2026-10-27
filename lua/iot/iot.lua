@@ -371,6 +371,12 @@ local function lua_kb()
     return collectgarbage("count")
 end
 
+-- 插桩的打印门槛 (KB)。实测 (sniff 档, 2026-10-27):
+--   稳态 infer 起点 ~198KB / 轮内峰值 ~204KB, 刚识别完那一下瞬时 ~222KB。
+--   取 210 —— 常态静默, 超标才报。既不每秒刷 2 行 log, 又能在满负荷
+--   验证或异常膨胀时一眼看出水位。
+local MEM_LOG_KB = 210
+
 -- 内部 parity 0/1/2 -> 平台单字母。PULL_PARITY(core/config.lua)是正方向
 -- "none/even/odd"->0/1/2, 这里是它的逆; 单独写死而不是反查 PULL_PARITY,
 -- 免得为一次反查把整表遍历一遍
@@ -483,8 +489,12 @@ local function build_nodes()
             put(r.slave, { addr = r.addr, count = r.count, fc = r.fc, dtype = dt, pid = pid, pname = pname })
         end
         -- ⚠️ 临时插桩 (11-fix): mon.infer() 是这条路径上最大的一次分配
-        --   (整张推断表重建 + 排序), 这行定出它的水位
-        log.info("iot", string.format("mem bn infer %.1f->%.1fKB", m0, lua_kb()))
+        --   (整张推断表重建 + 排序), 这行定出它的水位。12-fix 起加了门槛,
+        --   常态不刷屏, 超 MEM_LOG_KB 才报。
+        local m1 = lua_kb()
+        if m0 >= MEM_LOG_KB or m1 >= MEM_LOG_KB then
+            log.info("iot", string.format("mem bn infer %.1f->%.1fKB", m0, m1))
+        end
         local pc = cfgstore.load_pull()
         for _, r in ipairs((pc and pc.regs) or {}) do
             put(pc.slave, r)
@@ -505,8 +515,11 @@ local function build_nodes()
         end
         -- ⚠️ 临时插桩 (11-fix): 崩溃点就在下面 build_nodes 末尾的
         --   table.concat(nodes, ",") 和 node_json 里的 table.concat(props),
-        --   这行日志定出崩溃前的最后一个水位
-        log.info("iot", string.format("mem bn nodes %.1fKB slaves=%d", lua_kb(), #nodes))
+        --   这行日志定出崩溃前的最后一个水位。12-fix 起加了门槛。
+        local m2 = lua_kb()
+        if m2 >= MEM_LOG_KB then
+            log.info("iot", string.format("mem bn nodes %.1fKB slaves=%d", m2, #nodes))
+        end
         err = "还没识别到在线的从机"
     else
         -- 一份轮询配置只有一个 slave(cfg.normalize_poll), 所以轮询档恒一个节点

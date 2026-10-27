@@ -345,7 +345,18 @@ local function raw_tx(frame, timeout_ms, extra)
     local cap = rawCap or ""
     rawCap = nil
     -- 轮询在跑就把接收回调还回去, 否则轮询从此收不到响应(表现为全 timeout)
-    if running then pcall(uart.on, mbus.UART_ID, "receive", on_receive) end
+    -- ⚠️ 12-fix (2026-10-27): 不 running 时【必须解绑】。原来不 running 就
+    --   什么都不做 —— raw_on_receive 会永久留在 UART 上, 变成第二个常驻
+    --   回调, 跟 poll.stop() 那个 bug 同一类。W:RAWTEST 在 idle 档就能触发。
+    if running then
+        pcall(uart.on, mbus.UART_ID, "receive", on_receive)
+    else
+        pcall(uart.on, mbus.UART_ID, "receive", nil)
+        -- 12-fix: 不在轮询态就顺手把串口也关了 —— raw_tx 开头为了发帧
+        --   调过 ensure_uart() 把串口打开了, 测完不关等于 idle 档还占着
+        --   485 口。下次 poll.start()/mon.start() 自己会 setup。
+        pcall(uart.close, mbus.UART_ID)
+    end
     local out = {
         tx_ok = txok,
         tx_err = txok and "" or tostring(txerr),
@@ -465,7 +476,7 @@ function M.start(src)
 end
 
 function M.stop()
-    if not running then return true end
+    local was_running = running
     running = false
     gen = gen + 1
     -- 36-fix: 清空 regs/lastCfg/interval. 切 idle 时 ctrl.reset_user 已经擦掉
@@ -474,7 +485,23 @@ function M.stop()
     --   实际是空的). 让 stop 顺手清, 下次 start() 会从 fskv 重新 load
     regs, interval, lastCfg = {}, cfg.POLL_INTERVAL_MS, nil
     -- 16-fix-1: 删除 de_low(), 依赖内核 485 自动控制 DE
-    log.info("poll", "stopped")
+    --
+    -- ⚠️ 12-fix (2026-10-27): 必须解绑 UART 接收回调并关串口, 与 mon.stop()
+    --   对齐 (mon.lua 的 M.stop 里有 uart.on(...,nil) + uart.close)。
+    --   原来这里只置 running=false, 回调一直挂在 UART 上 —— 切 idle 之后,
+    --   总线上外部主站(PLC/上位机)的每个字节都被本模块读走并打 warn,
+    --   日志以 ~500ms 周期刷屏, 还白白吃 CPU/内存。
+    --   现场日志: W:MODE=idle 明确成功 (RET:MODE=OK, R:MODE/R:STAT 都报 idle)
+    --   之后, poll.on_receive 仍持续输出 —— 根因就是这里不解绑。
+    --   无条件做 (不再只在 running 时做): 只跑过 mon 没跑过 poll 时,
+    --   is_running() 守卫会让这个清理根本不执行, UART 留在开着状态。
+    --   不影响任何启动路径: poll.start() 会 ensure_uart() + 重新绑定,
+    --   mon.start() 自己也 setup + 绑定。ensure_uart 的"第 2 次 setup"本来
+    --   就 close+wait500, 关不关串口都一样, 不会多出等待。
+    pcall(uart.on, mbus.UART_ID, "receive", nil)
+    pcall(uart.close, mbus.UART_ID)
+    if was_running then log.info("poll", "stopped") end
+    return true
     return true
 end
 

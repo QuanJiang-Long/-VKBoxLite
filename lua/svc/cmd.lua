@@ -328,7 +328,9 @@ local function reg_cmds()
     -- R:INFER: 从旁听帧反推轮询表 (attach_names 给每行补 name 字段, 与
     --   U4 上报的 name 同一套映射, 前端推断表"参数名称"列直接显示)
     M.reg("R:INFER", function()
-        M.reply("RET:INFER=" .. jencode(iot.attach_names(mon.infer())))
+        -- 12-fix: force=true 跳过 infer 的 2 秒 TTL 缓存 —— 前端推断表要
+        --   当前值, 缓存里的可能是两秒前的
+        M.reply("RET:INFER=" .. jencode(iot.attach_names(mon.infer(true))))
     end)
 
     -- R:AUTODETECT: 非阻塞, 由前端轮询; arg 精确等于 "restart" 时强制作废

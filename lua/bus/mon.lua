@@ -396,7 +396,20 @@ end
 
 -- 静默侦听总线 ms 毫秒, 返回期间解译出的帧数(R:SNIFF 用)
 -- 从旁听 REQ 反推轮询表(R:INFER), 按 slave+addr+qty+fc 聚合命中次数
-function M.infer()
+-- 推断结果的短 TTL 缓存 (12-fix, 2026-10-27):
+--   infer() 每次都要遍历 frames + 重建整张 agg 表 + regs 数组 + table.sort,
+--   全是临时分配。而 sniff 档 build_nodes 每秒调它一次 —— 插桩实测单次
+--   infer 净增 ~3.1KB Lua 堆垃圾, 是 sniff 上报路径上最大的一笔分配。
+--   推断结果几秒内不会变, 加 2 秒缓存 → 调用频率减半、垃圾减半。
+--   force=true 时跳过缓存 (R:INFER 要拿当前值)。
+local infer_cache = nil
+local infer_cache_at = 0
+local INFER_CACHE_S = 2
+
+function M.infer(force)
+    if not force and infer_cache and (os.clock() - infer_cache_at) < INFER_CACHE_S then
+        return infer_cache
+    end
     local fs = collector.get_frames()
     -- 健康度: 见到 RSP 的从机才算在线。主机轮询一个没接线的从机时只见请求不见
     -- 应答(实测 slave=11 三项 req、零 rsp), 那种 req 列进轮询表只会误导 ——
@@ -481,13 +494,16 @@ function M.infer()
     local sl = {}
     for s in pairs(slaves) do sl[#sl + 1] = s end
     table.sort(sl)
-    return {
+    local result = {
         regs = regs,
         slaves = sl,
         -- 健康度过滤掉的请求条数, 前端据此提示"轮询没人应答"的地址
         ignored = ignored,
         stat = stat,
     }
+    infer_cache = result
+    infer_cache_at = os.clock()
+    return result
 end
 
 function M.start(c)
@@ -498,6 +514,7 @@ function M.start(c)
     clear_history()
     -- 2026-10: 进 sniff 先清上一轮的值/帧/旧识别结果(旧参数下的东西不能混进这一轮)
     collector.clear_all()
+    infer_cache = nil   -- 12-fix: 缓存是上一轮帧推断出来的, 新一轮必须重算
     _G.mon_detect_result = nil
     -- sniff-2 fix: 重新进 sniff 时清 forceStop, 否则上次的 stop 标志会让
     --   auto_detect 立刻 return "stopped" (detect_loop 也会跟着退)
@@ -675,6 +692,7 @@ function M.stop()
     pcall(uart.close, mbus.UART_ID)
     rxbuf = ""
     pendingReqs, lastReqs = {}, {}
+    infer_cache = nil   -- 12-fix: 帧都清了, 缓存的推断结果必须一起作废
     -- 2026-10: 退出 sniff 也清干净(值/帧/识别结果; 识别参数是会话级的,
     -- 不清的话下次进 sniff 前端会把上次的旧参数当成"已识别"显示)
     collector.clear_all()

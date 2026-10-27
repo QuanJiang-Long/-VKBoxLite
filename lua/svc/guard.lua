@@ -48,12 +48,44 @@ end
 -- 导出: 单元测试用 (tests/lua/test_guard_modes.lua)
 M.is_active_mode = is_active_mode
 
+-- 采集引擎是否真的在跑 (12-fix, 2026-10-27)。
+--
+-- 只看"档位"判 stall 是不够的: 34-fix 定了"档位对应的槽空着就不起轮询",
+-- 好处之一明确写着"看门狗不再被 'poll 起来了但 regs=0' 误判为停滞" ——
+-- 但 guard 的判据一直只看 mode, 34-fix 的这个意图其实没落地。
+--
+-- 后果 (现场踩过): manual 档但寄存器表是空的 (切 idle 时 "cleared:manual
+-- 配置" 擦掉了 ds_poll, 切回 manual 又没重配) → poll 没起 → 没人调
+-- guard.alive() → stall 一路涨到 STALL_LIMIT_S(120) → AUTO_REBOOT 自动
+-- 重启。设备看起来好好的, 过两分钟自己重启。
+--
+-- 这里加的判据【不削弱看门狗】:
+--   poll/mon 没起 (is_running()==false) = 没有采集任务在跑, 心跳停是正常
+--                                    状态, 不该算 stall
+--   poll/mon 起了但卡死              = is_running() 仍是 true → stall 照常
+--                                    累积 → 120s 后照样自愈重启
+local function collector_running(mode)
+    local mod = (mode == "sniff") and "bus/mon" or "bus/poll"
+    local ok, m = pcall(require, mod)
+    if not ok or not m or type(m.is_running) ~= "function" then return false end
+    return m.is_running() and true or false
+end
+
+-- 本档位当前的 stall 秒数; nil = 不该判 stall(没采集在跑)
+local function stall_of(mode)
+    if not is_active_mode(mode) then return nil end
+    if not collector_running(mode) then return nil end
+    return ticks - last_alive
+end
+-- 导出: 单元测试用 (tests/lua/test_guard_modes.lua)
+M.stall_of = stall_of
+
 local function monitor()
     local mode = cur_mode()
     -- "manual" 才是当前 mode 名; "poll" 是历史别名, 老 fskv 软切会同时返回 "poll",
     -- 也算 manual 行为 (MQTT 手动档 + 寄存器手配)
     local is_manual = mode == "manual" or mode == "poll"
-    local stall = is_active_mode(mode) and (ticks - last_alive) or nil
+    local stall = stall_of(mode)
     local parts = {
         string.format("uptime=%ds mode=%s feed=%d", ticks, mode, math.floor(cfg.WDT_FEED_MS / 1000)),
     }
@@ -84,7 +116,7 @@ function M.status()
     return {
         uptime = ticks,
         feed = cfg.WDT_FEED_MS,
-        stall = is_active_mode(cur_mode()) and (ticks - last_alive) or nil,
+        stall = stall_of(cur_mode()),
         wdt_to = cfg.WDT_TIMEOUT,
     }
 end
