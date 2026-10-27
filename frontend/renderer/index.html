@@ -5,9 +5,12 @@
 <title>VKBox 网关配置工具</title>
 <style>
 *{box-sizing:border-box;font-family:Microsoft Yahei, sans-serif;font-size:14px;margin:0;padding:0;}
-body{background:#eceff4;color:#333;padding:8px;}
+html,body{height:100%;}
+body{background:#eceff4;color:#333;padding:8px;overflow:hidden;}
 /* 200px 放不下 ICCID(20位)/IMEI(15位)/服务器url，值被裁掉看不见 */
-.wrap{display:grid;grid-template-columns:280px 1fr;gap:8px;}
+/* 三行布局: 顶栏 auto / 内容区撑满剩余 (1fr) / 状态栏钉死窗口最底 (auto)。
+   2026-10 用户指定: 底部状态栏必须始终贴窗口下沿, 内容区各自内滚 */
+.wrap{display:grid;grid-template-columns:280px 1fr;grid-template-rows:auto minmax(0,1fr) auto;gap:8px;height:100%;}
 /* 顶部栏 */
 .top-bar{grid-column:1/-1;background:#b0bcca;padding:8px;display:flex;align-items:center;gap:8px;margin-bottom:8px;border-radius:4px;}
 .top-bar select,.top-bar button{padding:4px 8px;height:30px;}
@@ -31,8 +34,8 @@ button.sm{padding:2px 8px;height:26px;font-size:12px;}
 .left-panel .btn-full{width:100%;margin-bottom:10px;}
 /* 值比输入框长时用省略号收尾，配合 title 悬浮看全量，避免看起来像"没显示完" */
 .left-panel input{text-overflow:ellipsis;}
-/* 主内容区域 */
-.main{background:#fff;border-radius:4px;overflow:hidden;display:flex;flex-direction:column;}
+/* 主内容区域 (min-height:0 允许网格内滚, 溢出内容自己滚, 不把状态栏顶下去) */
+.main{background:#fff;border-radius:4px;overflow-y:auto;display:flex;flex-direction:column;min-height:0;}
 /* 标签页头部 */
 .tab-header{display:flex;border-bottom:1px solid #ccc;background:#f4f6f9;flex-wrap:wrap;}
 .tab-header .tab-item{padding:8px 12px;cursor:pointer;border-right:1px solid #ddd;font-size:13px;white-space:nowrap;}
@@ -206,8 +209,8 @@ body.mq-manual .auto-only{display:none !important;}
 /* 取消/确定 靠右；justify-content:flex-end 把两个按钮推到行尾 */
 .modal-footer{margin-top:24px;display:flex;gap:12px;justify-content:flex-end;}
 .modal-footer button:nth-child(2){background:#409eff;color:#fff;border:none;}
-/* 状态栏 */
-.status-bar{grid-column:1/-1;background:#fff;border-top:1px solid #ddd;padding:6px 10px;font-size:12px;color:#666;display:flex;gap:18px;border-radius:4px;flex-wrap:wrap;}
+/* 状态栏 (grid-row:3 = .wrap 第三行, 钉在窗口最底) */
+.status-bar{grid-column:1/-1;grid-row:3;background:#fff;border-top:1px solid #ddd;padding:6px 10px;font-size:12px;color:#666;display:flex;gap:18px;border-radius:4px;flex-wrap:wrap;}
 .status-bar .ok{color:#0a7d2c;}
 .status-bar .err{color:#c0392b;}
 /* 提示 toast。pointer-events:none 是关键：toast 是 position:fixed + z-index:1999，
