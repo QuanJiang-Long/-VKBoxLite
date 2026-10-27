@@ -502,7 +502,6 @@ function M.stop()
     pcall(uart.close, mbus.UART_ID)
     if was_running then log.info("poll", "stopped") end
     return true
-    return true
 end
 
 function M.is_running() return running end
