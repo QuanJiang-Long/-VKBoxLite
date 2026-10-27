@@ -502,7 +502,7 @@ RET:FAIL:AUTODETECT:not in sniff mode
 | `lastReqs` 最近请求索引 | `bus/mon.lua` | `MAX_LAST_REQ`(64) | **整表作废** |
 | 推断展开的 qty | `util.lua` `clamp_qty` | `MAX_INFER_QTY`(256) | 截到上限 |
 | 推断表行数 | `bus/mon.lua` `M.infer` | `MAX_INFER_ROWS`(512) | 不再新增行 |
-| 拓扑 properties 条数 | `iot.lua` `node_json` | 128 | 不再拼进 JSON |
+| 拓扑 properties 条数 | `iot.lua` `node_json` | 64（2026-10-27 从 128 降） | 不再拼进 JSON |
 
 三个容易漏的点：
 
@@ -527,6 +527,35 @@ RET:FAIL:AUTODETECT:not in sniff mode
   现在三层封顶：`util.clamp_qty`(256) → `MAX_INFER_ROWS`(512) → `node_json` props
   ≤128。被截断的次数记在 `mon.stat.infer_clamped`，`R:STAT` 的 `mon` 段能看到
   ——**这个数不为 0 就说明总线上有异常 qty 的帧**，值得查现场设备。
+
+**sniff 拓扑上报的分配预算（11-fix, 2026-10-27）**：现场抓到 sniff 识别成功后
+偶发 `not enough memory for buffer allocation` → `Lua VM exit!! reboot`，崩在
+`build_nodes` → `node_json` 的 `table.concat` 上。排查结论：
+
+- **不是**历史上那个"异常 qty 展开"（那次 `mon.stat.infer_clamped` 会 ≠ 0，
+  现场两次都是 0，`clamp_qty`/`MAX_INFER_ROWS`/`MAX_PROPS` 三层封顶是生效的）；
+- **也不是**"堆不够用"——`rtos.meminfo("sys")`（`iot.lua` 的 `heap_info()`）
+  读的是**系统内存**不是 Lua 堆，现场显示 38% 就 fatal。真 Lua 堆用量要用
+  `collectgarbage("count")` 读；
+- 真因是**每轮两次 `build_nodes()`**：`topo_sig()` 算指纹 build 一次，
+  `send_topo()` 发送时又 build 一次。每次都是 `mon.infer()` 重建整张推断表
+  → `node_json` → 两层 `table.concat`，白扔一半分配预算。
+
+修法：`topo_sig()` 把 nodes 串一并带出，`send_topo()` 复用，**每轮只 build 一次**；
+顺带 `node_json` 的 props 上限 128→64、`topology posted` 日志不再拼整串 sig
+（1.2KB 又一份拷贝）。
+
+> ⚠️ `should_pub_topo()` 只对 sniff 返回 true，`build_nodes`/`node_json` 只有它
+> 会调到 —— **这套改动只影响 sniff 档，platform/manual 的采集与上报完全不受影响。**
+>
+> ⚠️ `pcall` 拦不住这个 —— LuatOS 分配器级的 OOM 是 **fatal**，`pcall` 只能拦
+> 普通 Lua error。真正兜底只能靠"少分配"，别指望加 pcall 就行。
+
+> ⚠️ **临时插桩（定位用，定位完可摘）**：`build_nodes()` 里两行
+> `mem bn infer %.1f->%.1fKB` / `mem bn nodes %.1fKB`，用
+> `collectgarbage("count")` 读真 Lua 堆用量。**别换成
+> `collectgarbage("collect")`** —— 那是真回收，有毫秒级暂停，放热路径上有让
+> UART 环形缓冲溢出的风险。
 
 **OOM 兜底**（`iot.lua` 建连失败且报 memory 时）：`collector.trim_cache()` +
 `mon.trim_reqs()` + 强制 GC + 固定等 30s。`mon.trim_reqs()` 不能省——`lastReqs` 是
@@ -662,6 +691,14 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 
 失败时的三种日志：`Rx timeout addr=14 CT rx=00ea39cb`（收到字节但组不成帧）、
 `Rx timeout ... rx=-`（一个字节都没收到）、`Rx err fc=83 code=2 ...`（从机返异常码）。
+
+> ⚠️ `poll.lua` 的 `hexspaced()` **必须定义在 `on_receive()` 之前**（11-fix,
+> 2026-10-27）。`on_receive` 的 `respFlag=false` 分支要用它，而 `local function`
+> 是词法作用域，定义在后面的 local 对前面的代码**不可见** —— 那条分支里的
+> `hexspaced` 会解析成全局 nil，一旦走到就是
+> `attempt to call a nil value`，把 7-fix/8-fix 最关键的那条诊断日志
+> （收到的原始字节）连同整个 `on_receive` 回调一起掀掉。
+> `check_lua.py` 的前向引用规则能抓到这个问题，别把定义挪回去。
 
 ## 平台配置拉取（W:PULLCFG）
 

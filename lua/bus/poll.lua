@@ -81,6 +81,22 @@ local function ensure_uart()
     return true
 end
 
+-- 同 hexs, 但字节间加空格便于肉眼看.
+-- 加 n= 是排查用: 单看 raw 分不清 "0200017984" 是 5 字节还是
+-- 10 个 hex 字符模糊拼起来. 排查 Rx timeout 时 n 是关键信息
+-- (用 sscom 抓包对照, n 决定到底缺了几字节)
+--
+-- ⚠️ 必须定义在 on_receive 之前 (11-fix, 2026-10-27):
+--   on_receive 的 respFlag=false 分支要用它, 而 local function 是词法作用域,
+--   定义在后面的 local 对前面的代码【不可见】—— 那条分支里的 hexspaced 会
+--   解析成全局 nil, 一旦走到就是 "attempt to call a nil value", 把 7/8-fix
+--   最关键的那条诊断日志(收到的原始字节)连同整个 on_receive 回调一起掀掉。
+--   check_lua.py 的前向引用规则能抓到这个问题, 别把定义挪回去。
+local function hexspaced(s)
+    if not s or #s == 0 then return "-" end
+    return (s:gsub(".", function(c) return string.format("%02x ", c:byte()) end)):gsub(" $", "")
+end
+
 local function on_receive(id, len)
     if id ~= mbus.UART_ID then return end
     if type(len) ~= "number" or len <= 0 then return end
@@ -154,15 +170,6 @@ end
 
 local function hexs(s)
     return #s > 0 and (s:gsub(".", function(c) return string.format("%02x", c:byte()) end)) or "-"
-end
-
--- 同 hexs, 但字节间加空格便于肉眼看.
--- 加 n= 是排查用: 单看 raw 分不清 "0200017984" 是 5 字节还是
--- 10 个 hex 字符模糊拼起来. 排查 Rx timeout 时 n 是关键信息
--- (用 sscom 抓包对照, n 决定到底缺了几字节)
-local function hexspaced(s)
-    if not s or #s == 0 then return "-" end
-    return (s:gsub(".", function(c) return string.format("%02x ", c:byte()) end)):gsub(" $", "")
 end
 
 local function poll_reg(reg)

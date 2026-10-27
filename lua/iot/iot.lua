@@ -357,6 +357,20 @@ local function heap_info()
     return a, b
 end
 
+-- Lua 堆真实用量 (KB)。rtos.meminfo("sys") 读的是【系统内存】不是 Lua 堆,
+-- 拿它判断"还剩多少空间"是不准的 —— LuatOS 的 Lua 堆是固定内存池 + 独立
+-- big block, 大字符串要的是【连续大块】, 总量够也未必拿得到(碎片化)。
+-- collectgarbage("count") 只读不触发回收, 放在上报路径上不影响实时性。
+--
+-- ⚠️ 绝对不要在这里用 collectgarbage("collect"): 那是真回收, 有毫秒级暂停,
+--   放在热路径上有让 UART 环形缓冲溢出的风险。本文件里 collect("collect")
+--   只出现在 destroy_client() 和 OOM 兜底两处, 都不在 UART 路径上。
+--
+-- ⚠️ 临时诊断插桩 (11-fix, 2026-10-27), 定位完可以摘掉。
+local function lua_kb()
+    return collectgarbage("count")
+end
+
 -- 内部 parity 0/1/2 -> 平台单字母。PULL_PARITY(core/config.lua)是正方向
 -- "none/even/odd"->0/1/2, 这里是它的逆; 单独写死而不是反查 PULL_PARITY,
 -- 免得为一次反查把整表遍历一遍
@@ -383,9 +397,16 @@ local function node_json(idx, slave, c, regs)
     -- ⚠️ props 条数封顶 (纵深防御, 2026-10): 推断表万一被撑大(异常 qty
     --   的请求帧), 这里 table.concat 出来的 JSON 会是几 MB, 一个分配就把
     --   Lua 堆(203K)顶爆 → "not enough memory for buffer allocation"
-    --   → VM 退出 → 设备重启(现场表现: 跑着跑着莫名重启)。上限按平台
-    --   物模型能接受的规模取 128 条
-    local MAX_PROPS = 128
+    --   → VM 退出 → 设备重启(现场表现: 跑着跑着莫名重启)。
+    --
+    -- 11-fix (2026-10-27) 从 128 降到 64: 快照实测 sniff 档只有 8~9 个点,
+    --   128 条时单次 table.concat 要 ~19KB 连续内存, 在 203K 堆上是灾难级
+    --   分配; 64 条约 ~10KB。
+    --   ⚠️ 只影响 sniff 档: node_json 只有 build_nodes 会调, 而 build_nodes
+    --   只在 should_pub_topo() 为真时被调到, 而那个闸门只对 sniff 返回 true
+    --   (iot.lua 的 should_pub_topo)。platform 档的物模型是平台自己下发的,
+    --   设备不通过 U2 拓扑上报它, 所以这里砍条数砍不到 platform 头上。
+    local MAX_PROPS = 64
     for _, r in ipairs(regs) do
         if #props >= MAX_PROPS then break end
         local dt = r.dtype or "uint16"
@@ -429,6 +450,7 @@ local function build_nodes()
     local mode = get_mode()
     local nodes, err = {}, nil
     if mode == "sniff" then
+        local m0 = lua_kb()   -- ⚠️ 临时插桩 (11-fix), 定位完可摘
         local at, by = {}, {}
         -- sniff 别名表 (2026-10): 用户起的名字直接作为平台物模型的 id/name
         local smap = cfgstore.alias_map()
@@ -460,6 +482,9 @@ local function build_nodes()
             end
             put(r.slave, { addr = r.addr, count = r.count, fc = r.fc, dtype = dt, pid = pid, pname = pname })
         end
+        -- ⚠️ 临时插桩 (11-fix): mon.infer() 是这条路径上最大的一次分配
+        --   (整张推断表重建 + 排序), 这行定出它的水位
+        log.info("iot", string.format("mem bn infer %.1f->%.1fKB", m0, lua_kb()))
         local pc = cfgstore.load_pull()
         for _, r in ipairs((pc and pc.regs) or {}) do
             put(pc.slave, r)
@@ -478,6 +503,10 @@ local function build_nodes()
         for i, s in ipairs(sl) do
             nodes[#nodes + 1] = node_json(i, s, ser, by[s])
         end
+        -- ⚠️ 临时插桩 (11-fix): 崩溃点就在下面 build_nodes 末尾的
+        --   table.concat(nodes, ",") 和 node_json 里的 table.concat(props),
+        --   这行日志定出崩溃前的最后一个水位
+        log.info("iot", string.format("mem bn nodes %.1fKB slaves=%d", lua_kb(), #nodes))
         err = "还没识别到在线的从机"
     else
         -- 一份轮询配置只有一个 slave(cfg.normalize_poll), 所以轮询档恒一个节点
@@ -493,12 +522,19 @@ end
 
 -- 拓扑签名: 拿 build_nodes 的产物本身做指纹。不另造一套字段遍历是因为
 -- node_json 已经把从机/寄存器/串口参数全拼进去了, 那串字符串变了就是拓扑
--- 真变了。重新 build 一次的代价是一次字符串拼接, 每秒一次可以忽略 —— 比
--- 自己去遍历两套来源(poll 的 regs 表 / mon.infer 的 regs 表)要短得多
+-- 真变了。
+--
+-- ⚠️ 11-fix (2026-10-27): 同时把 nodes 串带出去, 给 send_topo 复用。
+--   原来 task_main 每轮要 build 两次(拓扑指纹一次 + 发送一次), 每次都是
+--   mon.infer() 重建整张推断表 + node_json + 两层 table.concat, 白扔一半
+--   分配预算 —— sniff 档偶发 "not enough memory for buffer allocation"
+--   → Lua VM exit → 设备重启, 崩点就在这些大字符串拼接上。
+--   复用还有一个附带好处: 签名与实际发布内容【严格一致】, 不会再出现
+--   "发了新内容却存了旧签名" 导致下一轮又重发一遍。
 local function topo_sig()
     local nodes = build_nodes()
     if not nodes then return nil end
-    return tostring(#nodes) .. ":" .. nodes
+    return tostring(#nodes) .. ":" .. nodes, nodes
 end
 
 -- U2 是【双重用途】, 靠 body 里有没有 nodes[] 区分语义(用户确认):
@@ -572,14 +608,20 @@ end
 -- 带 nodes[] 的那帧: 子设备拓补建档。
 -- V3 平台要求顶层 vendor/model/fwVersion/ts(ms), 走'建子设备'路径
 -- 自述字段(imei/iccid/位置等)归 send_meta, 不重复
-local function send_topo()
+-- nodes_in: 由 topo_sig 传进来的 nodes 串 (11-fix)。不给才自己 build 一次。
+--   正常路径永远走 topo_sig 那份, 所以每轮只 build 一次。
+local function send_topo(nodes_in)
     local did = cur_did()
     if not did then return false, "无 SN" end
     -- 识别未成功前不发拓扑 (见 pub_blocked)。旧门闸只看 detecting, 兜底失败
     -- 之后 detecting=false 但其实没识别成功, 照样会发 —— 现在统一按"未成功"判
     if pub_blocked() then return false, "识别未完成" end
-    local nodes, err = build_nodes()
-    if not nodes then return false, err end
+    local nodes = nodes_in
+    if not nodes then
+        local n, err = build_nodes()
+        if not n then return false, err end
+        nodes = n
+    end
     return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did),
         string.format('{"vendor":%s,"model":%s,"fwVersion":%s,"ts":%d,"nodes":[%s]}',
             MqttUtil.jstr("VKBox"), MqttUtil.jstr(cfg.PLATFORM_MODEL), MqttUtil.jstr(_G.VERSION or "0.0.0"),
@@ -1701,25 +1743,35 @@ local function task_main()
             -- 2026-10: 判据从"正在识别"升级成"识别未成功"(含兜底失败), 与
             -- pub_blocked 同一口径
             local sig = nil
+            local nodes_json = nil
             -- ⚠️ pcall 包一层 (2026-10): topo_sig → build_nodes → node_json 里
             --   有大字符串拼接, 万一某次数据异常导致一次分配失败, 未捕获的话
             --   直接把整个 task 掀了("not enough memory for buffer allocation"
             --   → Lua VM exit → 设备重启)。包起来最多丢一次拓扑重发, 不至于重启
+            --
+            -- ⚠️ 11-fix (2026-10-27) 更正上面那条注释的假设: pcall 只拦得住
+            --   普通 Lua error, 拦不住 LuatOS 分配器级的 OOM fatal —— 真要防住
+            --   只能【少分配】, 也就是下面把 build_nodes 从每轮两次降到一次。
+            --   pcall 留着当普通 error 的兜底。
             if pub_topo and not pub_blocked() then
-                local ok, s = pcall(topo_sig)
+                local ok, s, n = pcall(topo_sig)
                 if ok then
-                    sig = s
+                    sig, nodes_json = s, n
                 else
                     log.warn("iot", "topo_sig failed, skip this round: " .. tostring(s))
                 end
             end
             if sig and sig ~= S.topo_sig then
-                local ok, e = send_topo()
-                if ok then
+                -- pcall: send_topo 同样有大字符串拼接, 普通 Lua error 不该掀掉
+                --   整个 task。返回值拆成 pok/sent/e 三段 —— pcall 的第一个
+                --   返回值是"有没有出错", 不能当"发没发成功"用。
+                local pok, sent, e = pcall(send_topo, nodes_json)
+                if pok and sent then
                     S.topo_sig = sig
-                    log.info("iot", "topology posted: " .. sig)
+                    -- ⚠️ 别再拼整串 sig (1.2KB 又一份拷贝)。只打长度 + 头 100 字节
+                    log.info("iot", "topology posted: len=" .. #sig .. " head=" .. sig:sub(1, 100))
                 else
-                    log.info("iot", "topology skip: " .. tostring(e))
+                    log.info("iot", "topology skip: " .. tostring(e or sent))
                 end
             end
             end  -- if pub_platform end
