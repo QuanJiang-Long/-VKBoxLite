@@ -24,7 +24,11 @@ M.WDT_TIMEOUT = 9000
 M.WDT_FEED_MS = 3000
 M.MONITOR_MS = 10000
 M.STALL_LIMIT_S = 120
-M.AUTO_REBOOT = false
+-- 采集任务卡死(120 秒心跳没喂上)就自动重启设备:
+--   现场设备要无人值守, 卡死后的"报日志等人来"不如直接自愈。
+--   普通网络抖动/串口偶发失败不会误触 —— 判据是 guard.alive() 心跳停喂
+--   超过 STALL_LIMIT_S, 只在实际循环卡住时才可能发生(2026-10 用户确认)
+M.AUTO_REBOOT = true
 
 -- VL+YYYYMMDD+NNN = 2+8+3 = 13, 上限 32 留扩展段(prefix 改长 / 加日期戳变体)
 -- 改 SN_PREFIX 时同步改 SN_MIN_LEN (前缀 2 + 日期 8 + 流水 3)
