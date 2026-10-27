@@ -5,6 +5,8 @@ local log = util.log()
 local uart = util.get("uart")
 local gpio = util.try("gpio")
 local sys = util.try("sys")
+-- 心跳接入: guard 用它判 sniff 档业务是否卡死 (poll.lua 在采集档同模式接入)
+local guard = util.try("svc/guard")
 
 local mbus = require "bus/mbus"
 local collector = require "data/collector"
@@ -40,6 +42,9 @@ local function sniff_wait(ms)
     local t = 0
     while t < ms do
         if forceStop or not running then return false end
+        -- 识别期的心跳: auto_detect 所有等待都走这里, 20ms 一喂,
+        -- 识别慢(baud 全扫 21s+)不会让 guard 把 sniff 档误判成卡死
+        if guard then guard.alive() end
         if sys then sys.wait(20) end
         t = t + 20
     end
@@ -336,6 +341,8 @@ end
 local function task()
     local mygen = gen
     while running and gen == mygen do
+        -- 旁听主循环心跳: guard.stall 判据 (poll 采集档由 poll.lua 喂, 两个不会同时跑)
+        if guard then guard.alive() end
         local s = next_frame()
         if s then
             process_frame(s)

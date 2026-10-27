@@ -2,7 +2,7 @@ local util = require "util"
 local cfg = require "core/config"
 local log = util.log()
 
-local sys = util.get("sys")
+local sys = util.try("sys")  -- try 而非 get: 早于 sys 挂载也能加载 (单测可调)
 local rtos = util.try("rtos")
 local wdt = util.try("wdt")
 
@@ -39,18 +39,27 @@ local function cur_mode()
     return "idle"
 end
 
+-- 有心跳可谈的模式: manual/poll + platform(平台档同样跑 poll 循环, poll.lua 喂)
+-- + sniff(旁听循环 mon.task 喂, 2026-10 补). idle 不算 —— 没有采集在跑,
+-- 心跳停是正常状态, 不能当 stall
+local function is_active_mode(mode)
+    return mode == "manual" or mode == "poll" or mode == "platform" or mode == "sniff"
+end
+-- 导出: 单元测试用 (tests/lua/test_guard_modes.lua)
+M.is_active_mode = is_active_mode
+
 local function monitor()
     local mode = cur_mode()
     -- "manual" 才是当前 mode 名; "poll" 是历史别名, 老 fskv 软切会同时返回 "poll",
     -- 也算 manual 行为 (MQTT 手动档 + 寄存器手配)
     local is_manual = mode == "manual" or mode == "poll"
-    local stall = is_manual and (ticks - last_alive) or nil
+    local stall = is_active_mode(mode) and (ticks - last_alive) or nil
     local parts = {
-        string.format("uptime=%ds mode=%s feed=%d", ticks, mode, cfg.WDT_FEED_MS // 1000),
+        string.format("uptime=%ds mode=%s feed=%d", ticks, mode, math.floor(cfg.WDT_FEED_MS / 1000)),
     }
     if stall then parts[#parts + 1] = string.format("stall=%ds", stall) end
-    -- 轮询进度: 让"是否在周期轮询"直接从心跳可见
-    if is_manual then
+    -- 轮询进度: 让"是否在周期轮询"直接从心跳可见 (manual/platform 两档都跑 poll)
+    if is_manual or mode == "platform" then
         local okp, poll = pcall(require, "bus/poll")
         if okp and poll then
             local ps = poll.status()
@@ -75,7 +84,7 @@ function M.status()
     return {
         uptime = ticks,
         feed = cfg.WDT_FEED_MS,
-        stall = (cur_mode() == "manual" or cur_mode() == "poll") and (ticks - last_alive) or nil,
+        stall = is_active_mode(cur_mode()) and (ticks - last_alive) or nil,
         wdt_to = cfg.WDT_TIMEOUT,
     }
 end
