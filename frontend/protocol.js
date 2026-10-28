@@ -55,6 +55,10 @@
     frames:  (n)  => 'R:FRAMES' + (n ? '=' + n : ''),   // 最近解译帧
     infer:   ()   => 'R:INFER',                          // 推断轮询表+从机列表（只读参考，不写配置）
     autoDetect: () => 'R:AUTODETECT',                    // 识别 baud/parity（只用于本次 sniff 会话）
+    // 12-fix-6: 推断表订阅开关。打开后设备每发现一个新地址就主动推
+    // 一整张表过来(RET:INFER_PUSH=), 前端不用手动点刷新。
+    // 只在 sniff 面板打开时开、关面板就关 —— 没人看的时候设备一个字节都不发。
+    inferWatch: (on) => 'W:INFERWATCH=' + (on ? '1' : '0'),
 
     // ---- sniff 别名表 (2026-10) ----
     // 用户在推断表里给 reg<addr> 起的 id/name。存设备 fskv(ds_alias),

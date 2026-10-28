@@ -185,22 +185,39 @@ local function alias_map(c)
 end
 
 -- 推断结果补 name/id: 与上报同一套映射(用户别名表优先, 再 cfg alias_map)
+--
+-- ⚠️ 12-fix-6 (2026-10-28): 【复制一份再挂名字, 不就地改】。
+--   就地改会给活着的推断行加上 id/name 两个字段 → 第 9/10 个字段 →
+--   Lua 的哈希槽从 8 涨到 16 → 每行 203 → 363 字节(实测) → 现场的 48 行
+--   就是 +7.7KB 常驻堆。复制只发生在 R:INFER / 主动推送这两种稀疏调用上,
+--   复制出来的表马上变成垃圾被回收, 活着的结构保持 8 字段/行。
 function M.attach_names(inf)
     if type(inf) ~= "table" or type(inf.regs) ~= "table" then return inf end
     local amap = alias_map()
     local smap = cfgstore.alias_map()   -- sniff 别名表 (用户起的名字)
-    for _, a in ipairs(inf.regs) do
+    -- 顶层字段(slaves/ignored/stat)原样带过去
+    local out = {}
+    for k, v in pairs(inf) do out[k] = v end
+    local rows = {}
+    for i, a in ipairs(inf.regs) do
         local k = "reg" .. tostring(a.addr or "")
         local sa = smap[k]
+        local id, name
         if sa then
-            a.id = (sa.id ~= "" and sa.id) or k
-            a.name = (sa.name ~= "" and sa.name) or a.id
+            id = (sa.id ~= "" and sa.id) or k
+            name = (sa.name ~= "" and sa.name) or id
         else
-            a.id = k
-            a.name = amap[k] or k   -- 没配 alias 时 = 本身, 与 U4 上报完全一致
+            id = k
+            name = amap[k] or k   -- 没配 alias 时 = 本身, 与 U4 上报完全一致
         end
+        local c = {}
+        for kk, vv in pairs(a) do c[kk] = vv end
+        c.id = id
+        c.name = name
+        rows[i] = c
     end
-    return inf
+    out.regs = rows
+    return out
 end
 
 -- ===== 收拢重复样板的 helper =====
@@ -1738,6 +1755,19 @@ local function task_main()
     S.want_run = true
     while S.want_run do
         -- 拉取状态机要在未连接时也能跑(connecting 态就是等连接), 所以放分支外
+        -- 12-fix-6: 推断表多出新地址 → 主动推给前端(用户 2026-10-28
+        --   要求: 前端不用手动刷新推断表)。只在用户看着 sniff 面板时推
+        --   (前端用 W:INFERWATCH 开关), 没人看就一个字节都不发。
+        --   ⚠️ 先问 watch 再取 dirty: 没人看的时候 dirty 必须留着, 等
+        --   前端打开面板时一次性推出去(表里可能已经有东西了)。
+        --   放在这里而不是收帧协程里: 一次推送要拼几 KB JSON, 放进热
+        --   路径就是新的碎片化来源(12-fix-5 的教训)。
+        --   ⚠️ 必须放在【连接与否的分支之外】: 推给前端跟 MQTT 连没连
+        --   没关系, 平台连不上时前端照样要看到新地址。
+        if mon.infer_watch() and mon.take_infer_dirty() then
+            local push = _G.cmd_push_infer
+            if push then pcall(push) end
+        end
         if pull_active() then pcall(pull_step) end
         if not S.connected then
             if net_ready() then

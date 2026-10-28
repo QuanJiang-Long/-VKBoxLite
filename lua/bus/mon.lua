@@ -82,6 +82,22 @@ local MAX_INFER_ROWS = 128
 local stat = { frames = 0, reqs = 0, rsps = 0, errs = 0, paired = 0, orphans = 0,
                detect_round = 0, detect_fail = 0, infer_clamped = 0, rx_bytes = 0 }
 
+-- 12-fix-6 (2026-10-28): 推断表改成【常驻累加器】—— 只增不减, 序号按发现顺序。
+--   原来 infer() 每次都拿 collector 的【最后 10 帧】重建整张表: 总线一圈
+--   轮询的地址有几十个(现场 48 个), 10 帧只够看见 5 个请求, 表在两组地址
+--   之间来回跳 —— 前端每刷新一次看到的都不一样(用户 2026-10-28 反馈),
+--   拓扑签名跟着每 30 秒变一次, 平台每 30 秒重建一次模型。
+--   现在: 请求里出现过的地址只进不出(到 MAX_INFER_ROWS=128 为止), 老地址
+--   只更新值/次数; 序号按【发现顺序】发, 前端按它显示"序号"列。
+--   infer_acc   : infer_acc[slave][addr] = 行(数字键, 不拼字符串 —— 热路径)
+--   infer_order : 行数组(发现顺序) —— 序号 = 行在数组里的位置, 不单独存字段
+--   infer_dirty : 行集合变了(多出新地址) -> 要推给前端
+--   infer_watch : 前端正在看推断表(sniff 面板打开) -> 只在它为真时推
+local infer_acc = {}
+local infer_order = {}
+local infer_dirty = false
+local infer_watch = false
+
 -- 识别进度: 当前正在试的 baud / parity。12-fix-2 起暴露给 R:STAT,
 -- 让前端/现场能看出"设备此刻在试什么", 而不是只看到一个转圈。
 -- 2026-10-27 现场: 4800 奇校验在盲扫里排第 32 位, 要等 ~52s, 全程黑盒。
@@ -97,6 +113,69 @@ local tried = {}
 
 local function key(slave, qty) return tostring(slave) .. ":" .. tostring(qty) end
 
+-- 12-fix-6: 累加器取/建一行。key 用数字(不拼字符串): 请求帧一秒几十个,
+-- 拼一次 "slave:reg1234" 就是一笔垃圾。
+-- 超 MAX_INFER_ROWS 就不再建行(计数 infer_clamped), 返回 nil
+--
+-- ⚠️ 字段数【必须 ≤8】(2026-10-28 实测): Lua 表的哈希槽按 2 的幂走,
+--   6/7/8 字段 = 8 槽 = 203 字节/行; 9 个字段就跳到 16 槽 = 363 字节/行
+--   (多 78%, 一分钱都不值)。所以这行只留 8 个字段:
+--     slave/addr/fc/hits/answered/dtype/conf/value
+--   砍掉的三样都是能推出来的:
+--     seq    → 序号 = 行在 infer_order 里的位置(发现顺序), 不用存
+--     status → 前端按 conf 推(≥80 ok / ≥60 review / 其余 uncertain),
+--              "没应答"用 answered=false 表示
+--     count  → 数量 = dtype 的宽度(前端按 dtype 算), 不用存
+--   ⚠️ value 建行时也要占位(nil 不占槽): 8 个槽用满之后再加第 9 个字段
+--     就会触发 rehash, 表直接翻倍。
+local function acc_row(slave, addr, fc)
+    local sl = infer_acc[slave]
+    if not sl then sl = {}; infer_acc[slave] = sl end
+    local a = sl[addr]
+    if a then
+        if a.fc == nil and fc then a.fc = fc end
+        return a
+    end
+    if #infer_order >= MAX_INFER_ROWS then
+        stat.infer_clamped = stat.infer_clamped + 1
+        return nil
+    end
+    a = { slave = slave, addr = addr, fc = fc,
+          hits = 0, answered = false,
+          dtype = "uint16", conf = 0, value = nil }
+    sl[addr] = a
+    infer_order[#infer_order + 1] = a
+    infer_dirty = true
+    return a
+end
+
+-- 请求里出现过的地址: 记一次命中。行按 16bit slot 记(跟 dataCache 的
+-- key 一致), 32bit 合并的寄存器占两行。这跟老表"32bit 只占一行"不同,
+-- 但跟 U4 上报的点集一致(dataCache 里也是两个 alias) ——
+-- 平台那边模型和数据才对得上。
+local function acc_note_req(slave, addr, qty, fc)
+    local j = 0
+    while j < qty do
+        local a = acc_row(slave, addr + j, fc)
+        if not a then break end   -- 超上限: 不再展开(免得死循环)
+        a.hits = a.hits + 1
+        j = j + 1
+    end
+end
+
+-- 应答解出来的值回填累加器
+-- ⚠️ 只能碰已有的 8 个字段: 加第 9 个 → 哈希 rehash → 这张表翻倍
+-- (status 不存: 它由 conf 推出来(≥80 ok / ≥60 review / 其余 uncertain),
+--  前端自己算; 少一个字段少一个哈希槽)
+local function acc_note_rsp(slave, addr, v, dtype, conf)
+    local a = acc_row(slave, addr, nil)
+    if not a then return end
+    a.answered = true
+    a.value = v
+    a.dtype = dtype
+    a.conf = conf
+end
+
 local function push_req(f)
     local q = pendingReqs[f.fc]
     if not q then q = {}; pendingReqs[f.fc] = q end
@@ -108,6 +187,11 @@ local function push_req(f)
     local n = 0
     for _ in pairs(lastReqs) do n = n + 1 end
     if n > MAX_LAST_REQ then lastReqs = {} end
+    -- 12-fix-6: 请求里出现的地址进累加器(只增不减)。qty 先 clamp:
+    -- 异常 qty 的请求帧能到 65535, 展开下去就是几万行 → 堆爆。
+    if f.addr ~= nil and f.qty then
+        acc_note_req(f.slave, f.addr, util.clamp_qty(f.qty), f.fc)
+    end
 end
 
 local function guess_last_req(fc, slave, qty)
@@ -329,6 +413,9 @@ local function push_rsp_value(slave, addr, f)
                 lastMergedDtype, 100, "ok")
             collector.push_data(addr + i + 1, alias1, f.hex, lo16, nil,
                 lastMergedDtype, 100, "ok")
+            -- 12-fix-6: 值回填累加器(累加器是推断表的唯一数据源)
+            acc_note_rsp(slave, addr + i, v, lastMergedDtype, 100)
+            acc_note_rsp(slave, addr + i + 1, lo16, lastMergedDtype, 100)
             pushHistory(alias0, lastMergedDtype)
             pushHistory(alias1, lastMergedDtype)
             i = i + 2
@@ -340,6 +427,7 @@ local function push_rsp_value(slave, addr, f)
             elseif conf >= 60 then status = "review"
             else status = "uncertain" end
             collector.push_data(addr + i, alias0, f.hex, v, nil, dtype, conf, status)
+            acc_note_rsp(slave, addr + i, v, dtype, conf)
             pushHistory(alias0, dtype)
             if merged32 then
                 -- 32bit 合并: 2 个 16bit alias 都标同 dtype, 第 2 个 value = 低 16bit
@@ -356,6 +444,7 @@ local function push_rsp_value(slave, addr, f)
                     end
                 end
                 collector.push_data(addr + i + 1, alias1, f.hex, lo16, nil, dtype, conf, status)
+                acc_note_rsp(slave, addr + i + 1, lo16, dtype, conf)
                 pushHistory(alias1, dtype)
                 -- v5: 锁定 dtype, 后续段强制同 dtype 合并
                 lastMergedDtype = dtype
@@ -495,94 +584,30 @@ function M.infer(force)
     if not force and infer_cache and (os.clock() - infer_cache_at) < INFER_CACHE_S then
         return infer_cache
     end
-    local fs = collector.get_frames()
-    -- 健康度: 见到 RSP 的从机才算在线。主机轮询一个没接线的从机时只见请求不见
-    -- 应答(实测 slave=11 三项 req、零 rsp), 那种 req 列进轮询表只会误导 ——
-    -- 用户会照着配一个根本不存在的从机。必须单独走一遍: RSP 可能排在对应 req
-    -- 后面, 边扫边判会漏掉刚扫过的那批
-    local online = {}
-    for _, f in ipairs(fs) do
-        if f.kind == "rsp" and f.slave then online[f.slave] = true end
+    -- 12-fix-6 (2026-10-28): 推断表改成【读累加器】, 不再拿最后 10 帧重建。
+    --   行的集合只增不减(到 MAX_INFER_ROWS=128 为止), 顺序 = 发现顺序,
+    --   前端据此显示"序号"列(1,2,3...); 每行的值/次数/类型由累加器实时更新,
+    --   所以 hits 这次是真累计(老表每次重建都归 1)。
+    --   ignored = 到现在一次都没收到应答的地址数(主站轮询了但没人应) ——
+    --   这类地址【也进表】(用户 2026-10-28 决定: 要看得见主站到底轮了什么),
+    --   行上 answered=false, 前端显示成红色的 no_rsp。
+    --   ⚠️ 行对象直接给出去(不复制): 复制 48 行 = 每次 10KB 垃圾。代价是
+    --   调用方别改行里的字段 —— 现在的调用方 iot.attach_names 是【复制
+    --   一份】再挂 id/name 的(就地改会给行加第 9/10 个字段 → 表翻倍),
+    --   活着的行谁都不动。
+    local regs, slaves, ignored = {}, {}, 0
+    for _, a in ipairs(infer_order) do
+        if not a.answered then ignored = ignored + 1 end
+        slaves[a.slave] = true
+        regs[#regs + 1] = a
     end
-    local agg, slaves, ignored = {}, {}, 0
-    local agg_count = 0   -- agg 的条目数 (封顶用, 见 MAX_INFER_ROWS)
-    -- V2.3_3 dtype 启发式 + v6 表格 alias 拆分: 每 alias 各自 1 行, key = slave:alias.
-    -- 16bit 拆 2 个 alias 出 2 行 (98/99), 32bit 合并 2 个 alias 出 2 行 (2054/2055).
-    -- conf 来自 push_rsp_value 多候选打分 (连续性 50% + 值域 30% + 边界 20% + 跨帧一致 +5%)
-    -- status: ok (>=80) / review (60-80) / uncertain (<60)
-    local cache = collector.get_all_latest()
-    for _, f in ipairs(fs) do
-        if f.kind == "req" and f.addr ~= nil and f.qty then
-            -- addr 也要合法 (0..65535): 越界的地址会让 alias 变成 "reg70000"
-            -- 这种怪 key, 推断表里出现看不懂的行
-            if f.addr < 0 or f.addr > 65535 then
-                stat.infer_clamped = stat.infer_clamped + 1
-            elseif online[f.slave] then
-                -- ⚠️ qty 必须封顶 (util.clamp_qty, 见 util.lua 注释): 请求帧里的
-                --   qty 是 2 字节, 可以到 65535, 展开下去就是几万项 → 堆爆 → 重启
-                local qty = util.clamp_qty(f.qty)
-                if qty ~= f.qty then
-                    stat.infer_clamped = stat.infer_clamped + 1
-                end
-                -- v8: 按 dtype 宽度遍历, 32bit 合并 1 个 32bit 寄存器 = 1 行
-                -- (跳过 alias1), 16bit 拆 1 个 16bit 寄存器 = 1 行. count 字段
-                -- 反映"占几个 modbus 16bit 位置" (uint16=1, float32=2).
-                local j = 0
-                while j < qty do
-                    local alias = "reg" .. (f.addr + j)
-                    local e = cache[alias]
-                    local dtype = (e and e.dtype) or "uint16"
-                    local width = mbus.TYPE_WIDTH[dtype] or 1
-                    local key = f.slave .. ":" .. alias
-                    local a = agg[key]
-                    if not a then
-                        -- 推断表总行数也封顶 (MAX_INFER_ROWS): 多从机 × 多地址
-                        -- 的组合照样能把堆吃光, 超了不再新增行(hits 照常累加)
-                        if agg_count >= MAX_INFER_ROWS then
-                            stat.infer_clamped = stat.infer_clamped + 1
-                            break
-                        end
-                        agg_count = agg_count + 1
-                        a = {
-                            slave = f.slave,
-                            addr = f.addr + j,  -- 起始地址
-                            count = width,      -- 占几个 16bit 位置
-                            fc = f.fc,
-                            hits = 0,
-                            dtype = dtype,
-                            conf = (e and e.conf) or 0,
-                            status = (e and e.status) or "uncertain",
-                            -- 最新值: 旁听应答解析出的最后一次 value (该地址
-                            -- 没被解出过时为 nil, 前端推断表显示 --)
-                            value = (e and e.value) or nil,
-                        }
-                        agg[key] = a
-                        slaves[f.slave] = true
-                    end
-                    a.hits = a.hits + 1
-                    -- 值保持最新: e 逐次请求查缓存, 后到的应答把旧值顶上去
-                    if e and e.value ~= nil then a.value = e.value end
-                    j = j + width  -- 32bit 跳 2, 16bit 跳 1
-                end
-            else
-                ignored = ignored + 1
-            end
-        end
-    end
-    local regs = {}
-    for _, a in pairs(agg) do regs[#regs + 1] = a end
-    -- 先按从机再按地址排, 前端 R:INFER 直接按这个顺序显示
-    table.sort(regs, function(x, y)
-        if x.slave ~= y.slave then return x.slave < y.slave end
-        return x.addr < y.addr
-    end)
     local sl = {}
     for s in pairs(slaves) do sl[#sl + 1] = s end
     table.sort(sl)
     local result = {
         regs = regs,
         slaves = sl,
-        -- 健康度过滤掉的请求条数, 前端据此提示"轮询没人应答"的地址
+        -- 一次都没收到应答的地址数, 前端据此提示"轮询了但没应答"
         ignored = ignored,
         stat = stat,
     }
@@ -600,6 +625,12 @@ function M.start(c)
     -- 2026-10: 进 sniff 先清上一轮的值/帧/旧识别结果(旧参数下的东西不能混进这一轮)
     collector.clear_all()
     infer_cache = nil   -- 12-fix: 缓存是上一轮帧推断出来的, 新一轮必须重算
+    -- 12-fix-6: 累加器也清 —— 新一轮 sniff 的地址表从零开始(旧轮的地址
+    -- 混进新轮, 平台上的物模型就串了)。清完标 dirty: 前端面板开着的话
+    -- 下一拍就会收到"表空了"的推送。
+    infer_acc = {}
+    infer_order = {}
+    infer_dirty = true
     _G.mon_detect_result = nil
     -- 12-fix-2: 新一轮识别 = 候选记忆清零(从头扫)。
     -- ⚠️ 只在 start / restart_detect 清, 不在 request_detect 清 ——
@@ -805,6 +836,10 @@ function M.stop()
     rxbuf = ""
     pendingReqs, lastReqs = {}, {}
     infer_cache = nil   -- 12-fix: 帧都清了, 缓存的推断结果必须一起作废
+    -- 12-fix-6: 累加器也清(退出 sniff 后表里留着旧地址, 下次进来会串)
+    infer_acc = {}
+    infer_order = {}
+    infer_dirty = true
     clear_history()     -- 12-fix-3: dtype 判型历史也清(原来只有 start 清)
     try_baud, try_parity = nil, nil   -- 12-fix-2: 别把"在试什么"留在状态里
     tried = {}                        -- 12-fix-2: 候选记忆也作废
@@ -848,8 +883,48 @@ function M.status()
     --   hist_aliases = dtypeHistory 里的 alias 数(上限 MAX_HIST_ALIAS=128)
     --   infer_rows   = 推断表行数(上限 MAX_INFER_ROWS=128)
     st.hist_aliases = #histOrder
-    st.infer_rows = (infer_cache and infer_cache.regs) and #infer_cache.regs or 0
+    -- 12-fix-6: 推断表现在是累加器, 行数直接问它(不再问 infer_cache ——
+    -- 缓存里的数组是 2 秒前的快照, 累加器才是当前真相)
+    st.infer_rows = #infer_order
     return st
+end
+
+-- ===== 12-fix-6: 推断表的"主动推送"支持 =====
+-- 前端 sniff 面板打开 → 发 W:INFERWATCH=1 → 设备每发现一个新地址就把
+-- 整张表推过去(RET:INFER_PUSH=...), 前端不用手动刷新。
+-- 面板关掉 → W:INFERWATCH=0 → 不推了(没人看, 推了也是白占串口)。
+--
+-- 为什么要 watch 开关: 推送是【设备主动】发的, 不受"单未决指令"约束 ——
+-- 前端正在等 R:STAT 的应答时来一条推送, 前端必须能把它跟在途指令分开
+-- (见 frontend/renderer/app.js 的 onSerialLine)。限流在设备端做最省事:
+-- 面板没开就不推, 串口上一个字节都不多花。
+function M.set_infer_watch(on)
+    infer_watch = on and true or false
+    -- 打开的瞬间标 dirty: 让调用方下一拍就把当前这张表推出去
+    -- (面板打开到第一条新地址出现之间, 表里可能已经有东西了)
+    if infer_watch then infer_dirty = true end
+    return infer_watch
+end
+
+function M.infer_watch() return infer_watch end
+
+-- 取"行集合变了"的标志并清掉。没人在看的时候【不清】—— 留着, 等前端
+-- 打开面板时一次性推出去(所以调用方要先问 infer_watch 再取)。
+function M.take_infer_dirty()
+    if not infer_dirty then return false end
+    infer_dirty = false
+    return true
+end
+
+-- 单测钩子: 直接喂请求/应答, 不经过 uart 和帧解析
+-- (tests/lua/test_infer_acc.lua 用; 设备逻辑不依赖)
+M.test_note_req = acc_note_req
+M.test_note_rsp = acc_note_rsp
+M.test_reset_acc = function()
+    infer_acc = {}
+    infer_order = {}
+    infer_dirty = false
+    stat.infer_clamped = 0
 end
 
 function M.recent_frames(n)

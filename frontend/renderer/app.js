@@ -49,7 +49,9 @@ const S = {
                        // 保存时拿它判断用户到底改没改过，没改就发空串，
                        // 见 saveHomeMqtt()（R1）
   frames: [],          // 最近解译帧
-  infer: null,         // R:INFER 返回的推断结果
+  infer: null,         // R:INFER / RET:INFER_PUSH 返回的推断结果
+  sniffTabActive: false, // sniff 面板当前是否打开。12-fix-6: 打开时让设备
+                         // 主动推推断表(RET:INFER_PUSH), 关掉就停推。
   detected: null,      // R:AUTODETECT 识别出的通讯参数（仅本次会话，未写配置）
   pullBusy: false,     // 拉取配置进行中（防连点）
   pulled: false,       // 刚拉过平台配置且尚未保存确认。
@@ -475,6 +477,9 @@ async function togglePort() {
   await readHome();      // R:STAT 四段全量；少了它，首页看门狗/点数要等 5s 定时器
   await readMqtt();
   startAutoRefresh();
+  // 12-fix-6: 串口刚开, 设备那边的"推送开关"还停在旧状态(可能还开着,
+  //   也可能关着)。按当前面板重新对一次: 开着 sniff 面板就开推送。
+  setInferWatch(S.sniffTabActive);
 }
 
 // 拉取配置按钮: 只在「poll（拉取配置）」模式出现。
@@ -630,6 +635,14 @@ function sendCmd(line, expectCmd, timeout = 3000) {
 function onSerialLine(line) {
   const resp = Protocol.decode(line);
   if (!resp) return;
+  // ⚠️ 12-fix-6: 设备主动推的推断表(RET:INFER_PUSH=)必须在【在途指令匹配
+  //   之前】判掉。原因两条:
+  //   ① 键名不能跟 R:INFER 撞 —— 撞了这条推送会被当成 R:INFER 的应答,
+  //      把 S.infer 覆盖成半截数据;
+  //   ② 下面的 !resp.ok 会把【任何】失败应答算作在途指令的应答 —— 推送
+  //      正好撞上一条在途指令时, 会把那条指令判成失败。
+  //   推送是设备主动发的, 不受"单未决指令"约束, 只能这么分开。
+  if (resp.cmd === 'INFER_PUSH') { onInferPush(resp.data); return; }
   // 匹配条件：cmd 相同，或设备返回 FAIL（错误要透传给调用方），
   // 或裸 RET:OK（写指令的成功应答，老固件可能不返回 key）
   const matched = S.pending && (
@@ -642,6 +655,20 @@ function onSerialLine(line) {
   } else if (!S.pending) {
     // 设备主动上报（预留）：如 VAL= 推送
     console.log('[recv]', line);
+  }
+}
+
+// 12-fix-6: 收到设备推来的整张推断表 -> 直接换掉本地这份并重绘。
+//   不用等用户点"推断轮询表"(用户 2026-10-28 要求: 新地址自己冒出来)。
+//   sniff 面板没开就不处理 —— 面板关着的时候表显示在哪都看不见。
+function onInferPush(data) {
+  if (!data || !Array.isArray(data.regs)) return;
+  if (!S.sniffTabActive) return;
+  S.infer = data;
+  renderInfer();
+  const n = data.regs.length;
+  if (n) {
+    status('推断表已更新（' + n + ' 个地址）', true);
   }
 }
 
@@ -1289,7 +1316,7 @@ function resetSniffView() {
   S.frames = [];          // 总线报文(设备端也清了)
   if (el.inferHint) el.inferHint.textContent = '';
   if (el.inferTbody) {
-    el.inferTbody.innerHTML = '<tr><td colspan="9" style="color:#999;">点击"推断轮询表"从已监听到的报文反推</td></tr>';
+    el.inferTbody.innerHTML = '<tr><td colspan="10" style="color:#999;">点击"推断轮询表"从已监听到的报文反推</td></tr>';
   }
   renderFrames();         // 报文表回到空态
   renderDetected();       // S.detected=null → 提示清空 + 颜色回灰
@@ -1376,6 +1403,22 @@ async function saveAlias(row, id, name) {
   }
 }
 
+// 12-fix-6: 开关"设备主动推推断表"。sniff 面板打开时开, 关掉就关 ——
+//   没人看的时候设备一个字节都不发(串口让给报文/指令)。
+// ⚠️ 撞"上一条指令尚未返回"要重试: 串口是单未决设计, 撞上就静默失败 ——
+//   表现是"面板开着但新地址一直不自己冒出来", 而开关失败没有任何提示。
+async function setInferWatch(on) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await sendCmd(Protocol.Enc.inferWatch(on), 'INFERWATCH', 2000);
+      return true;
+    } catch (e) {
+      if (attempt < 2) await sleep(200);
+    }
+  }
+  return false;
+}
+
 async function doInfer(silent) {
   // silent: 自动触发(切 sniff 面板)时用 —— 每次切面板都弹一次 toast 太吵
   // ⚠️ 撞"上一条指令尚未返回"时重试一次: 串口是单未决设计, 同一时刻只能
@@ -1412,35 +1455,59 @@ async function doInfer(silent) {
   }
 }
 
+// 12-fix-6: 设备端的推断行只存 8 个字段(每行 203 字节, 省堆), "数量"和
+//   "状态"两列在前端推出来:
+//   数量 = 推断类型的宽度(uint16/int16=1, 32bit=2, 64bit=4)
+//   状态 = 没应答(no_rsp) / conf≥80 ok / ≥60 review / 其余 uncertain
+//   ⚠️ 老固件的 rows 没有 answered 字段(undefined) → 状态照旧按 conf 算,
+//      不会有兼容性断裂。
+const INFER_WIDTH = {
+  uint16: 1, int16: 1,
+  uint32: 2, int32: 2, float32: 2,
+  uint64: 4, int64: 4, float64: 4,
+};
+function inferWidth(dtype) { return INFER_WIDTH[dtype] || 1; }
+function inferStatus(r) {
+  if (r.answered === false) return 'no_rsp';
+  const c = (r.conf == null) ? 0 : r.conf;
+  if (c >= 80) return 'ok';
+  if (c >= 60) return 'review';
+  return 'uncertain';
+}
+
 function renderInfer() {
   const inf = S.infer || {};
   const regs = toArr(inf.regs);
   el.inferHint.textContent = regs.length
     ? '监听到 ' + toArr(inf.slaves).length + ' 个从机，共 ' + regs.length + ' 个轮询项'
-      + (inf.ignored ? '；已过滤 ' + inf.ignored + ' 条无应答的请求（从机可能不在线）' : '')
+      + (inf.ignored ? '；其中 ' + inf.ignored + ' 个地址主站轮询了但没收到应答' : '')
     : '';
   if (regs.length === 0) {
     el.inferTbody.innerHTML = '<tr><td colspan="10" style="color:#999;">暂无推断结果</td></tr>';
     return;
   }
-  el.inferTbody.innerHTML = regs.map(r => {
+  // 12-fix-6: 第一列从"从机地址"改成"序号" —— 总线上常常就一个从机,
+  //   那一列永远是 1, 占着位置没用。序号 = 表里的行号(设备那边按【发现
+  //   顺序】排, 所以序号 = 嗅探到的先后, 越靠前越早被认出来)。
+  el.inferTbody.innerHTML = regs.map((r, i) => {
     // 最新值: 设备只带被解出过的地址; 浮点显示截 4 位小数(纯展示, 不改数据)
     const v = (r.value != null && typeof r.value === 'number' && !Number.isInteger(r.value))
       ? Math.round(r.value * 1e4) / 1e4 : r.value;
     const akey = 'reg' + r.addr;
+    const st = inferStatus(r);
     return '<tr>' +
-    '<td>' + esc(r.slave) + '</td>' +
+    '<td>' + (i + 1) + '</td>' +
     '<td>' + esc(r.addr) + '</td>' +
-    '<td>' + esc(r.count) + '</td>' +
+    '<td>' + esc(inferWidth(r.dtype)) + '</td>' +
     '<td>0x' + (r.fc != null ? r.fc.toString(16).padStart(2, '0').toUpperCase() : '?') + '</td>' +
     '<td>' + esc(r.hits) + '</td>' +
     '<td title="' + esc(r.dtype || '-') + '" style="font-family:monospace;font-size:12px;color:#0066cc;">' + esc(r.dtype || '-') + '</td>' +
-    // 置信度 + 判型状态: 设备端 R:INFER rows 自带 conf/status (0-100, 2026-10 新增列)
-    // ok=绿(≥80) review=橙(60-79) uncertain=灰(<60), 让"判型还在自愈/被坏帧干扰"直接可见
+    // 置信度 + 判型状态: ok=绿(≥80) review=橙(60-79) uncertain=灰(<60),
+    // no_rsp=红(主站轮询了但没人应答) —— 让"这个地址是死的"一眼看得出
     '<td style="font-family:monospace;font-size:12px;">' +
       (r.conf != null ? esc(r.conf) : '<span style="color:#999;">-</span>') +
-      ' <span style="color:' + (r.status === 'ok' ? '#0a7d2c' : r.status === 'review' ? '#e6a23c' : '#999') + ';">' +
-      esc(r.status || '-') + '</span></td>' +
+      ' <span style="color:' + (st === 'ok' ? '#0a7d2c' : st === 'review' ? '#e6a23c' : st === 'no_rsp' ? '#b03a2e' : '#999') + ';">' +
+      esc(st) + '</span></td>' +
     '<td title="旁听应答最新解析值" style="font-family:monospace;font-size:12px;">' +
       (v != null ? esc(v) : '<span style="color:#999;">--</span>') + '</td>' +
     // 参数名称: 与 U4 上报 payload 的 name 同一字段 (设备端 attach_names 给的);
@@ -2050,7 +2117,7 @@ async function importCfg(pre) {
 //---------------------------------------------------------------------
 // 自动刷新（报文页 + 首页定时）
 //---------------------------------------------------------------------
-let frameTimer = null, homeTimer = null;
+let frameTimer = null, homeTimer = null, inferTimer = null;
 function startAutoRefresh() {
   stopAutoRefresh();
   if (S.mock) return;
@@ -2079,10 +2146,16 @@ function startAutoRefresh() {
     if (!S.pending && el.frameSectionOn && el.frameSectionOn.checked
         && el.frameAuto.checked && S.mode === 'sniff') readFrames();
   }, 2000);
+  // 12-fix-6: 推断表慢刷(30 秒一次)。设备只在【行集合变了】的时候主动推,
+  //   表里的"最新值 / 出现次数"得靠这个补 —— 面板开着才跑, 关着不占串口。
+  inferTimer = setInterval(() => {
+    if (!S.pending && S.sniffTabActive && S.mode === 'sniff') doInfer(true);
+  }, 30000);
 }
 function stopAutoRefresh() {
   if (frameTimer) { clearInterval(frameTimer); frameTimer = null; }
   if (homeTimer) { clearInterval(homeTimer); homeTimer = null; }
+  if (inferTimer) { clearInterval(inferTimer); inferTimer = null; }
 }
 
 //---------------------------------------------------------------------
@@ -2347,7 +2420,7 @@ if (el.btnInferClear) {
   el.btnInferClear.onclick = () => {
     // 推断表清空: inferTbody 还原到初始"点击'推断轮询表'从已监听到的报文反推"
     if (el.inferTbody) {
-      el.inferTbody.innerHTML = '<tr><td colspan="9" style="color:#999;">点击"推断轮询表"从已监听到的报文反推</td></tr>';
+      el.inferTbody.innerHTML = '<tr><td colspan="10" style="color:#999;">点击"推断轮询表"从已监听到的报文反推</td></tr>';
     }
     if (el.inferHint) el.inferHint.textContent = '';
     if (el.detectHint) el.detectHint.textContent = '';
@@ -2414,14 +2487,22 @@ function activateTab(tabId) {
   //   三条一起发, 后两条直接撞"上一条指令尚未返回"直接失败 —— doInfer 又是
   //   静默的, 于是切进来看着就是"自动刷新没生效"(表一直空着)。
   //   顺序也讲究: 先 MQTT(用户最先看), 再报文, 最后推断表(最慢)
+  // 12-fix-6: sniff 面板打开 → 让设备开始主动推推断表; 关掉 → 停推。
+  //   设备只在【有人看】的时候推, 串口上一个字节都不多花。
+  const sniffWas = S.sniffTabActive;
+  S.sniffTabActive = (tabId === 'tabSniff');
   if (tabId === 'tabSniff' && S.open) {
     (async () => {
+      await setInferWatch(true);   // 先开推送: 后面几条命令在途时新地址也能推过来
       await readMqtt();
       if (S.mode === 'sniff') {
         await readFrames();
         await doInfer(true);
       }
     })();
+  } else if (sniffWas && S.open) {
+    // 关面板: 停推。失败也无所谓(前端自己会忽略推送, 只是设备多推几次)
+    setInferWatch(false);
   }
   // pollpull 档: 进 poll tab 时静默读一份 ds_pull 填表单 —— 软件一打开
   // 就是 pollpull (没有 applyMode 这一步) 也覆盖。push 自动刷新另见
@@ -2653,8 +2734,8 @@ function mockReply(line) {
   else if (line === 'R:INFER') {
     // 别名表里的名字要反映到推断表 (浏览器预览里改名后重推能看到变化)
     const mregs = [
-      { slave: 1, addr: 100, count: 2, fc: 3, hits: 12, value: 42 },
-      { slave: 2, addr: 0, count: 10, fc: 3, hits: 5, value: null }
+      { slave: 1, addr: 100, fc: 3, hits: 12, value: 42, dtype: 'uint16', conf: 95, answered: true },
+      { slave: 2, addr: 0, fc: 3, hits: 5, value: null, dtype: 'uint16', conf: 0, answered: false }
     ].map(r => {
       const key = 'reg' + r.addr;
       const sa = MOCK.alias.regs.find(x => x.key === key);
@@ -2666,11 +2747,14 @@ function mockReply(line) {
     resp = 'RET:INFER=' + JSON.stringify({
       regs: mregs,
       slaves: [1, 2],
+      ignored: 1,          // 1 个地址轮询了但没应答(no_rsp)
       stat: { frames: 24, reqs: 12, rsps: 11, errs: 0, paired: 10, orphans: 1, detect_round: 0, detect_fail: 0 }
     });
   }
   // sniff 别名表 (2026-10): 浏览器预览里也能改名
   else if (line === 'R:SALIAS') resp = 'RET:SALIAS=' + JSON.stringify(MOCK.alias);
+  // 12-fix-6: 推断表推送开关(浏览器预览里只回个 OK, 不模拟推送)
+  else if (line.indexOf('W:INFERWATCH=') === 0) resp = 'RET:INFERWATCH=OK';
   else if (line.indexOf('W:SALIAS=') === 0) {
     let o = null;
     try { o = JSON.parse(line.slice('W:SALIAS='.length)); } catch (e) { o = null; }

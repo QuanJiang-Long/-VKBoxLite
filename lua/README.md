@@ -155,7 +155,8 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | W:GC | 强制 GC + 重连（**仅开发版注册**） |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配”（**仅开发版注册**——它能直接往总线上发帧，交付版不能开，见下「开发版 vs 发布版」） |
 | R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20，**正式注册**，sniff 报文卡依赖） |
-| R:INFER | 从旁听帧反推轮询表 `{regs:[{slave,addr,count,fc,hits,value,name}], slaves, stat}`（**只读参考**，不写任何配置；`value` = 旁听应答最新解析值，地址没被解出过时缺省；`name` = U4 上报 payload 的 name（`alias` 映射,同 `iot.build_items` 一套，没配 alias 时 = `reg<addr>`） |
+| R:INFER | 读**常驻推断表**（2026-10-28 起是累加器，不再每次重建）`{regs:[{slave,addr,fc,hits,answered,dtype,conf,value,id,name}], slaves, ignored, stat}`（**只读参考**，不写任何配置）。**行只增不减**：请求帧里出现过的地址就进表，顺序 = 嗅探到的发现顺序（前端第 1 列"序号"就是这个顺序，前端自己编号，设备不存序号字段）；`hits` = 累计被请求多少次；`answered`=false 表示主站轮询了但没收到应答（这类地址**也进表**）；`value` = 旁听应答最新解析值；`id`/`name` = U4 上报 payload 的 id/name（`alias` 映射，同 `iot.build_items` 一套，没配 alias 时 = `reg<addr>`）。**最多累计 128 行**（`MAX_INFER_ROWS`，见「内存缓冲上限」一节）；`ignored` = 表里"没应答"的地址数 |
+| W:INFERWATCH=1\|0 | 推断表**主动推送**开关（2026-10-28）。`1` = 设备每发现一个新地址就把整张表推过来（`RET:INFER_PUSH={...}`，格式同 `R:INFER`）；`0` = 停推。前端只在 sniff 面板打开时开、关面板就关 —— 没人看的时候设备一个字节都不发（串口让给报文/指令）。⚠️ 推送是**设备主动**发的，不受前端"单条未决指令"约束，前端必须先按 `INFER_PUSH` 键名把它跟在途指令分开（`frontend/renderer/app.js` 的 `onSerialLine`） |
 | R:AUTODETECT[=restart] | 识别 sniff 通讯参数 `{baud,databits,stopbits,parity}`（**只用于本次会话**，不写 fskv）。**非阻塞**：回 `BUSY` / 参数 / `RET:FAIL:not in sniff mode`，由前端轮询。带 `=restart` = 强制重扫（先清旧帧旧值与旧结果，再从头扫），前端「重新识别通讯参数」按钮用 |
 | R:SALIAS / W:SALIAS={key,id,name} | sniff 侧别名表（`ds_alias` 槽）：用户在推断表里给 `reg<addr>` 起的**参数名称**(`name`)与**建议标识符**(`id`)。`W:SALIAS` 单条 upsert，`id`/`name` 都空 = 删掉这条（恢复默认 `reg<addr>`）。生效范围：sniff 档的 **U2 拓扑属性 id/name** 与 **U4 数据项 id/name** —— 平台上显示的就是用户起的名字 |
 | W:MODE=poll\|pollpull\|sniff\|idle | 切换 485 运行模式。`sniff` 会**自动起一轮识别**（非阻塞），立即回 OK；`pollpull` 会自动 hello 拉平台配置 |
@@ -600,6 +601,71 @@ sniff 的通讯参数**用户不配**（sniff 没有持久槽，是刻意的设�
 > （比如按"主站轮询周期"反推 baud，或者干脆让用户手填）。
 
 
+## 推断表：常驻累加器 + 主动推送（2026-10-28，12-fix-6）
+
+### 为什么改
+
+老 `M.infer()` 每次拿 `collector` 的**最后 10 帧**重建整张表。现场的总线一圈轮询
+有 48 个地址，10 帧只够看见 5 个请求 —— 表在两组地址之间来回跳：
+
+- 前端每点一次"推断轮询表"看到的**都不一样**（用户 2026-10-28 反馈）；
+- `topo_sig()` 的指纹跟着每 30 秒变一次 → 平台每 30 秒重建一次物模型。
+
+### 现在的语义
+
+| | 老行为 | 现在 |
+|---|---|---|
+| 行的集合 | 每 10 帧重建，来回跳 | **只增不减**（到 `MAX_INFER_ROWS`=128 为止），一轮 sniff 内不删 |
+| 顺序 | 按 从机 + 地址 排序 | **发现顺序**（前端第 1 列"序号"就是这个顺序） |
+| `hits` | 每次重建都归 1 | **真累计**（这一轮嗅探到现在被请求了多少次） |
+| 没应答的地址 | 整个从机没应答就整批过滤掉 | **也进表**，逐个地址判：`answered=false` + 前端显示 `no_rsp`（红色） |
+| 前端刷新 | 必须手点"推断轮询表" | **设备主动推**（`RET:INFER_PUSH`），面板开着就自动更新 |
+
+### 推送协议
+
+```
+前端 → 设备:  W:INFERWATCH=1      (sniff 面板打开)
+设备 → 前端:  RET:INFERWATCH=1
+设备 → 前端:  RET:INFER_PUSH={regs:[...], slaves:[...], ignored:N, stat:{...}}
+前端 → 设备:  W:INFERWATCH=0      (面板关闭 → 停推)
+```
+
+- **只在 sniff 面板打开时开**：没人看的时候设备一个字节都不发（串口让给报文/指令）。
+- 触发条件是**行集合变了**（发现了新地址）。表里的"最新值/出现次数"靠前端的
+  **30 秒慢刷**（`R:INFER`）补 —— 值变化很频繁，为它推整张表不值当。
+- 推送在 iot 的 1 秒巡检里发（`mon.take_infer_dirty()`），**不在收帧热路径上**：
+  一次推送要拼几 KB JSON，放进热路径就是新的碎片化来源。
+- ⚠️ `RET:INFER_PUSH` 是**设备主动**发的，不受前端"单条未决指令"约束：
+  前端正在等某条指令的应答时来一条推送，前端必须先按 `INFER_PUSH` 键名把它分开
+  （`frontend/renderer/app.js` 的 `onSerialLine`），否则会被当成那条指令的应答吞掉。
+
+### 内存账（这表是常驻的）
+
+- 一行 **8 个字段**：`slave/addr/fc/hits/answered/dtype/conf/value`。
+- ⚠️ **字段数必须 ≤ 8**：Lua 表的哈希槽按 2 的幂走，**第 9 个字段就把 8 槽撑成
+  16 槽** —— 实测每行 203 → 363 字节（+78%）。现场的 48 行 = 17.5KB → 10.8KB。
+  三个能推出来的字段因此**不存**：`seq`（序号 = 行在表里的位置）、`status`
+  （前端按 `conf` 推）、`count`（数量 = `dtype` 的宽度，前端按类型推）。
+- `iot.attach_names()` 会给行加 `id`/`name` → 那是第 9/10 个字段 → 所以它
+  **复制一份**再挂名字，不就地改活着的行（就地改 = +7.7KB 常驻堆）。
+- `tests/lua/test_infer_acc.lua` 里有两条断言钉住这件事：行字段数 ≤ 8、
+  48 行占用 < 12KB。改行结构时这个测试会先炸。
+
+### 与平台（U2 拓扑）的关系
+
+- 拓扑指纹现在**只在发现新地址时变** → 平台只在有新地址时重建物模型。
+- ⚠️ `node_json` 的 `MAX_PROPS` 还是 **64**：现场的 48 个地址离上限还有余量，
+  但**超过 64 个地址时拓扑只上报前 64 个**（推断表本身能到 128 行）。
+- ⚠️ 推断表现在是**每 16bit 槽一行**（32bit 寄存器占两行），跟 `dataCache`
+  和 U4 上报的点一一对应 —— 平台那边的模型和数据才对得上。老表是"32bit 合并成
+  一行"，跟 U4 的点集对不上。
+
+### 一轮 sniff 的重置
+
+`mon.start()` / `mon.stop()` 会清空累加器 —— 新一轮 sniff 的地址表从零开始
+（旧轮的地址混进新轮，平台上的物模型就串了）。
+
+
 ## 内存缓冲上限（Air780EP，Lua 堆 ~300KB）
 
 所有常驻缓冲都必须有硬上限——堆只有 300KB，`R:STAT` 实测已用 ~110KB，余量 ~90KB。
@@ -616,7 +682,7 @@ sniff 的通讯参数**用户不配**（sniff 没有持久槽，是刻意的设�
 | `pendingReqs` 待配对请求 | `bus/mon.lua` | 每 fc ≤ `MAX_PENDING_PER_FC`(4) | 删最早 |
 | `lastReqs` 最近请求索引 | `bus/mon.lua` | `MAX_LAST_REQ`(64) | **整表作废** |
 | 推断展开的 qty | `util.lua` `clamp_qty` | `MAX_INFER_QTY`(256) | 截到上限 |
-| 推断表行数 | `bus/mon.lua` `M.infer` | `MAX_INFER_ROWS`(**128**，2026-10-28 从 512 降) | 不再新增行 |
+| **推断表行数（常驻累加器）** | `bus/mon.lua` `M.infer` / `acc_row` | `MAX_INFER_ROWS`(**128**，2026-10-28 从 512 降；**最多只累计 128 个参数地址**） | 不再新增行（`stat.infer_clamped` 计数） |
 | **dtype 判型历史** | `bus/mon.lua` `dtypeHistory` | **128 个 alias**（2026-10-28 新增上限） | 淘汰最旧的 alias |
 | 拓扑 properties 条数 | `iot.lua` `node_json` | 64（2026-10-27 从 128 降） | 不再拼进 JSON |
 
@@ -815,7 +881,7 @@ E/main Lua VM exit!! reboot in 15000ms
 
 | 根因 | 常驻/瞬时 | 修法 |
 |---|---|---|
-| **推断表** 512 行 × 9 字段 table(272B)，而且 `infer_cache` 把整份**常驻** | **~140KB 常驻**，重建瞬时 ~185KB | `MAX_INFER_ROWS` 512 → **128**（下游 `node_json` 的 `MAX_PROPS` 才 64，128 已 2 倍余量）→ 常驻 ~35KB |
+| **推断表** 512 行 × 9 字段 table(272B)，而且 `infer_cache` 把整份**常驻** | **~140KB 常驻**，重建瞬时 ~185KB | `MAX_INFER_ROWS` 512 → **128**（下游 `node_json` 的 `MAX_PROPS` 才 64，128 已 2 倍余量）→ 常驻 ~35KB。⚠️ 2026-10-28 又改成常驻累加器（每行只 8 字段 = 203B，48 行 10.8KB），见「推断表：常驻累加器 + 主动推送」 |
 | **`dtypeHistory`** 每个见过的地址一条，**从不淘汰**，`mon.stop()` 也不清 | 26~100KB（无上限） | 加 `MAX_HIST_ALIAS`=**128**（与 `dataCache` 对齐）；`mon.stop()` 补 `clear_history()` |
 | **`mbus.parse_value` 每次调用分配 2~4 个对象**（`raw` 字符串 + `b` 表 + 字交换表 + float 表），而 `pickDtype` 一次调它 **8 次** | **~1.1 万次分配/秒**（47 帧/秒 × 240 次/帧） | 改成 `data:byte(p+1, p+8)` 直接取字节、**不建中间表** → **零分配** |
 

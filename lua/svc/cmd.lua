@@ -68,6 +68,22 @@ end
 
 local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
 
+-- 12-fix-6: 主动把推断表推给前端。设备每发现一个新地址就推一次整张表,
+--   前端不用手动点刷新(用户 2026-10-28 要求)。
+--   ⚠️ 键名用 INFER_PUSH 而不是 INFER: 前端的"单未决指令"靠键名配对,
+--   跟 R:INFER 的应答撞名的话, 推送会被当成那条指令的应答吞掉。
+--   由 iot 的 1 秒巡检调用(不在 sniff 热路径上 —— 一次推送要拼几 KB JSON,
+--   放在收帧协程里就是新的碎片化来源)。
+function M.push_infer()
+    if not mon then return false end
+    local ok, inf = pcall(mon.infer, true)
+    if not ok or type(inf) ~= "table" then return false end
+    -- 名字/标识符跟 R:INFER 走同一套映射(前端两处显示一致)
+    if iot and iot.attach_names then inf = iot.attach_names(inf) end
+    M.reply("RET:INFER_PUSH=" .. jencode(inf))
+    return true
+end
+
 -- A 类：上位软件业务必需的 16 条指令
 local function reg_cmds()
     -- R:INFO: 前端打开串口读设备信息用的第一条指令
@@ -342,6 +358,18 @@ local function reg_cmds()
         M.reply("RET:INFER=" .. jencode(iot.attach_names(mon.infer(true))))
     end)
 
+    -- 12-fix-6: W:INFERWATCH=1|0 —— 前端 sniff 面板打开/关闭。
+    --   打开: 设备每发现一个新地址就把整张推断表推过来(RET:INFER_PUSH=),
+    --   前端不用手动点刷新。关闭: 停推(没人看, 推了纯占串口)。
+    --   ⚠️ 这是【设备主动】发的, 不受"单未决指令"约束: 前端正在等某条
+    --   指令的应答时来一条推送, 前端必须能把它跟那条应答分开
+    --   (见 frontend/renderer/app.js 的 onSerialLine)。
+    M.reg("W:INFERWATCH", function(arg)
+        local on = (arg == "1" or arg == "on" or arg == "true")
+        mon.set_infer_watch(on)
+        M.reply("RET:INFERWATCH=" .. tostring(on))
+    end)
+
     -- R:AUTODETECT: 非阻塞, 由前端轮询; arg 精确等于 "restart" 时强制作废
     --   上一轮结果并重扫 (前端「重新识别通讯参数」按钮用)。⚠️ 不是判空:
     --   M.handle 对裸指令也把整行当参数传进来 (pcall(fn, line), 裸发时
@@ -452,6 +480,11 @@ end
 
 function M.init()
     reg_cmds()
+    -- 12-fix-6: iot 的巡检任务通过这个全局钩子触发推断表推送。
+    --   为什么用全局而不是 require: cmd 依赖 iot(iot.status 等), iot 再
+    --   require cmd 就是循环依赖(命令模块会拿到半初始化的 iot 表)。
+    --   项目里已有同类全局钩子(_G.vcom_handle / _G.mon_detect_result)。
+    _G.cmd_push_infer = M.push_infer
     -- 发布版: 调试组 2 条 (W:GC/W:RAWTEST) 整组不注册;
     -- R:FRAMES/R:INFER/R:AUTODETECT 已转正在 reg_cmds, 发布版仍可用
     if _G.DEBUG then reg_debug_cmds() end
