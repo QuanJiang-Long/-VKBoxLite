@@ -19,6 +19,18 @@ local function ring_add(s)
     ring[ringIdx] = s
 end
 
+-- ⚠️ 12-fix-4 (2026-10-28): ring 改成"调试期才写"。
+--   现场实测(多寄存器设备, 279 秒): push_data 被调 22375 次 = 80 次/秒,
+--   每次都 string.format 一条 "data reg123=456" 再丢进 ring; push_frame
+--   另有 ~43 次/秒。也就是每秒白造 ~120 个字符串。
+--   而 ring 只留 RING_SIZE(24) 条、且【全项目没有任何一处读它】——
+--   白造白扔, 而这正是热路径上最大的一笔碎片来源。
+--   现在: 发布版(非 DEBUG)不写 ring; 调试期要看用新增的 M.get_ring()。
+--
+--   ⚠️ 拼接必须写在 if 里面 —— Lua 的实参是先求值再调用的,
+--      写成 ring_add_dbg(string.format(...)) 的话 format 照样每次都跑。
+local RING_ON = (_G.DEBUG and true) or false
+
 local function fire(cbs, ...)
     for _, cb in ipairs(cbs) do
         pcall(cb, ...)
@@ -41,7 +53,9 @@ function M.push_data(addr, alias, hex, value, ts, dtype, conf, status)
         dtype = dtype, conf = conf, status = status,
     }
     stat.pushed = stat.pushed + 1
-    ring_add(string.format("data %s=%s", alias, tostring(value)))
+    -- ⚠️ 12-fix-4: 原来这里每次都 string.format 一条再丢进 ring(80 次/秒),
+    --   而 ring 没有任何读者。现在调试期才拼(见 RING_ON 上面的说明)。
+    if RING_ON then ring_add(string.format("data %s=%s", alias, tostring(value))) end
     fire(updateCbs, alias, value, ts, addr)
     return true
 end
@@ -53,7 +67,9 @@ function M.push_frame(f)
     -- 落盘 schema 与原工程保持一致: {ts, kind, slave, fc, mkind, addr, qty, hex}
     -- (mkind = 原工程的 kind 字段, 用于区分 req/rsp/echo/err)
     local tag = f.kind == "req" and "REQ" or (f.kind == "rsp" and "RSP" or (f.kind == "err" and "ERR" or "FRM"))
-    ring_add(string.format("%s slave=%s fc=%s addr=%s", tag, tostring(f.slave), tostring(f.fc), tostring(f.addr or 0)))
+    if RING_ON then
+        ring_add(string.format("%s slave=%s fc=%s addr=%s", tag, tostring(f.slave), tostring(f.fc), tostring(f.addr or 0)))
+    end
 end
 
 function M.push_raw_rx(hex)
@@ -64,6 +80,18 @@ end
 
 function M.get_all_latest()
     return dataCache
+end
+
+-- 12-fix-4: ring 的读者(原来没有)。ring 只在调试期写(见 RING_ON),
+--   所以发布版这里返回空表。
+function M.get_ring()
+    local out = {}
+    local n = math.min(ringIdx, cfg.RING_SIZE)
+    for i = 1, n do
+        local idx = ((ringIdx - i) % cfg.RING_SIZE) + 1
+        out[#out + 1] = ring[idx]
+    end
+    return out
 end
 
 function M.get_frames()

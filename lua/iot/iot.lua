@@ -29,6 +29,7 @@ else
 end
 
 local mqttcfg = require "iot/mqttcfg"
+local pubsched = require "iot/pubsched"   -- 12-fix-4: 统一上报调度(节奏都在那管)
 local collector = require "data/collector"
 local cfgstore = require "cfg"
 local pullcfg = require "iot/pullcfg"
@@ -125,9 +126,15 @@ local function reset_state()
         -- 否则重连后会拿上一个生命周期的残留算占比
         meta_sig = nil, topo_sig = nil, res_at = 0,
         -- 12-fix-2: 上次【重建拓扑】的时刻 (os.clock, 秒级单调)。拓扑重建
-        --   按 cfg.TOPO_REBUILD_MS(5s) 节流, 降 build_nodes 的分配速率。
-        --   置 -1e9 = 还没重建过, 第一轮立刻重建(不等 5 秒)。
+        --   按 cfg.TOPO_REBUILD_MS 节流, 降 build_nodes 的分配速率。
+        --   置 -1e9 = 还没重建过, 第一轮立刻重建(不等闸门)。
+        --   ⚠️ 12-fix-4: 这个字段现在只留作观测(真正的闸门在 pubsched),
+        --     TOPO_REBUILD_MS 从 5s 改成 30s。
         topo_at = -1e9,
+        -- 12-fix-4: 上次打【结构普查】的时刻 (os.clock, 秒)。每 30 秒一行,
+        --   把各常驻结构的条目数 + 堆水位一次列出来 —— 现场一崩, 最后那行
+        --   census 就直接指出是哪个数字在涨(不用再猜)。
+        census_at = -1e9,
         busy_s = 0, span_s = 0,
         -- hello_at 是【连接生命周期内最后一次 hello 成功发送】的时间(OS time),
         -- 不是上电时间 —— task_main 靠它算 pollpull 档 30min 重发。置 0 表示
@@ -328,12 +335,16 @@ local function publish()
     if #items == 0 then return false end
     local base = S.pub or ""
     if base == "" then return false end
-    local manual = mqttcfg.load().manual_on
+    -- ⚠️ 12-fix-4: mqttcfg.load() 原来在下面那个循环里(每从机一次),
+    --   而它每次都要 fskv.get + json.decode 整份 MQTT 配置。提到循环外。
+    local mc = mqttcfg.load()
+    local manual = mc.manual_on
+    local qos = mc.qos
     local any = false
     for _, it in ipairs(items) do
         local topic = manual and base or (base .. "-" .. it.idx)
         local ok, err = pcall(function()
-            S.client:publish(topic, it.body, mqttcfg.load().qos)
+            S.client:publish(topic, it.body, qos)
         end)
         if ok then
             S.published = S.published + 1
@@ -345,10 +356,36 @@ local function publish()
         end
     end
     if any then
+        -- 12-fix-4: 脏标记交给 pubsched 统一管(这里只留个镜像给 R:STAT 看)
+        pubsched.sent("prop")
         S.dirty = false
         S.last_pub = os.time()
     end
     return any
+end
+
+-- ===== 结构普查 (12-fix-4, 2026-10-28) =====
+--
+-- 为什么要有: 2026-10-28 现场崩了两次, 光看 mem 水位看不出"是哪个结构在涨"
+-- (used 一直在 260~277KB 之间晃, 活对象和垃圾混在一起分不清)。
+-- 这一行把关键结构的条目数 + 堆水位一次列出来, 现场一崩, 最后那行
+-- census 就直接指出是谁在长。
+--
+-- 成本: 一次 string.format + 一次 collectgarbage("count"), 30 秒一次。
+--   ⚠️ 绝不能用 collectgarbage("collect") —— 那是完整回收, 有毫秒级暂停,
+--      放热路径上有让 UART 环形缓冲溢出的风险。这里只【读】count。
+local function census()
+    local cs = collector.stats()
+    local ms = mon.status()
+    local ps = pubsched.status()
+    log.info("iot", string.format(
+        "census lua=%.1fKB points=%d frames=%d aliases=%d rows=%d pub=%d/%d meta=%d topo=%d blk=%d",
+        collectgarbage("count") / 1024,
+        cs.points or 0, cs.frames or 0,
+        ms.hist_aliases or 0, ms.infer_rows or 0,
+        S.published or 0, S.failed or 0,
+        (ps.meta and ps.meta.sent) or 0, (ps.topo and ps.topo.sent) or 0,
+        ((ps.prop and ps.prop.blocked) or 0) + ((ps.meta and ps.meta.blocked) or 0)))
 end
 
 -- ===== U2 拓扑上报 / U3 网关资源 / U7 指令回执 =====
@@ -646,12 +683,20 @@ end
 
 -- 元数据指纹: 只挑会变的字段(imei/iccid/csq/主机名), 版本和型号是常量不必算。
 -- 拿这几个字段拼串当指纹, 变了就重发, 和 topo_sig 同一套路
+-- ⚠️ 12-fix-4 (2026-10-28): csq 从指纹里【摘掉】了(用户拍板)。
+--   指纹的语义是"要不要重建平台模型"的身份标识 —— imei/iccid/host/位置
+--   这些几乎不变的东西。csq 是【会变的数值】, 混进去的后果是:
+--     信号强度一变 → 指纹变 → 重发元数据帧 → 平台按契约重建模型
+--     → 回推 config/get → 我们再发拓扑 …… 每秒一轮, 白烧流量,
+--     还把平台拖进"重建模型"的循环里。
+--   现场实测(2026-10-28): 元数据帧从"偶尔"变成每 10~20 秒一帧, 每次
+--   都是 csq 变了 29→27→30→28→26 在牵着走。
+--   csq 仍然在 payload 里(只是不再参与指纹), 靠 interval_s 定期带上去。
 local function meta_sig()
-    local csq = MqttUtil.mcall(mobile, "csq")
     local lbs_lat = S.lbs and S.lbs.lat or 0
     local lbs_lng = S.lbs and S.lbs.lng or 0
-    return string.format("%s|%s|%s|%s|%.6f|%.6f", MqttUtil.imei(mobile),
-        tostring(MqttUtil.mcall(mobile, "iccid") or ""), tostring(type(csq) == "number" and csq or ""),
+    return string.format("%s|%s|%s|%.6f|%.6f", MqttUtil.imei(mobile),
+        tostring(MqttUtil.mcall(mobile, "iccid") or ""),
         tostring(mqttcfg.load().host or ""), lbs_lat, lbs_lng)
 end
 
@@ -895,6 +940,9 @@ local function on_mqtt(cli, event, data, payload)
         S.connected = true
         S.backoff = 1
         S.reject_reason = nil
+        -- 12-fix-4: 新连接要重新报到 —— pubsched 的闸门状态也得重置,
+        --   否则重连后第一次上报还要再等 30 秒(闸门是按上次发送时间算的)。
+        pubsched.reset()
         -- 每个新连接都要重新报到。reset_state 只在 start() 时跑, 不断线重连
         -- 不会清 hello_at —— 不清的话重连后 task_main 的"连接后补发"分支
         -- (判 hello_at == 0)永远不成立, 平台那头看到的是设备中途消失再回来,
@@ -1337,6 +1385,7 @@ local function handle_downlink(topic, payload)
     local cmd = t.cmd and t.cmd:upper() or nil
     if cmd == "REPORT" or cmd == "READALL" then
         S.dirty = true
+        pubsched.changed("prop")   -- 12-fix-4: 平台点名要数据 → 置脏(节奏仍走闸门)
         return
     end
     -- 回执一律走 func_reply(returns 的第一个值就是 per-item 结果)。
@@ -1710,14 +1759,17 @@ local function task_main()
             -- idle 模式由 publish() 内部 get_mode() 短路 (跟 should_pub_platform 一致),
             -- collector.dataCache 残留历史数据不应当上送平台
             -- U1/U2/U3/U5/U6/U7 受 pub_platform gate 管: idle/manual 全不发
-            local due = false
-            if c.interval_s > 0 then
-                due = (os.time() - S.last_pub) >= c.interval_s
-            else
-                due = S.dirty
-            end
-            if S.dirty then due = true end
-            if due then publish() end
+            -- ⚠️ 12-fix-4 (2026-10-28): 节奏统一交给 pubsched。
+            --   原来这里是:
+            --     local due = false
+            --     if c.interval_s > 0 then due = (os.time() - S.last_pub) >= c.interval_s
+            --     else due = S.dirty end
+            --     if S.dirty then due = true end      ← 这行把 interval_s 架空了
+            --   S.dirty 由 collector 每存一个数据点就置位, sniff 档下总线
+            --   一直在跑 → 永远脏 → 每秒发一次全量(现场实测 0.8 次/秒)。
+            --   现在: 脏只表示"有东西要发", 还要过 30 秒闸门才真发。
+            --   interval_s 的兜底重发由 pubsched.due(ch, fallback_s) 负责。
+            if pubsched.due("prop", c.interval_s) then publish() end
             -- 把这一轮的干活耗时记进 busy, 区间长度记进 span。span 与 busy
             -- 必须同一轮清零, 否则占比会越算越小
             S.busy_s = (S.busy_s or 0) + (os.clock() - t0)
@@ -1732,12 +1784,17 @@ local function task_main()
             --   idle 模式不发: 切回 idle 设备已退场, 继续发会污染平台档案
             if pub_meta then
                 local msig = meta_sig()
-                local due = (os.time() - (S.meta_at or 0)) >= c.interval_s
-                if (msig and msig ~= S.meta_sig) or due then
+                -- ⚠️ 12-fix-4: 指纹变了只是"有东西要发", 还要过 30 秒闸门。
+                --   原来 (msig ~= S.meta_sig) 直接就发了 —— 而 csq 摘掉之前
+                --   指纹里含 csq, 信号强度一变就发一帧(现场实测每 10~20 秒
+                --   一帧, 每次都是 csq 29→27→30→28→26 牵着走)。
+                if msig and msig ~= S.meta_sig then pubsched.changed("meta") end
+                if pubsched.due("meta", c.interval_s) then
                     local ok, e = send_meta()
                     if ok then
                         S.meta_sig = msig
                         S.meta_at = os.time()
+                        pubsched.sent("meta")
                         log.info("iot", "gw meta posted: " .. (msig or "due " .. c.interval_s))
                     else
                         log.info("iot", "gw meta skip: " .. tostring(e))
@@ -1770,21 +1827,21 @@ local function task_main()
             --   只能【少分配】, 也就是下面把 build_nodes 从每轮两次降到一次。
             --   pcall 留着当普通 error 的兜底。
             --
-            -- ⚠️ 12-fix-2 (2026-10-27): 拓扑【重建】节流 cfg.TOPO_REBUILD_MS
-            --   (5s)。build_nodes 每秒调一次, 每轮分配 ~14KB (infer 重建整张
-            --   推断表 + node_json 拼 JSON + 两次 concat), 满负荷时(主站把
-            --   dataCache 轮询到 128 个地址)实测峰值 236KB, 越过了 ~231KB 的
-            --   崩溃线。
-            --   拓扑只在"推断出的寄存器集变了"时才需要重发, 晚 5 秒完全无影响,
-            --   所以节流的是【重建】本身, 不是主循环 —— 心跳/上行/平台推送
-            --   照旧 1 秒一轮。
-            --   ⚠️ 节流期内 sig 保持 nil → 本轮不比对、不重发。这是故意的:
-            --     拓扑变化最多晚 5 秒被认出来。
+            -- ⚠️ 12-fix-2 (2026-10-27): 拓扑【重建】节流 cfg.TOPO_REBUILD_MS。
+            --   build_nodes 每秒调一次, 每轮分配 ~14KB (infer 重建整张
+            --   推断表 + node_json 拼 JSON + 两次 concat)。
+            -- ⚠️ 12-fix-4 (2026-10-28): 拓扑的【重建】也并进统一闸门(30 秒)。
+            --   原来重建节流 5 秒, 但 sniff 档寄存器集一直在变 → 每 5 秒就重建
+            --   一次(~14KB) + 重发一次(平台收到 info/post 就重建模型 →
+            --   回推 config/get → 我们再发拓扑)。现场实测拓扑 posted 出现在
+            --   10:46:34 / 10:46:50 / 10:46:55 / 10:47:00 —— 平均 20 秒一帧,
+            --   每次都拖着平台重建一遍模型。
+            --   拓扑只是"建档"用的, 晚 30 秒被认出来完全无影响。
+            --
+            --   用 ready() 而不是 due(): 拓扑的"内容变了"要靠重建才能知道,
+            --   而重建本身很贵 —— 所以按时间闸门来, 而不是每轮都重建。
             if pub_topo and not pub_blocked() then
-                -- ⚠️ os.clock() 是【秒】级单调时钟(项目口径), 配置里是毫秒,
-                --   这里必须除 1000 —— 直接比 5000 就变成 83 分钟才重建一次。
-                local due = (os.clock() - (S.topo_at or 0)) >= (cfg.TOPO_REBUILD_MS / 1000)
-                if due then
+                if pubsched.ready("topo") then
                     local ok, s, n = pcall(topo_sig)
                     if ok then
                         sig, nodes_json = s, n
@@ -1801,6 +1858,7 @@ local function task_main()
                 local pok, sent, e = pcall(send_topo, nodes_json)
                 if pok and sent then
                     S.topo_sig = sig
+                    pubsched.sent("topo")
                     -- ⚠️ 别再拼整串 sig (1.2KB 又一份拷贝)。只打长度 + 头 100 字节
                     log.info("iot", "topology posted: len=" .. #sig .. " head=" .. sig:sub(1, 100))
                 else
@@ -1808,6 +1866,12 @@ local function task_main()
                 end
             end
             end  -- if pub_platform end
+            -- 12-fix-4: 每 30 秒一行结构普查(见 census() 上面的说明)
+            if (os.clock() - (S.census_at or -1e9)) >= 30 then
+                S.census_at = os.clock()
+                local cok, cerr = pcall(census)
+                if not cok then log.warn("iot", "census failed: " .. tostring(cerr)) end
+            end
             if sys then sys.wait(1000) end
             -- LBS 定位: 30 分钟一次. 避开免费版频率限制(官方 4h-2min 不一致,
             -- 30min 足够稳). lbs_request 失败保留旧 S.lbs (或 nil), 指纹不变
@@ -1860,7 +1924,13 @@ end
 
 function M.init()
     collector.on_update(function()
+        -- 12-fix-4: 只置脏, 不直接决定发不发。
+        --   原来这里 S.dirty = true, 而 task_main 里 `if S.dirty then due = true end`
+        --   直接把它当成"立刻发" —— sniff 档下总线一有流量就永远脏 →
+        --   每秒发一次全量数据 → 堆被压碎(现场 2026-10-28 崩溃)。
+        --   现在脏归 pubsched, 节奏由 30 秒闸门统一管。
         S.dirty = true
+        pubsched.changed("prop")
     end)
     return true
 end
@@ -1944,6 +2014,10 @@ function M.status()
         subs = S.subs,
         backoff = S.backoff,
         dirty = S.dirty,
+        -- 12-fix-4: 上报调度状态 —— 每个通道: 脏没脏 / 发了几次 /
+        --   被闸门挡了多少次 / 距上次发送多少秒。前端和现场排查都靠它
+        --   判断"上报是不是被 30 秒闸门挡住了"。
+        pub = pubsched.status(),
         last_pub = S.last_pub,
         last_err = S.last_err,
         reject_reason = S.reject_reason,

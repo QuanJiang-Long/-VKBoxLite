@@ -124,24 +124,46 @@ local function kv_flush()
     if fskv and fskv.save then pcall(fskv.save) end
 end
 
+-- ⚠️ 12-fix-4 (2026-10-28): load() 加缓存。
+--   原来每次 load() 都要 fskv.get 整份 JSON + json.decode 整张表, 而它
+--   在项目里被调得极勤: task_main 每秒一次(取 interval_s)、meta_sig 每秒
+--   一次(取 host)、publish() 每从机一次(取 qos)……
+--   MQTT 这份配置一天可能只改一次, 每次都要反序列化纯属浪费。
+--
+--   ⚠️ 缓存的是【归一化后的结果表】, 调用方只读不改 ——
+--      已核过全部 12 处 mqttcfg.load() 调用点(全在 iot.lua), 都是读字段,
+--      没有一处改它。⚠️ save() 落盘后必须让缓存失效。
+local load_cache = nil
+local load_cache_src = "default"
+
 function M.load()
+    if load_cache then return load_cache, load_cache_src end
     -- early-exit 都过 normalize: 一是给调用方干净拷贝(否则拿到 M.default
     -- 本体, 谁改 auto 子表就污染默认值), 二是保证新键在"从没存过"时也存在
     local d = M.normalize({})
-    if not fskv or not json then return d, "default" end
+    if not fskv or not json then
+        load_cache, load_cache_src = d, "default"
+        return load_cache, load_cache_src
+    end
     local ok, s = pcall(fskv.get, K_CFG)
-    if not ok or type(s) ~= "string" or s == "" then return d, "default" end
+    if not ok or type(s) ~= "string" or s == "" then
+        load_cache, load_cache_src = d, "default"
+        return load_cache, load_cache_src
+    end
     local okd, t = pcall(json.decode, s)
     if not okd or type(t) ~= "table" then
         log.warn("mqtt_cfg", "decode fail, use default")
-        return d, "default"
+        load_cache, load_cache_src = d, "default"
+        return load_cache, load_cache_src
     end
     local n, err = M.normalize(t)
     if not n then
         log.warn("mqtt_cfg", "normalize fail:", tostring(err))
-        return d, "default"
+        load_cache, load_cache_src = d, "default"
+        return load_cache, load_cache_src
     end
-    return n, "fskv"
+    load_cache, load_cache_src = n, "fskv"
+    return load_cache, load_cache_src
 end
 
 function M.save(c)
@@ -171,6 +193,8 @@ function M.save(c)
     if not fskv then return false, "no fskv" end
     fskv.set(K_CFG, s)
     kv_flush()
+    load_cache = nil      -- 12-fix-4: 落盘了, 缓存必须失效
+    load_cache_src = "default"
     return true
 end
 

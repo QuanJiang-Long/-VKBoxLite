@@ -52,6 +52,14 @@ M.MQTT_INTERVAL_S = 120  -- 默认 2min, U2-m (兜底) / U3 res / U4 prop 共享
 M.MQTT_QOS = 1
 -- 18-fix: 决定必须先烧 SN 再连 MQTT, 删除 MQTT_ALLOW_NO_SN 配置项
 
+-- 12-fix-4 (2026-10-28): 对外上报的最小发布间隔(毫秒)。用户拍板 30 秒。
+--   为什么要有: 原来三类对外上报(U2 元数据/U2 拓扑/U4 数据)各写各的
+--   due 判定, 其中两个"内容变了就发"的判据在 sniff 档下会被总线流量顶满
+--   (U4 靠 S.dirty, U2 靠指纹里的 csq) → 每秒发一次 → 300KB 的堆被
+--   碎片化 → 连 table.concat 拼 600 字节都失败(现场 2026-10-28 崩溃)。
+--   详见 lua/README.md「统一上报调度」与 lua/iot/pubsched.lua。
+M.PUB_MIN_MS = 30000
+
 -- 平台配置拉取(W:PULLCFG)
 M.PLATFORM_VENDOR = "VKBoxLite"
 M.PLATFORM_MODEL = "VKBox-Lite"
@@ -163,13 +171,13 @@ M.DETECT_WIN_MS = 800
 -- 12-fix-2 (2026-10-27): 5000 → 2000。这段等待里什么都没干, 用户纯干等;
 -- 2 秒足够 UART 稳定。
 M.DETECT_SETTLE_MS = 2000
--- 拓扑重建节流 (12-fix-2, 2026-10-27): build_nodes 每秒一次, 每轮 ~14KB
--- 临时分配 (infer 重建整张推断表 + node_json 拼 JSON + 两次 concat)。
--- 满负荷时 (主站轮询到 128 个不同地址, dataCache 填满) 实测峰值 236KB,
--- 越过了之前估的 ~231KB 崩溃线。
--- 拓扑只在"推断出的寄存器集变了"时才需要重发, 晚 5 秒完全无影响 ——
--- 所以给"重建"本身加 5 秒闸门, 主循环(心跳/上行/平台推送)照旧 1 秒。
-M.TOPO_REBUILD_MS = 5000
+-- 拓扑重建 + 重发的节流 (12-fix-4, 2026-10-28 从 5s 改成 30s):
+--   原来 5 秒, 但 sniff 档寄存器集一直在变 → 每 5 秒就重建一次(~14KB)
+--   + 重发一次(平台收到 info/post 就重建模型 → 回推配置 → 我们再发),
+--   这条 churn 是把 300KB 堆压碎的主因之一。
+--   拓扑晚 30 秒被认出来完全无影响(它只是建档用的), 平台侧看到的
+--   模型也只晚 30 秒。现在与 PUB_MIN_MS 对齐, 由 pubsched 统一管。
+M.TOPO_REBUILD_MS = 30000
 -- 判定"这个参数对了"所需的最小 CRC 合法帧数。取 2 是因为单帧有 ~1/65536
 -- 概率碰巧 CRC 正确, 两帧同时碰巧的概率可以忽略
 M.DETECT_HITS = 2

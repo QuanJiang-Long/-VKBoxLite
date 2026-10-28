@@ -811,6 +811,13 @@ function M.status()
     -- 12-fix-2: 累计收到的字节数(与 CRC 无关)。用来判断"这个 baud 上有
     -- 流量、只是校验位不对" —— 将来把 21 个候选压到 7 个的关键判据。
     st.rx_bytes = stat.rx_bytes
+    -- 12-fix-4: 两个"会随时间/地址数增长"的常驻结构条目数。给 iot 的
+    --   结构普查(census)用 —— 现场一崩, 最后那行 census 就直接指出
+    --   是哪个数字在涨, 不用再猜。
+    --   hist_aliases = dtypeHistory 里的 alias 数(上限 MAX_HIST_ALIAS=128)
+    --   infer_rows   = 推断表行数(上限 MAX_INFER_ROWS=128)
+    st.hist_aliases = #histOrder
+    st.infer_rows = (infer_cache and infer_cache.regs) and #infer_cache.regs or 0
     return st
 end
 
