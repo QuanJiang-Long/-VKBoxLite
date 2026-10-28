@@ -30,6 +30,7 @@ local LIMITS = {
     decode_frame = 500,     -- 解一帧(新建表; 现场已不走这条, poll 走 parse_frame)
     decode_frame_reuse = 230,-- 解一帧(复用表, 现场真正走的路; 改前 450×2)
     push_data = 20,         -- 存一个点 (改前 192)
+    alias_of = 1,           -- 取规范 alias(12-fix-7: 缓存命中 → 0 字节)
 }
 
 local N = 50
@@ -101,6 +102,15 @@ end), LIMITS.decode_frame_reuse)
 check("push_data", measure("push_data", function()
     collector.push_data(1, "reg1", "aabb", 123, os.time(), "uint16", 90, "ok")
 end), LIMITS.push_data)
+
+-- ⚠️ 12-fix-7: alias 串走缓存。实测结论: 短串拼接【本来就不分配堆】
+--   (Lua 的 luaV_concat 对 ≤256 字节的结果走栈缓冲), 所以这一项的
+--   churn 改前改后都是 0 —— 缓存省的是 intern 查表(CPU 级)。
+--   这里钉住"命中缓存时 0 字节", 免得以后有人把它改回现拼还自以为在省内存。
+collector.alias_of(12345)      -- 先把 12345 建进缓存
+check("alias_of", measure("alias_of(命中缓存)", function()
+    collector.alias_of(12345)
+end), LIMITS.alias_of)
 
 -- decode_frame 的内部拆解: 想知道剩下的字节花在哪
 local function hexold(s)

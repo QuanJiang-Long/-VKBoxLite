@@ -352,7 +352,7 @@ local CANDWS = { false, true }
 -- 默认 16bit 拆 + 候选 32bit 合并, 选 conf 最高的 dtype
 -- 16bit 永远 +5 加成 (modbus 标准优先), 32bit 合并要显著高才覆盖
 local function pickDtype(data, off, remaining, addr, slave, f)
-    local alias = "reg" .. (addr + off)  -- 不带 s<slave>_ 前缀
+    local alias = collector.alias_of(addr + off)  -- 不带 s<slave>_ 前缀(12-fix-7: 缓存串)
     -- 16bit 候选 (永远跑, modbus 标准)
     local bestD, bestV, bestC = "uint16", 0, 0
     for _, d in ipairs(CAND16) do
@@ -400,8 +400,8 @@ local function push_rsp_value(slave, addr, f)
         local remaining = total - i
         if lastMergedDtype and remaining >= 2 then
             -- v5: 强制 32bit 合并, dtype = lastMergedDtype (跟上一段一致)
-            local alias0 = "reg" .. (addr + i)
-            local alias1 = "reg" .. (addr + i + 1)
+            local alias0 = collector.alias_of(addr + i)
+            local alias1 = collector.alias_of(addr + i + 1)
             local v = mbus.parse_value(f.data, i, lastMergedDtype, false)
             local lo16 = 0
             if v ~= nil and lastMergedDtype ~= "float32" then
@@ -421,7 +421,7 @@ local function push_rsp_value(slave, addr, f)
             i = i + 2
         else
             local dtype, v, conf, merged32 = pickDtype(f.data, i, remaining, addr, slave, f)
-            local alias0 = "reg" .. (addr + i)
+            local alias0 = collector.alias_of(addr + i)
             local status
             if conf >= 80 then status = "ok"
             elseif conf >= 60 then status = "review"
@@ -431,7 +431,7 @@ local function push_rsp_value(slave, addr, f)
             pushHistory(alias0, dtype)
             if merged32 then
                 -- 32bit 合并: 2 个 16bit alias 都标同 dtype, 第 2 个 value = 低 16bit
-                local alias1 = "reg" .. (addr + i + 1)
+                local alias1 = collector.alias_of(addr + i + 1)
                 local lo16 = 0
                 if v ~= nil then
                     -- 32bit value 拆 2 个 16bit: 高 16bit 跟低 16bit

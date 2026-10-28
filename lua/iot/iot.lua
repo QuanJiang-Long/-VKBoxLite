@@ -35,6 +35,19 @@ local cfgstore = require "cfg"
 local pullcfg = require "iot/pullcfg"
 local mon = require "bus/mon"
 local MqttUtil = require "util/mqtt_util"
+
+-- ⚠️ 12-fix-7 (2026-10-28): U4 降级分包的每包点数。
+--   整包(77 个点 ≈ 6KB)拼不出来时(碎片化), 按这个数拆成 ~2KB 的小包,
+--   同一个 topic 分几条发。2KB 在碎片池里比 6KB 好找得多。
+local U4_CHUNK_PTS = 25
+
+-- ⚠️ 12-fix-7: 大块分配前的水位线。超过它就先回收一次再拼大字符串。
+--   现场实测: 水位 222KB 时 6KB(甚至 1.2KB)的连续块就申请不到了;
+--   12-fix-5 那条保险丝的阈值是 240KB —— 比失效点还高, 等于没设防。
+--   这里定 200KB: 低于现场观察到的 222KB 失效水位, 又高于 idle 基线(~190KB),
+--   所以正常 sniff 基本不触发, 真要拼大包时一定触发。
+local BIG_ALLOC_KB = 200
+
 -- 轮询引擎：拉取成功后自动落盘要能就地重启/热更轮询任务。
 -- 惰性 require（用时才取）而不是顶层，避免 main.lua 的初始化顺序
 -- 把 uart 还没 setup 的 poll 提前拖起来
@@ -96,12 +109,31 @@ local M = {}
 
 local S = {}
 
+-- 大块分配前按水位回收一次。
+-- ⚠️ 完整回收有毫秒级停顿, 所以【只在超水位时做】, 而且放在 iot 的
+--   巡检/发布路径上(不在 UART 收帧协程里 —— 那会让环形缓冲溢出丢帧)。
+--   现场帧率 52 帧/秒 ≈ 每 19ms 一帧, 几毫秒的停顿是安全的。
+local function reclaim_if_high()
+    local kb = collectgarbage("count")
+    if kb > BIG_ALLOC_KB then
+        collectgarbage("collect")
+        S.reclaim_n = (S.reclaim_n or 0) + 1
+        log.warn("iot", string.format("reclaim before big alloc: lua=%.1fKB -> collected", kb))
+        return true
+    end
+    return false
+end
+
 
 local function reset_state()
     S = {
         want_run = false, connected = false, subscribed = false,
         client = nil, dirty = false, backoff = 1,
         published = 0, failed = 0, replied = 0, kick_flag = false,
+        -- 12-fix-7: build_fail = 大包拼不出来(U4/拓扑)的次数。
+        --   现场那次 U4 停发, 而 pub=60/0 完全看不出来(失败走 pcall 跳过,
+        --   不计 failed) —— 这个数进 census, 不为 0 就是"上报已经瘸了"。
+        build_fail = 0, reclaim_n = 0,
         recv_pending = nil, pub = nil, sub = nil, subs = nil, device_id = nil,
         last_pub = 0, last_err = nil, client_id = nil, user = nil,
         reject_reason = nil,
@@ -258,6 +290,28 @@ local function net_registered(csq)
     return not (type(csq) == "number" and csq == 0)
 end
 
+-- ⚠️ 12-fix-7 (2026-10-28): 把一个从机的点表切成若干块(降级分包用)。
+--   切法: 每块 chunk 个点, 块内保持原顺序(平台按 id 覆盖, 顺序不影响)。
+--   ⚠️ 只在整包分配失败时用 —— 正常路径一个字节都不变。
+local function split_points(pts, chunk)
+    local out = {}
+    local n = #pts
+    if n == 0 then return out end
+    chunk = chunk or U4_CHUNK_PTS
+    if chunk < 1 then chunk = 1 end
+    local i = 1
+    while i <= n do
+        local last = math.min(i + chunk - 1, n)
+        local part = {}
+        for j = i, last do part[#part + 1] = pts[j] end
+        out[#out + 1] = part
+        i = last + 1
+    end
+    return out
+end
+-- 单测钩子(tests/lua/test_u4_split.lua 用; 设备逻辑不依赖)
+M._test_split_points = split_points
+
 -- U4 按子设备逐条上报: /sys/thing/node/property/post/{gwSn}-{n}。
 -- n = 子设备序号, 按从机地址升序排(同一份配置只有一个 slave, 所以轮询档
 -- 恒为 1; sniff 档才可能有多个从机)。从机地址从 key 里取:
@@ -314,10 +368,33 @@ local function build_items()
     table.sort(order)
     local items = {}
     for n, slave in ipairs(order) do
-        items[#items + 1] = {
-            idx = n, slave = slave,
-            body = "[" .. table.concat(by_slave[slave], ",") .. "]",
-        }
+        local pts = by_slave[slave]
+        -- ⚠️ 12-fix-7 (2026-10-28): 整包拼不出来时【降级分包】。
+        --   现场(41 分钟): lua=222KB/300KB, table.concat 一次要 ~6KB 连续块
+        --   -> "not enough memory for buffer allocation" -> U4 停发;
+        --   同期拓扑那条只要 1.2KB 也失败 —— 说明不是"包太大", 是池子碎了。
+        --   先试整包(正常路径一个字节不变, 平台行为不变), 失败才按块拆,
+        --   同一个 topic 分几条发。总发不出去和只发一半, 当然是后者好。
+        local ok, body = pcall(function()
+            return "[" .. table.concat(pts, ",") .. "]"
+        end)
+        if ok then
+            items[#items + 1] = { idx = n, slave = slave, body = body }
+        else
+            local chunks = 0
+            for _, part in ipairs(split_points(pts, U4_CHUNK_PTS)) do
+                local cok, cbody = pcall(function()
+                    return "[" .. table.concat(part, ",") .. "]"
+                end)
+                if cok then
+                    items[#items + 1] = { idx = n, slave = slave, body = cbody }
+                    chunks = chunks + 1
+                end
+            end
+            S.build_fail = (S.build_fail or 0) + 1
+            log.warn("iot", "u4 body alloc failed, split " .. #pts .. " points into "
+                .. chunks .. " chunks")
+        end
     end
     return items
 end
@@ -349,8 +426,12 @@ local function publish()
     if get_mode() == "idle" then return false end
     -- pcall: build_items 里拼上报 body 也是大字符串, 一次分配失败不该掀掉
     -- 整个 task (2026-10, 与 topo_sig 同一个道理)
+    -- ⚠️ 12-fix-7: 拼之前先按水位回收一次 —— 现场 41 分钟时 77 个点的
+    --   ~6KB 整包申请不到, U4 直接停发(日志里 pub=60/0 看不出来)。
+    reclaim_if_high()
     local ok, items = pcall(build_items)
     if not ok then
+        S.build_fail = (S.build_fail or 0) + 1
         log.warn("iot", "build_items failed, skip publish: " .. tostring(items))
         return false
     end
@@ -424,14 +505,20 @@ local function census()
     end
     S.census_prev = { frames = cs.frames or 0, pushed = cs.pushed or 0, clock = now }
     log.info("iot", string.format(
-        "census lua=%.1fKB points=%d frames=%d aliases=%d rows=%d pub=%d/%d meta=%d topo=%d blk=%d fps=%d push=%d gc=%d",
+        "census lua=%.1fKB points=%d frames=%d aliases=%d rows=%d pub=%d/%d meta=%d topo=%d blk=%d fps=%d push=%d gc=%d bfail=%d rc=%d",
         collectgarbage("count"),
         cs.points or 0, cs.frames or 0,
         ms.hist_aliases or 0, ms.infer_rows or 0,
         S.published or 0, S.failed or 0,
         (ps.meta and ps.meta.sent) or 0, (ps.topo and ps.topo.sent) or 0,
         ((ps.prop and ps.prop.blocked) or 0) + ((ps.meta and ps.meta.blocked) or 0),
-        fps, push, S.gc_trig or 0))
+        fps, push, S.gc_trig or 0,
+        -- 12-fix-7: 大包拼不出来(U4/拓扑)的次数。现场 41 分钟那次 U4
+        --   整整停发, 而 pub=60/0 看不出来(失败走 pcall 跳过, 不计 failed)
+        --   —— 这个数不为 0 就是"上报已经瘸了"。
+        S.build_fail or 0,
+        -- rc = 大包分配前主动回收的次数(水位 >200KB 才回收)
+        S.reclaim_n or 0))
 end
 
 -- ===== U2 拓扑上报 / U3 网关资源 / U7 指令回执 =====
@@ -631,6 +718,11 @@ end
 --   复用还有一个附带好处: 签名与实际发布内容【严格一致】, 不会再出现
 --   "发了新内容却存了旧签名" 导致下一轮又重发一遍。
 local function topo_sig()
+    -- ⚠️ 12-fix-7: 拼拓扑那几 KB 连续内存之前先按水位回收一次。
+    --   现场(41 分钟): 拓扑这条只要 1.2KB 连续块都申请不到
+    --   ("not enough memory for buffer allocation") —— 池子被 churn 切碎了。
+    --   完整回收能把碎片并回大块(要现场验证, 所以加了日志)。
+    reclaim_if_high()
     local nodes = build_nodes()
     if not nodes then return nil end
     return tostring(#nodes) .. ":" .. nodes, nodes
@@ -1928,6 +2020,9 @@ local function task_main()
                         sig, nodes_json = s, n
                         S.topo_at = os.clock()
                     else
+                        -- 12-fix-7: 计数 + 记进 census —— 现场"拓扑停了"之前
+                        -- 只有这一行 warn, 光看 census 以为一切正常
+                        S.build_fail = (S.build_fail or 0) + 1
                         log.warn("iot", "topo_sig failed, skip this round: " .. tostring(s))
                     end
                 end

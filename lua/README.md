@@ -847,8 +847,25 @@ I/user.iot census lua=126.4KB points=64 frames=10 aliases=128 rows=64 pub=213/0 
 一次 `string.format` + 一次 `collectgarbage("count")`，30 秒一次，零常态开销。
 **现场一崩，最后那行 census 就直接指出是哪个数字在涨**（不用再猜）。
 
+字段（2026-10-28，12-fix-7 之后）：
+
+| 字段 | 含义 |
+|---|---|
+| `lua=` | Lua 堆水位（KB，`collectgarbage("count")`） |
+| `points=` / `aliases=` / `rows=` | dataCache 点数 / dtype 历史别名数 / 推断表行数 |
+| `pub=` | 已发布条数 / 失败条数（**注意：拼大包失败不计入 failed**） |
+| `meta=` / `topo=` | 统一调度已发的 U2 元数据 / U2 拓扑条数 |
+| `blk=` | 被 30 秒闸门挡掉的次数 |
+| `fps=` / `push=` | 帧率 / 点率（涨了 = 分配量又上去了） |
+| `gc=` | 堆水位保险丝（240KB）触发次数 |
+| `bfail=` | **大包拼不出来的次数**（U4/拓扑，12-fix-7 新增）。**不为 0 = 上报已经瘸了**，哪怕 `pub=` 的失败数是 0 |
+| `rc=` | 大包分配前主动回收的次数（12-fix-7 新增） |
+
 ⚠️ 只**读** `count`，绝不能用 `collectgarbage("collect")`（那是完整回收，
 有毫秒级暂停，热路径上有让 UART 环形缓冲溢出的风险）。
+—— 唯一的例外是 12-fix-7 的 `reclaim_if_high()`：它**只在拼大包之前、
+且水位 > 200KB 时**回收一次，跑在 iot 的发布/巡检路径上（不在 UART 收帧
+协程里），现场 52 帧/秒 ≈ 每 19ms 一帧，几毫秒停顿是安全的。
 
 ### sniff 档 OOM 崩溃复盘（2026-10-28，12-fix-3）
 用**多寄存器**设备测 sniff 上报，跑到 130 秒时崩了：
@@ -988,6 +1005,61 @@ E/main Luat: not enough memory → Lua VM exit!! reboot in 15000ms
 
 ⚠️ 改 `require` 的加载时机要留意 LuatOS 的 `require` 是**运行时读 FS**，
 而且 `dep_graph.py` 的依赖图是静态扫的 —— 改成懒加载后要重跑依赖检查。
+
+
+### 第三次现场复盘：U4 停发（2026-10-28，12-fix-7）
+
+现场版本 12-fix-5（`e284035`）跑约 41 分钟后，**U4 主题
+`/sys/thing/node/property/post/VL20261019001-1` 停止上报**，而 sniff 业务
+没崩、没死机。日志长这样：
+
+```
+W/user.iot build_items failed, skip publish: iot.lua:302:
+    not enough memory for buffer allocation
+W/user.iot topo_sig failed, skip this round: iot.lua:525:
+    not enough memory for buffer allocation
+I/user.iot census lua=222.0KB points=77 frames=116411 aliases=77 rows=24
+    pub=60/0 meta=21 topo=18 blk=2409 fps=52 push=86 gc=1
+```
+
+#### 行号对得上代码（这是定位的关键）
+
+| 日志行号（老固件 `e284035`） | 代码 | 一次要多大连续块 |
+|---|---|---|
+| `iot.lua:302` | `"[" .. table.concat(77 个点) .. "]"` | **~6 KB** |
+| `iot.lua:525` | 拓扑 props 的 `table.concat` | **~1.2 KB** |
+
+⚠️ **关键判断：不是「包太大」，是「池子被切碎了」** —— 拓扑那条只要 1.2KB
+也失败，说明当时连 1.2KB 的连续块都切不出来（300KB 的堆只剩 78KB，
+但都是碎片）。另外 `mem=102432/203040` 是 `rtos.meminfo("sys")`
+（**系统**内存池），跟 Lua 堆无关，别被它误导；Lua 堆的水位是
+`census` 里的 `lua=`（`collectgarbage("count")`，LuatOS 返回的就是 KB）。
+
+#### 本轮改了三件事
+
+| 改动 | 位置 | 作用 |
+|---|---|---|
+| **B 降级分包** | `iot.lua` `build_items()` | 整包拼不出来时，按 25 个点（~2KB）拆开，**同一个 topic 分几条发**。正常路径一个字节不变（平台行为不变），只有整包分配失败才走分包 —— 「总发不出去」和「只发一半」当然选后者 |
+| **C 大包前先回收** | `iot.lua` `reclaim_if_high()` | 拼大字符串**之前**看水位（`collectgarbage("count") > 200KB`）先 `collectgarbage("collect")` 一次。12-fix-5 那条保险丝阈值是 240KB —— **比失效点(222KB)还高，等于没设防**；这里定 200KB。⚠️ 完整回收有毫秒级停顿，所以只放在 iot 的发布/巡检路径上（不在 UART 收帧协程里），且只在超水位时做 |
+| **D census 加计数** | `iot.lua` `census()` | 加 `bfail=`（大包拼不出来的次数）和 `rc=`（主动回收次数）。之前 `pub=60/0` **完全看不出 U4 已经不工作了** —— 失败走 pcall 跳过，不计入 `failed` |
+
+#### A（砍 churn）实测无效 —— 别再拿它当理由
+
+原计划把 `reg<addr>` 的拼串缓存起来（`collector.alias_of()`），理由是
+「每帧每槽现拼一次 = 520 次/秒 ≈ 13KB/秒垃圾」。**实测是错的**：
+Lua 的 `luaV_concat` 对 ≤256 字节的结果**走栈缓冲，不分配堆**，
+`test_churn.lua` 里 `pick_dtype` 改前 29.5 字节/次、改后 29.9 字节/次，
+纹丝不动。缓存保留下来只为「一个地址一个串对象」这条约定（省的是
+intern 查表，CPU 级）。**教训：碎片化的账要拿 `test_churn.lua` 量，
+不能凭感觉估。**
+
+#### 还没解决的：常驻代码太大（= 12-fix-5 的「还欠着的账」）
+
+本轮 B/C/D 都是**兜底**：真到碎片化那天靠它们把数据救回来。要根治，
+得把常驻降下来 —— 现场 idle 基线就有 ~190KB 是代码，而 sniff 档用不到的
+`bus/poll.lua`（21.6KB 源码）现在是**无条件加载**的
+（`main.lua:98` / `bus/ctrl.lua:5` / `svc/cmd.lua:12`）。
+`tests/lua/test_codesize.lua` 是量这个的诊断脚本。
 
 
 ## 485 无响应排查（现场顺序）

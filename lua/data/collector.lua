@@ -15,6 +15,37 @@ local stat = { pushed = 0, frames = 0, raw = 0 }
 local MAX_DATA_POINTS = cfg.MAX_REGS
 local dataOrder = {}
 
+-- ⚠️ 12-fix-7 (2026-10-28): "reg<addr>" 这个 alias 串【缓存】下来。
+--   原来 mon.push_rsp_value / pickDtype 每帧每槽都现拼一次 "reg" .. (addr+i)
+--   (现场 52 帧/秒 × 10 槽 = 520 次/秒)。
+--   ⚠️ 实测结论(别再拿"省内存"当理由): 短串拼接【不分配堆】——
+--   Lua 的 luaV_concat 对 ≤256 字节的结果走栈缓冲, 再 intern 进短串表。
+--   所以这一项的 churn 本来就是 0 (tests/lua/test_churn.lua 实测
+--   pick_dtype 改前 29.5 字节/次、改后 29.9 字节/次, 纹丝不动)。
+--   缓存的真实收益是省掉每次的 intern 查表(CPU 级, 很小),
+--   保留它是为了"一个地址一个串对象"这条约定(dataCache 的 key 与
+--   推断表/上报里的 alias 指向同一个串), 代价 = 一张小表。
+local aliasCache = {}
+local aliasCacheN = 0
+local ALIAS_CACHE_MAX = 256
+
+-- 返回该地址的规范 alias("reg<addr>")。**返回的是缓存里的同一个串对象**,
+--   调用方可以放心留着它(不要再改 —— 字符串不可变 ✓)。
+function M.alias_of(addr)
+    local a = aliasCache[addr]
+    if not a then
+        a = "reg" .. tostring(addr)
+        -- 地址空间有 65536 个, 缓存必须有上限(异常总线能刷出上万个地址)
+        if aliasCacheN >= ALIAS_CACHE_MAX then
+            aliasCache = {}
+            aliasCacheN = 0
+        end
+        aliasCache[addr] = a
+        aliasCacheN = aliasCacheN + 1
+    end
+    return a
+end
+
 local function ring_add(s)
     ringIdx = (ringIdx % cfg.RING_SIZE) + 1
     ring[ringIdx] = s
