@@ -837,6 +837,93 @@ E/main Lua VM exit!! reboot in 15000ms
 `mon` 的局部表，`collector.trim_cache()` 碰不到它，少了这句清了缓存照样 OOM。
 
 
+### 第二次崩溃复盘：churn 才是碎片化的根源（2026-10-28，12-fix-5）
+
+12-fix-4（统一上报调度）之后现场又崩了两次，**崩溃点从上报路径挪到了收帧路径**：
+
+```
+E/mem memory allocation failed total 307192, used 282488, alloc 3471   ← 3471 = R:STAT 的 JSON
+E/mem memory allocation failed total 307192, used 276112, alloc 1568
+E/user.coroutine.resume not enough memory
+  mbus.lua:218 (parse_value) ← mon.lua:244 ← mon.lua:273 (pick_dtype)
+  ← mon.lua:324 ← mon.lua:375 ← mon.lua:436
+E/main Luat: not enough memory → Lua VM exit!! reboot in 15000ms
+```
+
+两次崩溃前都紧跟着一条 `R:FRAMES=30`（用户打开了前端「总线报文」面板）。
+`used 282488/307192` = 堆已用 92%，**还剩 24KB 却切不出 3.4KB 连续块** ——
+这是碎片化的签名，不是"总量不够"。
+
+#### 两条独立的根因（都量出来了，不是猜的）
+
+**① 我们的代码本身就吃掉 276KB —— 堆的 92%**
+
+`tests/lua/test_heapsize.lua`：在 LuatOS PC 仿真器里逐个编译 `lua/` 下的模块、
+留住产物、量 `collectgarbage("count")` 的增量：
+
+| 模块 | 编译后占堆 | 模块 | 编译后占堆 |
+|---|---|---|---|
+| `iot/iot.lua` | **73.1 KB** | `sn/prov.lua` | 13.1 KB |
+| `bus/mon.lua` | **33.1 KB** | `iot/pullcfg.lua` | 11.6 KB |
+| `svc/cmd.lua` | 22.6 KB | `sn/sn.lua` | 10.7 KB |
+| `bus/poll.lua` | 21.6 KB | `util.lua` | 10.4 KB |
+| `bus/mbus.lua` | 16.2 KB | `iot/mqttcfg.lua` | 9.5 KB |
+| `cfg.lua` | 13.5 KB | `lbsLoc2.lua` | 8.2 KB |
+| 其余 7 个 | 34.6 KB | **合计** | **276.5 KB** |
+
+设备上 idle 档 `collectgarbage("count")` = **190KB**（LuatOS 这个接口返回 KB，
+不是标准 Lua 的字节），堆总量只有 300KB —— **留给运行期数据的只有 ~110KB**。
+去注释（`prep_burn.ps1`）对体积**毫无帮助**（275.75 vs 273.46 KB）：编译产物的
+大小由指令和常量决定，注释根本不进产物。`test_heapsize.lua` 现在把 320KB
+钉成红线，代码再涨就测试红。
+
+**② 每秒几十 KB 的垃圾 churn —— 碎片化就是这么来的**
+
+`tests/lua/test_churn.lua`（量法见该文件头：Lua 5.3 的
+`collectgarbage("stop")` 只关紧急回收、增量 GC 照跑，所以要靠"N 次分配量
+低于 GC 启动阈值"来量）：
+
+| 热路径 | 改前 | 改后 | 怎么改的 |
+|---|---|---|---|
+| `mon.pick_dtype`（一个 16bit 槽位） | **632 B** | **29.5 B** | 候选表 `{int16,uint16}` 等 3 个表字面量写在函数体里 → 每次调用重建 8 张表；提到模块级常量 |
+| `collector.push_data`（一个点） | **192 B** | **16 B** | 每次新建 7 字段表 → 老 key 原地改字段 |
+| `mbus.decode_frame`（一帧） | **450 B** | **178 B** | 见下 |
+| 同一帧**被解两次** | ×2 | ×1 | `next_frame` 为了判断合法性先解一遍、把表扔掉，`process_frame` 又解一遍 |
+| 帧表本身 | 每帧新建 | **复用** | `collector.take_frame()` 从池子里拿旧表来填（字段集合稳定 → 哈希段不再扩容） |
+| `f.vhex` | 单独 gsub 一遍 | 从 `f.hex` 切一刀 | 帧结构固定：载荷从第 4 字节起 = hex 串第 7 字符起 |
+| hex 转换的闭包 | 每帧一张 | 0 | `gsub(".", hex_one)`，`hex_one` 提到模块级 |
+| 调试环形缓冲 | 176 个 string.format/秒 | **0** | ring 全项目没有读者 → 改成 `W:RING=1` 显式打开 |
+| `R:STAT` 应答 | 3471 B | ~1800 B | iot 状态原来被**编码两遍**（`iot` 段 + `mqtt` 段内容完全一样）→ 只编码一次拼两遍 |
+| `R:FRAMES` 应答 | ~9 KB | ~3 KB | 帧表里的 `raw`(二进制)/`data` 丢掉 —— JSON 里 raw 会被转义成 `\u00xx`（6 字节/字符） |
+
+现场换算：48 帧/秒 × 1.7 槽位/帧，**churn 从 ~110 KB/秒降到 ~12 KB/秒**。
+
+#### 配套的三件小事
+
+- **`census` 那一行一直是瞎的**：原来打 `collectgarbage("count") / 1024`，
+  可 LuatOS 这个接口返回的就是 KB —— 于是每行都打成 `lua=0.2KB`，现场看着
+  像"堆才用了 0.2KB"，白白误导了两轮排查。现在 `census` 和 `R:STAT` 用同一
+  口径，并加了 `fps=`（帧率）/`push=`（点率）/`gc=`（保险丝触发次数）——
+  **fps/push 一升高就说明分配量又上去了**。
+- **堆水位保险丝**（`iot.lua` task_main，1 秒一轮，不在 UART 热路径上）：
+  水位 > 240KB 就 `collectgarbage("collect")` 一次，最多 10 秒一次。收完垃圾
+  之后**那块地方能复用**，碎片不再继续扩大。
+- **`W:RING=1` / `R:RING`**：环形调试缓冲改成显式打开（默认全关）。
+
+#### 还欠着的账（下一步）
+
+**276KB 的代码 vs 300KB 的堆**，这是本轮 OOM 的根因，12-fix-5 只是把
+"运行期 churn"压下来了，**代码体积一分没少**。候选（都需要用户拍板）：
+
+1. `bus/poll.lua`(21.6KB) 只有 poll/platform 档用得上 → 改成**按需 require**
+   （sniff 档不加载）。`bus/mon.lua`(33.1KB) 同理，只有 sniff 档用。
+2. `iot/iot.lua`(73.1KB) 拆成"必载"和"按需"两半。
+3. `cfg.lua`(13.5KB) / `lbsLoc2.lua`(8.2KB) 能不能不常驻。
+
+⚠️ 改 `require` 的加载时机要留意 LuatOS 的 `require` 是**运行时读 FS**，
+而且 `dep_graph.py` 的依赖图是静态扫的 —— 改成懒加载后要重跑依赖检查。
+
+
 ## 485 无响应排查（现场顺序）
 
 日志出现 `round N 无有效响应 timeout=X` 时，按序执行：

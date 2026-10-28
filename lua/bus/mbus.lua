@@ -83,53 +83,59 @@ function M.build_write_multi(slave, addr, values)
     return M.append_crc(body)
 end
 
-function M.parse_frame(s)
+-- ⚠️ 12-fix-5 (2026-10-28): f 参数 = 可选的"往这张表里填"。
+--   为什么要有: 嗅探热路径上每帧解一次码, 而帧表(十几个字段 + 哈希段
+--   三次扩容) 是这条路径上最大的一笔分配 —— 实测 decode_frame 一次 450 字节。
+--   填旧表把这笔分配降到 0。poll 那边( poll.lua:132/341/366 )调用时不带
+--   f, 行为一个字都不变(每次新建表)。
+function M.parse_frame(s, f)
     if #s < 4 then return nil end
     if not M.crc_ok(s) then return nil end
+    f = f or {}
     local slave, fc = s:byte(1), s:byte(2)
     if fc >= 0x80 then
         if #s ~= 5 then return nil end
-        return { slave = slave, fc = fc - 0x80, err = s:byte(3), raw = s }
+        f.slave, f.fc, f.err, f.raw = slave, fc - 0x80, s:byte(3), s
+        return f
     end
     if fc == 3 or fc == 4 then
         if #s < 5 then return nil end
         local bc = s:byte(3)
         -- fc3/4 响应 = slave(1)+fc(1)+bc(1)+data(bc)+crc(2) = 5 + bc
         if #s ~= 5 + bc then return nil end
-        return { slave = slave, fc = fc, data = s:sub(4, 3 + bc), raw = s }
+        f.slave, f.fc, f.data, f.raw = slave, fc, s:sub(4, 3 + bc), s
+        return f
     end
     if fc == 6 then
         if #s ~= 8 then return nil end
-        return {
-            slave = slave, fc = fc,
-            addr = s:byte(3) * 256 + s:byte(4),
-            value = s:byte(5) * 256 + s:byte(6),
-            raw = s,
-        }
+        f.slave, f.fc = slave, fc
+        f.addr = s:byte(3) * 256 + s:byte(4)
+        f.value = s:byte(5) * 256 + s:byte(6)
+        f.raw = s
+        return f
     end
     if fc == 16 then
         if #s ~= 8 then return nil end
-        return {
-            slave = slave, fc = fc,
-            addr = s:byte(3) * 256 + s:byte(4),
-            qty = s:byte(5) * 256 + s:byte(6),
-            raw = s,
-        }
+        f.slave, f.fc = slave, fc
+        f.addr = s:byte(3) * 256 + s:byte(4)
+        f.qty = s:byte(5) * 256 + s:byte(6)
+        f.raw = s
+        return f
     end
     if fc == 1 or fc == 2 then
         if #s < 5 then return nil end
         local bc = s:byte(3)
         if #s ~= 5 + bc then return nil end
-        return { slave = slave, fc = fc, data = s:sub(4, 3 + bc), raw = s }
+        f.slave, f.fc, f.data, f.raw = slave, fc, s:sub(4, 3 + bc), s
+        return f
     end
     if fc == 5 or fc == 15 then
         if #s ~= 8 then return nil end
-        return {
-            slave = slave, fc = fc,
-            addr = s:byte(3) * 256 + s:byte(4),
-            value = s:byte(5) * 256 + s:byte(6),
-            raw = s,
-        }
+        f.slave, f.fc = slave, fc
+        f.addr = s:byte(3) * 256 + s:byte(4)
+        f.value = s:byte(5) * 256 + s:byte(6)
+        f.raw = s
+        return f
     end
     return nil
 end
@@ -314,6 +320,13 @@ function M.try_extract_len(buf)
     return nil
 end
 
+-- ⚠️ 12-fix-5 (2026-10-28): hex 转换用【模块级函数】, 别在调用点写闭包。
+--   原来每次都是 s:gsub(".", function(c) return string.format("%02x", c:byte()) end)
+--   —— 那个 function 每次调用都新建一张闭包表(现场 48 帧/秒 = 48 张/秒)。
+--   换成模块级函数, 闭包表一张都不建。format 的结果串仍是 intern 的短串,
+--   256 个取值只常驻一份, 不是新开销。
+local function hex_one(c) return string.format("%02x", c:byte()) end
+
 -- sniff 专用帧解析: fc3/4 的 8 字节形态(读请求)也算合法帧。
 -- 那 8 字节是 slave fc addr(2) qty(2) crc(2), 第 3 字节是地址高字节不是
 -- byte_count, parse_frame 按 5+bc 算必然拒收 -- 于是旁听只能看到应答看不到
@@ -326,26 +339,31 @@ end
 -- 字段, poll_reg 接着调 mbus.parse_regs(f.data) 就是 parse_regs(nil),
 -- #nil 直接抛错把 poll_task 打断(表现为轮询突然不再打 round 日志)。
 -- 所以只在这里兜底, parse_frame 一行不动, poll 行为零变化。
-local function sniff_req_frame(s)
+local function sniff_req_frame(s, f)
     if #s ~= 8 then return nil end
     local fc = s:byte(2)
     if fc ~= 3 and fc ~= 4 then return nil end
     if not M.crc_ok(s) then return nil end
-    return {
-        slave = s:byte(1), fc = fc,
-        addr = s:byte(3) * 256 + s:byte(4),
-        qty = s:byte(5) * 256 + s:byte(6),
-        raw = s,
-    }
+    f = f or {}
+    f.slave, f.fc = s:byte(1), fc
+    f.addr = s:byte(3) * 256 + s:byte(4)
+    f.qty = s:byte(5) * 256 + s:byte(6)
+    f.raw = s
+    return f
 end
 
-function M.decode_frame(s)
-    local f = M.parse_frame(s)
-    if not f then f = sniff_req_frame(s) end
+-- ⚠️ 12-fix-5 (2026-10-28): into = 可选的"往这张表里填"(见 parse_frame 同名说明)
+function M.decode_frame(s, into)
+    local f = M.parse_frame(s, into)
+    if not f then f = sniff_req_frame(s, into) end
     if not f then
-        return { kind = "other", hex = (s:gsub(".", function(c) return string.format("%02x", c:byte()) end)), raw = s }
+        f = into or {}
+        f.kind = "other"
+        f.hex = (s:gsub(".", hex_one))
+        f.raw = s
+        return f
     end
-    f.hex = (s:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+    f.hex = (s:gsub(".", hex_one))
     if f.err then
         f.kind = "err"
     elseif f.fc == 3 or f.fc == 4 then
@@ -365,7 +383,13 @@ function M.decode_frame(s)
     if f.data and not f.qty then
         f.bc = #f.data
         f.qty = (f.fc == 3 or f.fc == 4) and math.floor(#f.data / 2) or (#f.data * 8)
-        f.vhex = f.data:gsub(".", function(c) return string.format("%02x", c:byte()) end)
+        -- ⚠️ 12-fix-5 (2026-10-28): vhex 直接从 f.hex 切, 不再单独 gsub 一遍。
+        --   帧结构 = slave(1) fc(1) bc(1) data(bc) crc(2), 载荷从第 4 个字节开始,
+        --   也就是 hex 串的第 7 个字符起, 共 2*bc 个字符 —— 切一刀就行。
+        --   原来这里又跑一次 s:gsub(".", format("%02x")): 每帧多造 ~85 字节垃圾
+        --   + 每字节一次 string.format 调用(25 字节帧 = 25 次 format)。
+        --   现场 48 帧/秒 → 光这一项 4KB/秒的垃圾 + 每秒 1200 次 format。
+        f.vhex = f.hex:sub(7, 6 + 2 * f.bc)
     end
     return f
 end

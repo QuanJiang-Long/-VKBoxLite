@@ -253,13 +253,25 @@ local function score(data, off, dtype, word_swap, alias)
     return dtype, v, conf
 end
 
+-- ⚠️ 12-fix-5 (2026-10-28): 候选表必须提到模块级, 绝不能写在函数体里!
+--   Lua 的表字面量在【每次进函数】时都会重新建表。原来 pickDtype 一次调用
+--   建 8 张表: {int16,uint16} 1 张 + {int32,uint32,float32} 1 张
+--   + {false,true} 在内层循环里建 3 次 = 5 张, 合计 8 张。
+--   实测 (tests/lua/test_churn.lua, GC 停掉量真实分配):
+--     pick_dtype 一次造 632 字节垃圾, 改完 0 字节。
+--   现场 48 帧/秒 × 1.7 槽位/帧 = 80 次/秒 → 光这一项就是 50KB/秒的垃圾,
+--   300KB 的堆几分钟就被打成碎片 → 大请求切不出连续块 → VM 退出重启。
+local CAND16 = { "int16", "uint16" }
+local CAND32 = { "int32", "uint32", "float32" }
+local CANDWS = { false, true }
+
 -- 默认 16bit 拆 + 候选 32bit 合并, 选 conf 最高的 dtype
 -- 16bit 永远 +5 加成 (modbus 标准优先), 32bit 合并要显著高才覆盖
 local function pickDtype(data, off, remaining, addr, slave, f)
     local alias = "reg" .. (addr + off)  -- 不带 s<slave>_ 前缀
     -- 16bit 候选 (永远跑, modbus 标准)
     local bestD, bestV, bestC = "uint16", 0, 0
-    for _, d in ipairs({ "int16", "uint16" }) do
+    for _, d in ipairs(CAND16) do
         local _, v, c = score(data, off, d, nil, alias)
         if c > bestC then bestD, bestV, bestC = d, v, c + 5 end  -- 16bit +5 优先
     end
@@ -268,8 +280,8 @@ local function pickDtype(data, off, remaining, addr, slave, f)
     if remaining >= 2 then
         local c32 = 0
         local d32, v32 = "uint32", 0
-        for _, d in ipairs({ "int32", "uint32", "float32" }) do
-            for _, ws in ipairs({ false, true }) do
+        for _, d in ipairs(CAND32) do
+            for _, ws in ipairs(CANDWS) do
                 local _, v, c = score(data, off, d, ws, alias)
                 if c > c32 then c32, d32, v32 = c, d, v end
             end
@@ -357,8 +369,13 @@ local function push_rsp_value(slave, addr, f)
     end
 end
 
-local function process_frame(s)
-    local f = mbus.decode_frame(s)
+-- ⚠️ 12-fix-5 (2026-10-28): f 是【已经解好的帧表】, 不再在这里解一次。
+--   原来 next_frame 为了判断"切出来的帧合不合法"先 decode_frame 一遍,
+--   把解出来的表扔掉, process_frame 再 decode_frame 一遍 —— 同一帧解两次,
+--   热路径上的分配直接翻倍(每帧多 ~450 字节, 现场 48 帧/秒 = 21KB/秒)。
+--   现在 next_frame 把解好的帧直接传下来, 而且帧表是复用的
+--   (collector.take_frame), 一张表都不再新建。
+local function process_frame(f)
     stat.frames = stat.frames + 1
     local pair_state, paired_addr = nil, nil
     if f.kind == "err" then
@@ -386,6 +403,14 @@ local function process_frame(s)
     f.paired_addr = paired_addr
     f.paired_qty = f.qty
     collector.push_raw_rx(f.hex)
+    -- ⚠️ 12-fix-5 (2026-10-28): 存进 ring 之前把 raw / data 丢掉。
+    --   raw 是二进制帧, data 是载荷 —— 值已经解过了(data 在 push_rsp_value
+    --   里就用完), 前端也不显示 raw。可 R:FRAMES 的 JSON 里 raw 会被转义成
+    --   \u00xx(6 字节/字符), 30 帧应答能撑到 9KB —— 而 9KB 要的是一整块
+    --   连续内存, 碎片化之后根本切不出来(现场 alloc 3471 失败就是这么来的)。
+    --   丢了之后同样的 30 帧只剩 ~3KB, 而且 hex/vhex 都还在, 前端照常显示。
+    f.data = nil
+    f.raw = nil
     collector.push_frame(f)
 end
 
@@ -411,15 +436,21 @@ end
 
 -- CRC 试探法切帧: 逐偏移找第一个 CRC 合法且长度自洽的帧;
 -- 找不到丢 1 字节继续找。fc3/4 8 字节请求由 mbus.decode_frame 认
+--
+-- ⚠️ 12-fix-5 (2026-10-28): 返回【解好的帧表】, 不再返回原始串。
+--   原来这里为了判断"切出来的帧合不合法"先 decode_frame 一遍, 把表扔掉,
+--   process_frame 再解一遍 —— 同一帧解两次, 热路径分配翻倍。
+--   帧表从 collector.take_frame() 拿(复用的), 所以这里连新表都不建。
 local function next_frame()
     for off = 1, #rxbuf do
         local s = rxbuf:sub(off)
         local n = mbus.try_extract_len(s)
         if n and #s >= n then
-            local f = mbus.decode_frame(s:sub(1, n))
+            local raw = s:sub(1, n)
+            local f = mbus.decode_frame(raw, collector.take_frame())
             if f then
                 rxbuf = s:sub(n + 1)
-                return s:sub(1, n)
+                return f
             end
         end
     end
@@ -429,7 +460,7 @@ end
 local function task()
     local mygen = gen
     while running and gen == mygen do
-        -- 旁听主循环心跳: guard.stall 判据 (poll 采集档由 poll.lua 喂, 两个不会同时跑)
+        -- 旁听主循环心跳: guard.stall 判据 (poll 采集档由 poll 喂, 两个不会同时跑)
         if guard then guard.alive() end
         local s = next_frame()
         if s then

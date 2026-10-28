@@ -135,6 +135,11 @@ local function reset_state()
         --   把各常驻结构的条目数 + 堆水位一次列出来 —— 现场一崩, 最后那行
         --   census 就直接指出是哪个数字在涨(不用再猜)。
         census_at = -1e9,
+        -- 12-fix-5: 堆水位保险丝的状态。上次强制回收的时刻(os.clock, 秒)
+        --   + 累计触发次数(给 census 报)。见 task_main 里的 gc 保险丝。
+        gc_at = -1e9, gc_trig = 0,
+        -- 上一次普查时的累计计数(帧/点), 用来算帧率 fps / 点率 push
+        census_prev = nil,
         busy_s = 0, span_s = 0,
         -- hello_at 是【连接生命周期内最后一次 hello 成功发送】的时间(OS time),
         -- 不是上电时间 —— task_main 靠它算 pollpull 档 30min 重发。置 0 表示
@@ -374,18 +379,42 @@ end
 -- 成本: 一次 string.format + 一次 collectgarbage("count"), 30 秒一次。
 --   ⚠️ 绝不能用 collectgarbage("collect") —— 那是完整回收, 有毫秒级暂停,
 --      放热路径上有让 UART 环形缓冲溢出的风险。这里只【读】count。
+--
+-- ⚠️ 12-fix-5 (2026-10-28): 单位写错了, 这一行一直是瞎的!
+--   原来打的是 collectgarbage("count") / 1024, 可 LuatOS 这个接口【返回的
+--   就是 KB】(不是标准 Lua 的字节) —— 于是每一行都打成 "lua=0.2KB",
+--   现场看着像"堆才用了 0.2KB", 白白误导了两轮排查。设备上
+--   R:STAT 的 lua_kb 字段(直接取 count)显示的是 190~231, 才是真水位。
+--   现在 census 和 R:STAT 用同一个口径, 两边数字能对得上。
+--
+-- 追加的两个字段(fps / push)是为了直接看出【垃圾产生速率】:
+--   现场 48 帧/秒 × 每帧 ~1.2KB 垃圾 ≈ 58KB/秒, 300KB 的堆几分钟就碎。
+--   fps/push 一升高, 就说明分配量又上去了。
 local function census()
     local cs = collector.stats()
     local ms = mon.status()
     local ps = pubsched.status()
+    -- 帧率/点率: 跟上一次普查比(上次的时间戳存在 census_prev.clock 里)
+    local fps, push = 0, 0
+    local prev = S.census_prev
+    local now = os.clock()
+    if prev and prev.clock then
+        local dt = now - prev.clock
+        if dt > 0 then
+            fps = math.floor(((cs.frames or 0) - (prev.frames or 0)) / dt)
+            push = math.floor(((cs.pushed or 0) - (prev.pushed or 0)) / dt)
+        end
+    end
+    S.census_prev = { frames = cs.frames or 0, pushed = cs.pushed or 0, clock = now }
     log.info("iot", string.format(
-        "census lua=%.1fKB points=%d frames=%d aliases=%d rows=%d pub=%d/%d meta=%d topo=%d blk=%d",
-        collectgarbage("count") / 1024,
+        "census lua=%.1fKB points=%d frames=%d aliases=%d rows=%d pub=%d/%d meta=%d topo=%d blk=%d fps=%d push=%d gc=%d",
+        collectgarbage("count"),
         cs.points or 0, cs.frames or 0,
         ms.hist_aliases or 0, ms.infer_rows or 0,
         S.published or 0, S.failed or 0,
         (ps.meta and ps.meta.sent) or 0, (ps.topo and ps.topo.sent) or 0,
-        ((ps.prop and ps.prop.blocked) or 0) + ((ps.meta and ps.meta.blocked) or 0)))
+        ((ps.prop and ps.prop.blocked) or 0) + ((ps.meta and ps.meta.blocked) or 0),
+        fps, push, S.gc_trig or 0))
 end
 
 -- ===== U2 拓扑上报 / U3 网关资源 / U7 指令回执 =====
@@ -1745,6 +1774,28 @@ local function task_main()
             -- 攒到发 U3 时算成占比。os.clock() 在本工程里当秒级单调时钟用
             -- (见 bus/mon.lua 的配对超时), 不是 CPU 时间
             local t0 = os.clock()
+            -- ⚠️ 12-fix-5 (2026-10-28): 堆水位保险丝 —— 崩溃的最后一道防线。
+            --   现场崩前: E/mem used 282488/307192, 而 collectgarbage("count")
+            --   只有 ~220KB。差出来的 60KB 是【没收的垃圾 + 碎片】。
+            --   LuatOS 的分配器不合并相邻空闲块, 所以垃圾堆在那儿, 那块
+            --   地方就永远切不出连续大块: R:STAT(3.4KB)/R:FRAMES(9KB)/
+            --   拓扑(1.2KB) 全部 "not enough memory for buffer allocation",
+            --   顶层再叠上 mon 收帧协程的 parse_value → VM 退出 → 重启。
+            --   这里水位超阈值就收一次垃圾: 收了之后【那块地方能复用】,
+            --   碎片不再继续扩大。10 秒最多一次, 且不在 UART 热路径上
+            --   (task_main 每秒一轮), 一次全回收几毫秒。
+            --   ⚠️ 阈值 240 是"代码 190 + 数据 30 + 余量"的经验值, 现场
+            --   看 census 的 lua= 调; 12-fix-5 降完 churn 之后正常 sniff
+            --   应该稳在 220~235, 这条基本不会触发。
+            if (os.clock() - (S.gc_at or -1e9)) >= 10 then
+                local kb = collectgarbage("count")
+                if kb > 240 then
+                    collectgarbage("collect")
+                    S.gc_at = os.clock()
+                    S.gc_trig = (S.gc_trig or 0) + 1
+                    log.warn("iot", string.format("gc safety: lua=%.1fKB -> collected", kb))
+                end
+            end
             if S.recv_pending then
                 local rp = S.recv_pending
                 S.recv_pending = nil

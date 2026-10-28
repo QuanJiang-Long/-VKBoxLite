@@ -188,16 +188,25 @@ local function reg_cmds()
     end)
 
     -- R:STAT: 前端 readHome 读 mode/data/guard/mqtt 段
+    -- ⚠️ 12-fix-5 (2026-10-28): iot 状态原来被【编码两遍】(iot 段一份、
+    --   mqtt 段又一份, 两段内容完全一样), 白白让应答大一倍。现场实测
+    --   R:STAT 的应答 3471 字节, 而它要的是一整块连续内存 —— 堆碎到
+    --   282488/307192 时, 连这 3.4KB 都切不出来(E/mem alloc 3471 失败),
+    --   前端于是收到空 JSON(RET:STAT={})。现在只编码一次, 拼两遍字符串。
     M.reg("R:STAT", function()
-        local st = {
-            mode = ctrl.status(),
-            data = collector.stats(),
-            guard = guard and guard.status() or nil,
-        }
+        local parts = {}
+        local m = ctrl.status()
+        if m then parts[#parts + 1] = '"mode":' .. jencode(m) end
+        local d = collector.stats()
+        if d then parts[#parts + 1] = '"data":' .. jencode(d) end
+        if guard then parts[#parts + 1] = '"guard":' .. jencode(guard.status()) end
         local it = iot and iot.status() or nil
-        st.iot = it
-        st.mqtt = it
-        M.reply("RET:STAT=" .. jencode(st))
+        if it then
+            local j = jencode(it)
+            parts[#parts + 1] = '"iot":' .. j
+            parts[#parts + 1] = '"mqtt":' .. j
+        end
+        M.reply("RET:STAT={" .. table.concat(parts, ",") .. "}")
     end)
 
     -- 平台配置拉取: W 发起, R 轮询状态
@@ -408,6 +417,19 @@ local function reg_debug_cmds()
         elseif not r.parsed then
             log.warn("cmd", "RAWTEST 有字节但 CRC 不过: 查 波特率/校验位/停止位/AB线序")
         end
+    end)
+
+    M.reg("W:RING", function(arg)
+        -- 环形调试缓冲开关(12-fix-5): 默认全关, 因为写进去的东西没人读,
+        -- 而每帧一次的 string.format 是热路径上实打实的垃圾(见 collector.lua)
+        local on = (arg == "1" or arg == "on" or arg == "true")
+        collector.ring_enable(on)
+        M.reply("RET:RING=" .. tostring(on))
+    end)
+
+    M.reg("R:RING", function()
+        local out = collector.get_ring()
+        M.reply("RET:RING=" .. jencode(out))
     end)
 
 end -- R:FRAMES/R:INFER/R:AUTODETECT 已转正到 reg_cmds (2026-10, 见上面说明)
