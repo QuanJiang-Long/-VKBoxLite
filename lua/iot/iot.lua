@@ -161,8 +161,11 @@ local function get_topic()
     return string.format(cfg.PLATFORM_GET_TOPIC, did)
 end
 
-local function alias_map()
-    local c = active_cfg()
+-- ⚠️ 12-fix-3 (2026-10-28): c 可选 —— 传进来就复用, 不要再 active_cfg()。
+--   build_items() 一次调用里原来要 active_cfg() 两次(自己一次 + alias_map()
+--   里面一次), 每次都是把整份配置从 fskv 反序列化一遍。现在只取一次。
+local function alias_map(c)
+    c = c or active_cfg()
     if not c or not c.regs then return {} end
     local m = {}
     for _, r in ipairs(c.regs) do m[r.name] = r.alias or r.name end
@@ -234,8 +237,10 @@ end
 --   —— 一份轮询配置只有一个 slave(cfg.normalize_poll), 直接取那份的
 -- 少了 -{n} 这个后缀, 平台无法把数据归属到子设备, 上报等于白发
 local function build_items()
-    local amap = alias_map()
+    -- ⚠️ 12-fix-3: 先取一次配置, 下面 alias_map(c) 复用它, 别再各自去
+    --   active_cfg() —— 那等于把整份配置反序列化两遍。
     local c = active_cfg()
+    local amap = alias_map(c)
     local cfg_slave = c and c.slave or nil
     -- 过滤: 只发当前 mode 应该有的 alias, 避免切档残留数据被当成当前数据误发
     -- 例: sniff 累积的 reg<addr> 不该在 pollpull 模式上报

@@ -140,14 +140,36 @@ M.TYPE_WIDTH = {
     uint64 = 4, int64 = 4, float64 = 4,
 }
 
-local function bytes_to_float(b, is_double)
+-- ★ 12-fix-3 (2026-10-28): 下面几个 helper 全部改成"收字节参数、不建表"。
+--
+--   原来 parse_value 每次调用要分配: raw 字符串(data:sub) + b 表 +
+--   (word_swap 时)第二个表 + (float 时)第三个表 = 2~4 个对象。
+--   而 sniff 热路径上 pickDtype 一次就调 parse_value 8 次
+--   (int16/uint16 两个候选 + int32/uint32/float32 三个候选 × word_swap 两种)，
+--   一个 30 寄存器的响应帧要调 ~120 次 → ~240 次分配/帧。
+--   现场实测 47 帧/秒 → 每秒约 1.1 万次分配。GC 压力全在这儿,
+--   Lua 堆水位被顶到 253KB(离 300KB 上限只差 47KB)，碎片化之后切不出
+--   3KB 连续块 → 分配失败 → 分配器级 fatal → VM 退出重启 (2026-10-28 现场)。
+--
+--   改成 data:byte(p+1, p+8) 一次取 8 个字节(多返回值走栈, 不建字符串),
+--   中间一律不建表 → 一次调用【零分配】。
+--
+-- ⚠️ 语义必须和改前逐字节一致 —— 单元测试 tests/lua/test_dtype_band.lua
+--    走 mon.pick_dtype 端到端验(含 float32 字交换 / int32 千万级惩罚)。
+
+-- float 解码: 收 8 个字节参数。is_double=true 用前 8 个, false 用前 4 个
+local function bytes_to_float(b1, b2, b3, b4, b5, b6, b7, b8, is_double)
     if is_double then
-        if #b ~= 8 then return nil end
-        local sign = math.floor(b[1] / 128)
-        local e = math.floor(b[1] % 128) * 16 + math.floor(b[2] / 16)
-        -- 尾数 52 位 = b[2] 低 4 位 + b[3..8]; 漏掉 b[2] 低 4 位会全解错
-        local m = b[2] % 16
-        for i = 3, 8 do m = m * 256 + b[i] end
+        local sign = math.floor(b1 / 128)
+        local e = math.floor(b1 % 128) * 16 + math.floor(b2 / 16)
+        -- 尾数 52 位 = b2 低 4 位 + b3..8; 漏掉 b2 低 4 位会全解错
+        local m = b2 % 16
+        m = m * 256 + b3
+        m = m * 256 + b4
+        m = m * 256 + b5
+        m = m * 256 + b6
+        m = m * 256 + b7
+        m = m * 256 + b8
         if e == 2047 then return nil end
         if e == 0 then
             if m == 0 then return 0.0 end
@@ -155,10 +177,9 @@ local function bytes_to_float(b, is_double)
         end
         return (sign == 1 and -1 or 1) * (2^52 + m) * 2^(e - 1023 - 52)
     end
-    if #b ~= 4 then return nil end
-    local sign = math.floor(b[1] / 128)
-    local e = math.floor(b[1] % 128) * 2 + math.floor(b[2] / 128)
-    local m = math.floor(b[2] % 128) * 65536 + b[3] * 256 + b[4]
+    local sign = math.floor(b1 / 128)
+    local e = math.floor(b1 % 128) * 2 + math.floor(b2 / 128)
+    local m = math.floor(b2 % 128) * 65536 + b3 * 256 + b4
     if e == 255 then return nil end
     if e == 0 then
         if m == 0 then return 0.0 end
@@ -167,15 +188,21 @@ local function bytes_to_float(b, is_double)
     return (sign == 1 and -1 or 1) * (2^23 + m) * 2^(e - 127 - 23)
 end
 
-local function to_u64(b)
-    local v = 0
-    for i = 1, #b do v = v * 256 + b[i] end
+local function bytes_to_u64(b1, b2, b3, b4, b5, b6, b7, b8)
+    local v = b1
+    v = v * 256 + b2
+    v = v * 256 + b3
+    v = v * 256 + b4
+    v = v * 256 + b5
+    v = v * 256 + b6
+    v = v * 256 + b7
+    v = v * 256 + b8
     return v
 end
 
-local function to_i64(b)
-    local v = to_u64(b)
-    if b[1] >= 128 then v = v - 18446744073709551616.0 end
+local function bytes_to_i64(b1, b2, b3, b4, b5, b6, b7, b8)
+    local v = bytes_to_u64(b1, b2, b3, b4, b5, b6, b7, b8)
+    if b1 >= 128 then v = v - 18446744073709551616.0 end
     return v
 end
 
@@ -185,32 +212,32 @@ function M.parse_value(data, offset, dtype, word_swap)
     local w = M.TYPE_WIDTH[dtype]
     if not w then return nil, "bad dtype" end
     local nbytes = w * 2
-    local raw = data:sub(offset * 2 + 1, offset * 2 + nbytes)
-    if #raw < nbytes then return nil, "short data" end
-    local b = {}
-    for i = 1, nbytes do b[i] = raw:byte(i) end
+    local p = offset * 2
+    if p + nbytes > #data then return nil, "short data" end
+    -- 一次取 8 个字节 (12-fix-3): 多返回值走栈, 不建字符串也不建表
+    local b1, b2, b3, b4, b5, b6, b7, b8 = data:byte(p + 1, p + 8)
     -- 32bit 字交换: [b1 b2 b3 b4] -> [b3 b4 b1 b2]
     if word_swap and w == 2 then
-        b = { b[3], b[4], b[1], b[2] }
+        b1, b2, b3, b4 = b3, b4, b1, b2
     end
     if dtype == "float32" then
-        return bytes_to_float({ b[1], b[2], b[3], b[4] }, false)
+        return bytes_to_float(b1, b2, b3, b4, b5, b6, b7, b8, false)
     elseif dtype == "float64" then
-        return bytes_to_float({ b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8] }, true)
+        return bytes_to_float(b1, b2, b3, b4, b5, b6, b7, b8, true)
     elseif dtype == "uint16" then
-        return b[1] * 256 + b[2]
+        return b1 * 256 + b2
     elseif dtype == "int16" then
-        local v = b[1] * 256 + b[2]
+        local v = b1 * 256 + b2
         return v >= 32768 and v - 65536 or v
     elseif dtype == "uint32" then
-        return b[1] * 16777216 + b[2] * 65536 + b[3] * 256 + b[4]
+        return b1 * 16777216 + b2 * 65536 + b3 * 256 + b4
     elseif dtype == "int32" then
-        local v = b[1] * 16777216 + b[2] * 65536 + b[3] * 256 + b[4]
+        local v = b1 * 16777216 + b2 * 65536 + b3 * 256 + b4
         return v >= 2147483648 and v - 4294967296 or v
     elseif dtype == "uint64" then
-        return to_u64(b)
+        return bytes_to_u64(b1, b2, b3, b4, b5, b6, b7, b8)
     elseif dtype == "int64" then
-        return to_i64(b)
+        return bytes_to_i64(b1, b2, b3, b4, b5, b6, b7, b8)
     end
     return nil, "bad dtype"
 end

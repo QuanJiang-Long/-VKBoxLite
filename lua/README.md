@@ -616,7 +616,8 @@ sniff 的通讯参数**用户不配**（sniff 没有持久槽，是刻意的设�
 | `pendingReqs` 待配对请求 | `bus/mon.lua` | 每 fc ≤ `MAX_PENDING_PER_FC`(4) | 删最早 |
 | `lastReqs` 最近请求索引 | `bus/mon.lua` | `MAX_LAST_REQ`(64) | **整表作废** |
 | 推断展开的 qty | `util.lua` `clamp_qty` | `MAX_INFER_QTY`(256) | 截到上限 |
-| 推断表行数 | `bus/mon.lua` `M.infer` | `MAX_INFER_ROWS`(512) | 不再新增行 |
+| 推断表行数 | `bus/mon.lua` `M.infer` | `MAX_INFER_ROWS`(**128**，2026-10-28 从 512 降) | 不再新增行 |
+| **dtype 判型历史** | `bus/mon.lua` `dtypeHistory` | **128 个 alias**（2026-10-28 新增上限） | 淘汰最旧的 alias |
 | 拓扑 properties 条数 | `iot.lua` `node_json` | 64（2026-10-27 从 128 降） | 不再拼进 JSON |
 
 三个容易漏的点：
@@ -703,6 +704,54 @@ sniff 的通讯参数**用户不配**（sniff 没有持久槽，是刻意的设�
   ⚠️ `os.clock()` 是**秒**级单调时钟，配置里是毫秒，比较时必须除 1000
   （直接比 5000 会变成 83 分钟才重建一次）。
 
+### sniff 档 OOM 崩溃复盘（2026-10-28，12-fix-3）
+
+用**多寄存器**设备测 sniff 上报，跑到 130 秒时崩了：
+
+```
+E/mem memory allocation failed total 307192, used 266752, alloc 3033
+E/main Luat: not enough memory
+  mbus.lua:188 → mon.lua:210 → mon.lua:239 → mon.lua:290 → mon.lua:341 → mon.lua:402
+E/main Lua VM exit!! reboot in 15000ms
+```
+
+**崩溃点不在上报路径**（`topo_sig`/`build_items` 都被 pcall 兜住，只打
+"skip this round"），而在**收帧处理协程**里解析寄存器值那一步。
+
+`used` 一直在 **258840~268696** 之间波动、**从不降到 253KB 以下**，而堆总量是
+300KB —— 空闲 40KB 却申请不到 3KB 连续块 = 碎片化 + 常驻太高。
+
+#### ⚠️ 走过的弯路：不是 GC 参数的锅
+
+我一度判断那 253KB 地板是「Lua GC 的触发水位」（以为 pause=200、活对象翻倍才
+收），打算用 `collectgarbage("setpause", 120)` 压下去。**单测把它否掉了**：
+
+- LuatOS 的默认 pause 是 **90**，不是 200；
+- 把 pause 调成 120 / 200，垃圾水位峰值**纹丝不动**（238.2 vs 238.3 KB）。
+
+所以 **253KB 地板就是活对象本身**。调 GC 参数救不了 OOM，**只能少常驻、少分配**。
+（`tests/lua/test_gc_pressure.lua` 把这条结论钉住了，免得以后再走一遍。）
+
+#### 三处根因 + 修法
+
+| 根因 | 常驻/瞬时 | 修法 |
+|---|---|---|
+| **推断表** 512 行 × 9 字段 table(272B)，而且 `infer_cache` 把整份**常驻** | **~140KB 常驻**，重建瞬时 ~185KB | `MAX_INFER_ROWS` 512 → **128**（下游 `node_json` 的 `MAX_PROPS` 才 64，128 已 2 倍余量）→ 常驻 ~35KB |
+| **`dtypeHistory`** 每个见过的地址一条，**从不淘汰**，`mon.stop()` 也不清 | 26~100KB（无上限） | 加 `MAX_HIST_ALIAS`=**128**（与 `dataCache` 对齐）；`mon.stop()` 补 `clear_history()` |
+| **`mbus.parse_value` 每次调用分配 2~4 个对象**（`raw` 字符串 + `b` 表 + 字交换表 + float 表），而 `pickDtype` 一次调它 **8 次** | **~1.1 万次分配/秒**（47 帧/秒 × 240 次/帧） | 改成 `data:byte(p+1, p+8)` 直接取字节、**不建中间表** → **零分配** |
+
+另外两处降 churn（不是崩溃主因，但同一个方向）：
+
+- **`cfg.lua` 加配置解码缓存**：原来 `load_poll`/`load_pull`/`load_alias` 每次
+  调用都要 `fskv.get` 整份 JSON + `json.decode` 整张表（128 条 ≈ 35KB 垃圾/次），
+  而 `build_items()` 一次调用里就要反序列化 3~4 遍。→ 只缓存**解码后的原始表**
+  （归一化仍每次跑，调用方拿到的仍是各自独立的一份），`build_items()` 里
+  `alias_map(c)` 复用已加载的配置。⚠️ 写盘（`kv_set`/`reset_user`/`clear_pull`）
+  必须让缓存失效。
+- **`iot.lua` 的 `S.dirty` 把 publish 变成每秒一次**：`collector.on_update` 每次
+  `push_data` 都置位 `S.dirty`，总线上有流量就永远脏 → `publish()` 每秒跑 →
+  每秒上百 KB 垃圾。**这一条改的是产品行为（平台数据延迟），还没改**，
+  待定。
 
 **OOM 兜底**（`iot.lua` 建连失败且报 memory 时）：`collector.trim_cache()` +
 `mon.trim_reqs()` + 强制 GC + 固定等 30s。`mon.trim_reqs()` 不能省——`lastReqs` 是

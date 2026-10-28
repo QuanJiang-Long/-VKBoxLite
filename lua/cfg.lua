@@ -40,19 +40,50 @@ local function kv_get(k)
     return nil
 end
 
+-- ⚠️ 12-fix-3 (2026-10-28): 配置解码缓存。必须声明在 kv_set 之前 ——
+--   Lua 的 local 只能看到它【之前】的声明, 晚声明的话 kv_set 里那次
+--   json_cache[k] = nil 会写到全局表上, 缓存永远不失效。
+local json_cache = {}   -- fskv key -> 解码后的原始表
+
 local function kv_set(k, s)
     if not fskv then return false end
+    json_cache[k] = nil   -- 12-fix-3: 写盘了, 解码缓存必须失效
     fskv.set(k, s)
     if fskv.save then pcall(fskv.save) end
     return true
 end
 
+-- ⚠️ 12-fix-3 (2026-10-28): 配置解码缓存。
+--   原来 load_poll/load_pull/load_alias 每次调用都要
+--   fskv.get(整份 JSON 串) + json.decode(整张表) —— 一份 128 条的配置
+--   ≈ 12.7KB 字符串 + 22.5KB 解码表 ≈ 35KB 垃圾/次。
+--   而 iot 的 build_items() 一次调用里就要反序列化 3~4 遍
+--   (active_cfg ×2 + cfgstore.alias_map ×1~2), 且 publish 因为 S.dirty
+--   被设成【每秒一次】→ 每秒上百 KB 垃圾, 比整个 Lua 堆(300KB)还大。
+--   这正是"总空闲还有 40KB 却申请不到 3KB 连续块"的来源(碎片化),
+--   也是 2026-10-28 现场 sniff 崩溃的帮凶之一。
+--
+--   ⚠️ 只缓存【解码后的原始表】, 归一化(normalize)仍然每次跑:
+--      normalize_poll/normalize_alias 都不改它们的入参, 所以缓存的原始表
+--      是只读的, 安全; 而归一化结果每次新建, 各调用方拿到各自独立的一份,
+--      改它不会串味(这点很重要 —— poll.lastCfg 就长期持有 load_poll() 的结果)。
+--   ⚠️ 写盘(kv_set / reset_user / clear_pull)必须清缓存。
+
 local function load_json(k, default)
+    local cached = json_cache[k]
+    if cached ~= nil then return cached end
     local s = kv_get(k)
-    if not s or not json then return default end
+    if not s or not json then
+        json_cache[k] = default
+        return default
+    end
     local ok, t = pcall(json.decode, s)
-    if ok and type(t) == "table" then return t end
+    if ok and type(t) == "table" then
+        json_cache[k] = t
+        return t
+    end
     log.warn("cfg", "decode fail", k)
+    json_cache[k] = default
     return default
 end
 
@@ -319,6 +350,7 @@ function M.reset_user()
         local ok, v = pcall(fskv.get, k)
         if ok and v ~= nil and v ~= "" then
             fskv.set(k, "")
+            json_cache[k] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
             cleared[#cleared + 1] = name
         end
     end
@@ -336,6 +368,7 @@ function M.clear_pull()
     if not ok then return false, "读 ds_pull 失败: " .. tostring(v), false end
     if v == nil or v == "" then return true, nil, false end
     fskv.set(K_PULL, "")
+    json_cache[K_PULL] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
     if fskv.save then pcall(fskv.save) end
     return true, nil, true
 end

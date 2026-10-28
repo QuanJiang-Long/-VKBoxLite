@@ -65,7 +65,20 @@ local PAIR_TIMEOUT_MS = 250
 --   Modbus 规范 FC03/FC04 一次最多读 125 个寄存器(0x7D), 取 256 留余量;
 --   推断表总共也封顶(多从机 × 多地址的组合), 超了不再新增行。
 --   qty 的封顶逻辑在 util.clamp_qty (能单测), 这里只留总行数上限
-local MAX_INFER_ROWS = 512
+--
+-- ⚠️ 12-fix-3 (2026-10-28): 512 → 128。
+--   原来这一行是全项目最大的单块常驻内存: 推断表的每一行是一张 9 字段
+--   table(56 + 9*24 ≈ 272 字节), 512 行 ≈ 140KB, 而且 infer() 的产物被
+--   模块级 local infer_cache【整份留在内存里】(不是临时分配)。重建的那一瞬间
+--   还要额外吃 agg 哈希 + "slave:reg12345" key 串 ≈ 185KB。
+--   现场实测 2026-10-28: sniff 档 130 秒就把 Lua 堆(300KB)顶到 253KB,
+--   碎片化之后切不出 3KB 连续块 → 分配失败 → 分配器级 fatal → VM 退出重启,
+--   崩在收帧协程的 mbus.parse_value 上。
+--   128 行怎么定的: 下游 node_json 的 MAX_PROPS 是 64(上报给平台的物模型
+--   属性数上限), 推断表比它多一倍已经够用 —— 现场 sniff 实测只有 8~9 个点。
+--   512 这个数是 2026-10 为防"qty 展开成几万项"定的, 但那件事已经由
+--   util.clamp_qty 单独挡住了, 512 是过余量的。
+local MAX_INFER_ROWS = 128
 local stat = { frames = 0, reqs = 0, rsps = 0, errs = 0, paired = 0, orphans = 0,
                detect_round = 0, detect_fail = 0, infer_clamped = 0, rx_bytes = 0 }
 
@@ -137,19 +150,40 @@ end
 -- dtypeHistory FIFO 深度 5 (原 8): 越短, 单帧错位字/坏帧的格子越快被干净
 -- 流量翻回去; 8 深度要 ~6 帧, 现场看起来像"判死不认错" (2026-10, 2048)
 local dtypeHistory = {}  -- alias -> { d1, d2, ..., dN } FIFO 最近 N 帧 dtype
+-- alias 数的硬上限 (12-fix-3, 2026-10-28)。
+--   ⚠️ dtypeHistory 原来【是全项目唯一没有硬上限的常驻结构】: 主站每轮询
+--   一个新地址就多一条 alias, 只在 mon.start() 整表清空 —— mon.stop() 都不清。
+--   而 dataCache 那边是封顶 128 的, 同一批地址、只有 dataCache 有上限,
+--   这个不对称就是缺口。估算: 每 alias ≈ 200 字节, 128 个地址 ≈ 26KB,
+--   512 个 ≈ 100KB, 2000 个 ≈ 400KB(单这一项就爆 300KB 的堆)。
+--   上限取 128, 与 collector.dataCache 的 MAX_REGS 对齐 (同一批地址)。
+local MAX_HIST_ALIAS = 128
+local histOrder = {}   -- alias 的插入顺序, 用来淘汰最旧的
 
 local function pushHistory(alias, dtype)
-    local h = dtypeHistory[alias] or {}
+    local h = dtypeHistory[alias]
+    if not h then
+        -- 新 alias: 记账并封顶 (超了就淘汰最旧的那条)
+        dtypeHistory[alias] = { dtype }
+        histOrder[#histOrder + 1] = alias
+        while #histOrder > MAX_HIST_ALIAS do
+            dtypeHistory[table.remove(histOrder, 1)] = nil
+        end
+        return
+    end
     h[#h + 1] = dtype
     if #h > 5 then table.remove(h, 1) end
-    dtypeHistory[alias] = h
 end
 
 -- dtype 判型历史必须随会话清: 它决定连续性 50% 的权重, 不清的话上一轮
 -- sniff (甚至配对错位时记下的错判) 会"先入为主"绑死这一轮 —— 2054 曾因
 -- 历史 uint32 污染永远赢不回 float32 就是根因。mon.start 时调用 (2026-10)
+-- ⚠️ 12-fix-3: 原来只有 mon.start() 清, mon.stop() 不清 —— 退出 sniff 后
+--    上一轮几百个 alias 一直占着堆, 下次进来先背一份旧账再慢慢涨。
+--    现在 stop() 也清。
 local function clear_history()
     dtypeHistory = {}
+    histOrder = {}
 end
 
 -- 连续性: 跟历史 dtype 一致率 (本帧 + 历史最近 5 帧 FIFO)
@@ -740,6 +774,7 @@ function M.stop()
     rxbuf = ""
     pendingReqs, lastReqs = {}, {}
     infer_cache = nil   -- 12-fix: 帧都清了, 缓存的推断结果必须一起作废
+    clear_history()     -- 12-fix-3: dtype 判型历史也清(原来只有 start 清)
     try_baud, try_parity = nil, nil   -- 12-fix-2: 别把"在试什么"留在状态里
     tried = {}                        -- 12-fix-2: 候选记忆也作废
     -- 2026-10: 退出 sniff 也清干净(值/帧/识别结果; 识别参数是会话级的,
