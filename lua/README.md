@@ -58,7 +58,7 @@ return false        -- false=开发版 / true=发布版
 
 > 现场排障的具体做法：把 `_build_flag.lua` 改成 `return false` → `tools\prep_burn.bat` → 烧 `build\lua_burn\` → 排障完改回 `return true` 再烧一次。
 >
-> `R:NET`/`R:MEM` 已在 2026-10 删除（信息早就并进 `R:STAT` 的 iot/guard 段，前端 0 引用，留着只是白占脚本区）。
+> `R:NET`/`R:MEM` 已在 2026-10 删除（信息早就并进 `R:STAT` 的 mqtt/guard 段，前端 0 引用，留着只是白占脚本区）。
 
 ## 功能
 
@@ -179,7 +179,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 > ③ 单对象带 `value`/`values`
 > `{"cmd":"REPORT"/"READALL"}` 只置脏等下一个上报周期，不回包。
 >
-> **已删除的前端零调用指令**：`R:SNIFFCFG`/`W:SNIFFCFG`（前端无入口）、`R:IOTSTAT` 与 `R:POLL`（被 `R:STAT` 的 iot/mqtt 段和 data 段覆盖）、`W:RST`（前端各自有「恢复默认」按钮）、`W:REG`（被 `W:CFG` 覆盖：前端「保存配置」把 regs 并进 cfg 一起发，单独写寄存器表的指令从来没被调过）。连带删掉只服务它们的 `cfg.reset()`、`mqttcfg.reset()`、`collector.clear()`。
+> **已删除的前端零调用指令**：`R:SNIFFCFG`/`W:SNIFFCFG`（前端无入口）、`R:IOTSTAT` 与 `R:POLL`（被 `R:STAT` 的 mqtt 段和 data 段覆盖）、`W:RST`（前端各自有「恢复默认」按钮）、`W:REG`（被 `W:CFG` 覆盖：前端「保存配置」把 regs 并进 cfg 一起发，单独写寄存器表的指令从来没被调过）。连带删掉只服务它们的 `cfg.reset()`、`mqttcfg.reset()`、`collector.clear()`。
 >
 > **删指令前必做的两步**：① 数前端 `Enc.xxx` 调用次数（`protocol.js` 里挂着但 app.js 零调用 = 候选）；② 查仓库外的 `pc_tool` 还在不在用。两步都过才能删。
 
@@ -739,8 +739,9 @@ sniff 的通讯参数**用户不配**（sniff 没有持久槽，是刻意的设�
 > ① 它自己就是热路径上的分配（两次 `string.format` + 三次 `collectgarbage` 调用），
 > 每秒 2 行；
 > ② 被门槛挡住时那三次 `lua_kb()` 调用**仍然是实打实跑着的**，白花；
-> ③ 水位现在从 **`R:STAT` 的 `iot.lua_kb` 字段**看 —— 那是 5s/次的人工查看路径，
-> 零常态开销，前端想看就看。
+> ③ 水位现在从 **`R:STAT` 的 `mqtt.lua_kb` 字段**看 —— 那是 5s/次的人工查看路径，
+> 零常态开销，前端想看就看。（12-fix-8 起 `R:STAT` 只有一个 `mqtt` 段，
+> 原来的 `iot` 段与它内容完全一样、白占 1.5KB 连续内存，已删。）
 >
 > ⚠️ **别把 `collectgarbage("count")` 换成 `collectgarbage("collect")`** ——
 > 那是真回收，有毫秒级暂停，放热路径上有让 UART 环形缓冲溢出的风险。
@@ -857,9 +858,16 @@ I/user.iot census lua=126.4KB points=64 frames=10 aliases=128 rows=64 pub=213/0 
 | `meta=` / `topo=` | 统一调度已发的 U2 元数据 / U2 拓扑条数 |
 | `blk=` | 被 30 秒闸门挡掉的次数 |
 | `fps=` / `push=` | 帧率 / 点率（涨了 = 分配量又上去了） |
-| `gc=` | 堆水位保险丝（240KB）触发次数 |
+| `gc=` | 堆水位保险丝触发次数（12-fix-8 起阈值 **200KB(count)**，换算成池用量约 266KB ≈ 87%）。⚠️ 12-fix-7 那版阈值是 240KB，**比失效点还高 → 一次都没触发过**（现场 `gc=0`），垃圾堆到池 98.6% 才崩 |
 | `bfail=` | **大包拼不出来的次数**（U4/拓扑，12-fix-7 新增）。**不为 0 = 上报已经瘸了**，哪怕 `pub=` 的失败数是 0 |
 | `rc=` | 大包分配前主动回收的次数（12-fix-7 新增） |
+| `err=` / `aerr=` | 旁听解析出错次数 / 其中"堆分配失败"导致的丢帧（12-fix-8 新增）。**`aerr` 不为 0 = 堆又在吃紧**，设备没崩但已经开始丢帧 —— 这是崩溃前的先行指标 |
+
+⚠️ `collectgarbage("count")` **不等于** Lua 堆池的真实用量：现场
+`E/mem ... used 290368`（283.6KB）对应 `census lua=213.7KB`，差的 ~70KB 是
+**每个活跃对象的 GC 头 + 池块头**（约 1900 个对象，一个 ~40B）再加碎片。
+换算关系约 **池用量 ≈ count × 1.33**，定阈值时别忘了这一层（12-fix-8 的
+保险丝从 240 降到 200 就是为这个）。
 
 ⚠️ 只**读** `count`，绝不能用 `collectgarbage("collect")`（那是完整回收，
 有毫秒级暂停，热路径上有让 UART 环形缓冲溢出的风险）。
@@ -989,8 +997,12 @@ E/main Luat: not enough memory → Lua VM exit!! reboot in 15000ms
   口径，并加了 `fps=`（帧率）/`push=`（点率）/`gc=`（保险丝触发次数）——
   **fps/push 一升高就说明分配量又上去了**。
 - **堆水位保险丝**（`iot.lua` task_main，1 秒一轮，不在 UART 热路径上）：
-  水位 > 240KB 就 `collectgarbage("collect")` 一次，最多 10 秒一次。收完垃圾
-  之后**那块地方能复用**，碎片不再继续扩大。
+  水位 > **200KB**（`collectgarbage("count")`，换算成池用量约 266KB ≈ 87%）
+  就 `collectgarbage("collect")` 一次，最多 10 秒一次。
+  ⚠️ 12-fix-8 修正：原来阈值是 240KB，量的是 count 不是池用量，**比失效点
+  还高 → 一次都没触发过**，垃圾堆到池 98.6% 直接把设备送进重启。
+  另外**收完垃圾不会合并相邻空闲块**，所以它保的是「池的总用量别飘上去」，
+  不是「腾出一块连续大内存」。
 - **`W:RING=1` / `R:RING`**：环形调试缓冲改成显式打开（默认全关）。
 
 #### 还欠着的账（下一步）
@@ -1060,6 +1072,116 @@ intern 查表，CPU 级）。**教训：碎片化的账要拿 `test_churn.lua` �
 `bus/poll.lua`（21.6KB 源码）现在是**无条件加载**的
 （`main.lua:98` / `bus/ctrl.lua:5` / `svc/cmd.lua:12`）。
 `tests/lua/test_codesize.lua` 是量这个的诊断脚本。
+
+### 第四次现场复盘：翻页就崩（2026-10-28，12-fix-8）
+
+12-fix-7 那版烧上去之后，**没跑满一分钟就崩了** —— 不是 U4 停发，是设备
+**重启**（`Lua VM exit!! reboot in 15000ms`）。现场说法是「我在设备那边翻页，
+程序就崩了」。
+
+崩溃时间线（18:27:34 进 sniff → 18:28:35 重启，只活了 61 秒）：
+
+```
+18:27:38.723 W/user.iot reclaim before big alloc: lua=214.4KB -> collected
+18:27:38.768 W/user.iot topo_sig failed, skip this round: iot.lua:629:
+             not enough memory for buffer allocation
+18:27:41.461 D/user.cmd tx: RET:FAIL:handler error:cmd.lua:225:
+             not enough memory for buffer allocation
+18:27:43.855 E/mem memory allocation failed total 307192, used 290368, alloc 6088
+18:27:43.856 D/user.cmd tx: RET:INFER_PUSH={}
+18:28:35.367 E/mem memory allocation failed total 307192, used 302880, alloc 320
+18:28:35.383 E/user.coroutine.resume not enough memory
+             stack traceback: iot.lua:1898: in function <iot.lua:1846>
+18:28:35.886 E/main Lua VM exit!! reboot in 15000ms
+```
+
+现场表现对应关系：**前端 R:STAT / R:INFER 全部失败**（`RET:FAIL:handler
+error:not enough memory`）→ 界面看着像死了；最后 VM 退出 → 设备重启。
+
+#### 根因不是「内存不够」，是三层叠加
+
+**第一层：水位保险丝量错了对象（这是主因）**
+
+12-fix-5 那条保险丝（`iot.lua` task_main 里）是：
+
+```lua
+local kb = collectgarbage("count")
+if kb > 240 then collectgarbage("collect") end
+```
+
+它量的是 `collectgarbage("count")`（Lua 自己记的字节数），**不是 Lua 堆池
+的真实用量**。现场两个数放一起看就明白了：
+
+| 口径 | 现场值 | 说明 |
+|---|---|---|
+| `E/mem ... total 307192, used 290368` | **283.6 KB** | Lua 堆池**真实**用量 |
+| `census lua=213.7KB` | 213.7 KB | `collectgarbage("count")`，**不含**每对象开销 |
+| 差值 | **~70 KB** | 每个活跃对象的 GC 头 + 池块头（现场约 1900 个对象，一个 ~40B），再加碎片 |
+
+所以 count 停在 **213.7 < 240** → **保险丝一次都没触发**（现场 census
+`gc=0` 就是证据）→ 垃圾一路堆到池 **98.6%**（302880/307192）→ 连协程栈都
+分配不出来 → `E/user.coroutine.resume not enough memory` → **VM exit 重启**。
+
+换算：池用量 ≈ count × 1.33。阈值定 200KB（count）≈ 池 266KB ≈ 87%。
+
+**第二层：常驻太大（idle 基线就 186KB）**
+
+heap 才 307192 字节，idle 基线的 count 就 186KB —— 绝大部分是**代码**。
+而 sniff 档用不到的 `bus/poll`（~14KB 堆）和 `iot/pullcfg`（~7.5KB 堆）
+是**无条件加载**的。
+
+**第三层：GC 不合并相邻空闲块 → 救不了大块**
+
+现场日志直接证伪了 12-fix-7 的 C 方案：
+
+```
+18:27:38.723 reclaim before big alloc: lua=214.4KB -> collected
+18:27:38.768 topo_sig failed ... not enough memory     ← 45ms 后照样失败
+```
+
+LuatOS 的分配器不合并相邻空闲块（`iot.lua` 里的老注释早就写明了），
+GC 只是把垃圾块还回池子，**拼不出 6.4KB 的连续块**。所以 C 的定位要改成
+「让中等大小的分配有货可拿」，不是「腾大块」。
+
+#### 本轮改了五件事
+
+| 改动 | 位置 | 作用 |
+|---|---|---|
+| **保险丝阈值 240 → 200** | `iot.lua` task_main | 终于能在池用满之前触发（`gc=0` → `gc>0`）。阈值换算过：count × 1.33 ≈ 池用量 |
+| **`bus/poll` 惰性 require** | `main.lua` / `bus/ctrl.lua` / `svc/cmd.lua` | sniff 档不加载轮询引擎，**省约 14KB 常驻**。判据：poll 没被加载 ⇒ 它一定没在跑（只有 ctrl/cmd 会起它，而起它之前必然先加载） |
+| **`iot/pullcfg` 惰性 require** | `iot.lua` `get_pullcfg()` | sniff 档平台根本不下发配置（`pullcfg done sniff 模式平台不下发配置`），这模块一次都用不到，**省约 7.5KB** |
+| **R:STAT 去掉重复的 `iot` 段** | `svc/cmd.lua` | `iot` 段和 `mqtt` 段本来就是同一份表（现场实测逐字节一样），前端只读 `mqtt` 段。**每次应答少 1.5KB 连续内存**（每 5 秒一次） |
+| **收帧 / 上报协程加 pcall 兜底** | `bus/mon.lua` task()、`iot.lua` `M.start()` | 分配失败时丢一帧 / 丢一轮上报，**不再连累整个 VM**（原来未捕获 → 协程死 → VM exit → 重启） |
+
+另外把 `dep_graph.py` 的 require 正则补上逗号（`pcall(require, "x")` 这种
+惰性写法老正则会漏掉，依赖图少画边就检测不出循环），并让**惰性边不参与
+加载期循环检测**（12-fix-8 之后 `bus/ctrl ↔ bus/poll` 就是这种关系：ctrl
+惰性拉 poll，poll 顶层 require ctrl，谁先被加载都安全）。
+
+#### 怎么验证这轮修对了
+
+- `tests/lua/test_codesize.lua` 新增**启动路径断言**：模拟器里加载一遍
+  启动路径（14 个模块）后，`ctrl.poll_loaded()` / `cmd.poll_loaded()` /
+  `iot.pullcfg_loaded()` 必须全是 false。模拟器里 `package.loaded` 不存在，
+  所以由模块自己报。
+- 现场：
+  - `census lua=` 应从 213KB 降到 **190KB 上下**（少 20KB 常驻）；
+  - `gc=`（保险丝触发次数）**偶尔**会 >0 —— 瘦身后的稳态 count 约 194KB，
+    垃圾攒到 200KB 就收一次。**如果 `gc=0` 且 `lua=` 明显 >200KB，说明水位
+    又上去了**；
+  - `aerr=`（因堆分配失败丢帧的次数）应保持 0 —— 不为 0 就说明堆还在吃紧；
+  - 前端 R:STAT / R:INFER 不再 `RET:FAIL:handler error:not enough memory`；
+  - 跑满 10 分钟不重启。
+
+#### 还没解决的（下一轮的账）
+
+- 常驻还是大：`iot/iot.lua` 本身在设备上就占约 **75KB**（堆的 1/4），
+  `bus/mon` 约 27KB，`svc/cmd` 约 23KB。想再往下压，只能拆模块。
+- 拓扑 props 一条就是 6.4KB 连续内存。池里得真有这么大一块才行 ——
+  常驻降下来之后才有可能，别在碎片池里硬拼。
+- `collectgarbage("count")` 与池真实用量之间那 30% 的差，是**每个对象的
+  开销**（GC 头 + 池块头），不是垃圾，也不是能回收的碎片。它只能靠
+  「少造对象」来降，GC 帮不上。
 
 
 ## 485 无响应排查（现场顺序）

@@ -9,7 +9,6 @@ local mobile = util.try("mobile")
 
 local sn = require "sn/sn"
 local ctrl = require "bus/ctrl"
-local poll = require "bus/poll"
 local mon = require "bus/mon"
 local collector = require "data/collector"
 local cfgstore = require "cfg"
@@ -18,6 +17,31 @@ local iot = util.try("iot/iot")
 local guard = util.try("svc/guard")
 
 local M = {}
+
+-- ⚠️ 12-fix-8 (2026-10-28): bus/poll 改成【惰性 require】(见 bus/ctrl.lua 的说明)。
+--   sniff 档不跑轮询, 这 14KB 常驻堆纯属白占; 而 sniff 档恰恰是现场崩的档位
+--   (Lua 堆 307192 字节, 池用满 98.6% -> VM exit 重启)。
+--   只有真的要碰轮询的命令(W:CFG / W:RAWTEST / R:REG)才会把它拉进来。
+local poll_mod
+local poll_tried = false
+local function pollmod(load)
+    if load then
+        if not poll_tried then
+            poll_tried = true
+            local ok, p = pcall(require, "bus/poll")
+            poll_mod = ok and p or nil
+            if not poll_mod then log.warn("cmd", "bus/poll 加载失败") end
+        end
+        return poll_mod
+    end
+    if not poll_tried then return nil end
+    return poll_mod
+end
+
+-- 单元测试用: bus/poll 到底有没有被拉进来 (12-fix-8)
+function M.poll_loaded()
+    return poll_mod ~= nil
+end
 
 -- 4 种工作模式提到模块顶部
 -- 记录 3: 删 MODE_POLL/MODE_PULL (历史别名)。项目测试阶段, 没正式发布,
@@ -171,6 +195,9 @@ local function reg_cmds()
         -- idle/sniff 档: poll 本来就不该起, 即便 get_mode() 算出 SLOT_POLL
         --   也不在这两档起 (前端不会在这两档发 W:CFG, 这层防御是兜底)
         local in_poll_mode = cur_mode == "manual" or cur_mode == "platform"
+        -- W:CFG 就是在配轮询, 这里该把 poll 拉进来
+        local poll = pollmod(true)
+        if not poll then return M.reply("RET:FAIL:CFG:bus/poll 不可用") end
         if poll.needs_restart(n) then
             if poll.is_running() then
                 poll.stop()
@@ -196,7 +223,10 @@ local function reg_cmds()
     end)
 
     M.reg("R:REG", function()
-        M.reply("RET:REG=" .. jencode(poll.get_regs()))
+        -- poll 没加载 = 没起过轮询, 回空表即可(前端 manual 档下 poll 必然已加载)
+        local pm = pollmod(false)
+        local regs = pm and pm.get_regs() or nil
+        M.reply("RET:REG=" .. jencode(regs or {}))
     end)
 
     M.reg("R:VAL", function()
@@ -218,8 +248,14 @@ local function reg_cmds()
         if guard then parts[#parts + 1] = '"guard":' .. jencode(guard.status()) end
         local it = iot and iot.status() or nil
         if it then
+            -- ⚠️ 12-fix-8 (2026-10-28): 去掉重复的 "iot" 段。
+            --   iot.status() 和 mqtt 段本来是同一份表(现场 R:STAT 实测两段
+            --   逐字节一样), 应答里却各写一遍 —— 每 5 秒白多占 1.5KB
+            --   连续内存。现场这堆碎片就是被这种大块顶死的:
+            --     E/mem memory allocation failed total 307192, used 290368
+            --   前端只读 "mqtt" 段(见 renderer/app.js 的 r.data.mqtt),
+            --   "iot" 段没人用 —— 调试要看细节看 census 日志就行。
             local j = jencode(it)
-            parts[#parts + 1] = '"iot":' .. j
             parts[#parts + 1] = '"mqtt":' .. j
         end
         M.reply("RET:STAT={" .. table.concat(parts, ",") .. "}")
@@ -429,6 +465,8 @@ local function reg_debug_cmds()
 
     M.reg("W:RAWTEST", function(arg)
         if blocked_while_detecting("RAWTEST") then return end
+        local poll = pollmod(true)
+        if not poll then return M.reply("RET:FAIL:RAWTEST:bus/poll 不可用") end
         local a, b, c = arg:match("^%s*(%d*)%s*,?%s*(%d*)%s*,?%s*(%d*)%s*$")
         local r, err = poll.probe_raw(
             a ~= "" and tonumber(a) or nil,

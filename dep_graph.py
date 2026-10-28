@@ -6,10 +6,23 @@ import sys
 LUA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lua")
 
 def get_requires(path):
+    """返回 [(模块名, 是否惰性)]。
+
+    ⚠️ 12-fix-8 (2026-10-28): 惰性 require 写成 pcall(require, "x"),
+    中间那个逗号会让老正则漏掉这条依赖 —— 依赖图少画一条边,
+    循环依赖就检测不出来。所以这里把逗号也算进去。
+
+    惰性(pcall(require, ...))的边【不参与】加载期循环检测:
+    它在函数被调用时才加载, 而那时对方模块多半已经加载完了,
+    不构成"加载 A 时又去加载 B、B 又回头加载 A"的死锁。
+    12-fix-8 之后 bus/ctrl <-> bus/poll 就是这种关系:
+    ctrl 惰性拉 poll, poll 顶层 require ctrl —— 谁先被加载都安全。
+    """
     src = open(path, encoding="utf-8").read()
     mods = []
-    for m in re.finditer(r'require\s*\(?\s*"([^"]+)"', src):
-        mods.append(m.group(1))
+    for m in re.finditer(r'(pcall\s*\(\s*)?require\s*\(?\s*,?\s*"([^"]+)"', src):
+        lazy = m.group(1) is not None
+        mods.append((m.group(2), lazy))
     return mods
 
 def resolve(mod):
@@ -31,27 +44,34 @@ def main():
             if f.endswith(".lua"):
                 files[os.path.join(root, f)] = None
     graph = {}
+    eager = {}          # 加载期依赖(参与循环检测)
     missing = []
     for path in files:
         rel = os.path.relpath(path, LUA_DIR)
         deps = []
-        for mod in get_requires(path):
+        edeps = []
+        for mod, lazy in get_requires(path):
             r = resolve(mod)
             if r is None:
                 if "/" in mod:
                     missing.append(f"{rel}: require '{mod}' 无法解析到文件")
                 continue
-            deps.append(os.path.relpath(r, LUA_DIR))
+            d = os.path.relpath(r, LUA_DIR)
+            if d not in deps:
+                deps.append(d)
+            if not lazy and d not in edeps:
+                edeps.append(d)
         graph[rel] = deps
+        eager[rel] = edeps
 
-    # 循环检测（DFS）
+    # 循环检测（DFS）—— 只走【加载期】依赖, 惰性边不参与(见 get_requires 的说明)
     WHITE, GRAY, BLACK = 0, 1, 2
     color = {k: WHITE for k in graph}
     cycles = []
 
     def dfs(node, stack):
         color[node] = GRAY
-        for dep in graph.get(node, []):
+        for dep in eager.get(node, []):
             if color.get(dep) == GRAY:
                 cycles.append(" -> ".join(stack + [node, dep]))
             elif color.get(dep) == WHITE:

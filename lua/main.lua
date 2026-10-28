@@ -95,7 +95,10 @@ local cfgstore = mod("cfg", pcall(require, "cfg"))
 
 -- stage 4: 485 子系统(默认 idle)
 log.info("main", "[4/6] 485")
-local pollmod = mod("bus/poll", pcall(require, "bus/poll"))
+-- ⚠️ 12-fix-8 (2026-10-28): 不在这里无条件加载 bus/poll。
+--   它只有 manual/platform 档用得上(约 14KB 常驻堆), 而 sniff 档恰恰是
+--   现场崩掉的档位(Lua 堆 307192 字节, 池用满 98.6% -> VM exit 重启)。
+--   改成由 bus/ctrl / svc/cmd 在真正要用时惰性 require。
 local monmod = mod("bus/mon", pcall(require, "bus/mon"))
 local ctrl = mod("bus/ctrl", pcall(require, "bus/ctrl"))
 local gpio = util.try("gpio")

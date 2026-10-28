@@ -553,7 +553,22 @@ local function task()
         if guard then guard.alive() end
         local s = next_frame()
         if s then
-            process_frame(s)
+            -- ⚠️ 12-fix-8 (2026-10-28): 收帧加 pcall 兜底。
+            --   堆吃紧时(现场 2026-10-28 18:28:35 池用到 98.6%)这一帧的
+            --   解析分配会失败, 未捕获的话整个旁听协程死掉 -> LuatOS 报
+            --   "E/user.coroutine.resume" -> VM exit -> 设备重启, 现场表现为
+            --   "翻一下页就崩了"。这里兜住: 丢这一帧, 继续接着收。
+            --   pcall 本身不回收垃圾(不做 collectgarbage), 不影响实时性。
+            local ok, err = pcall(process_frame, s)
+            if not ok then
+                stat.errs = (stat.errs or 0) + 1
+                stat.alloc_err = (stat.alloc_err or 0) + 1
+                -- 别刷屏: 同一类错误连着来的时候只打第一条
+                if not stat.alloc_err_logged then
+                    stat.alloc_err_logged = true
+                    log.warn("mon", "frame process failed (堆不足?), 丢帧继续: " .. tostring(err))
+                end
+            end
         elseif #rxbuf > 0 then
             -- 可能是半帧: 已声明长度但数据没到齐, 此时丢首字节会把帧打碎。
             -- try_extract_len 需要至少 5 字节才能判定, 不足 5 字节只等待

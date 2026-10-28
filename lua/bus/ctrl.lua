@@ -2,13 +2,42 @@ local util = require "util"
 local log = util.log()
 local sys = util.try("sys")
 
-local poll = require "bus/poll"
 local mon = require "bus/mon"
 local cfgstore = require "cfg"
 local mqttcfg = require "iot/mqttcfg"
 local iot = util.try("iot/iot")
 
 local M = {}
+
+-- ⚠️ 12-fix-8 (2026-10-28): bus/poll 改成【惰性 require】。
+--   sniff 档不跑轮询, 这个模块(21.6KB 源码 / 约 14KB 常驻堆)纯属白占。
+--   现场实测: Lua 堆 307192 字节, idle 基线就 186KB(绝大部分是代码),
+--   池用满 98.6% 时连协程栈都分配不出来 -> VM exit 重启。
+--   判据: poll 没被加载 => 它一定没在跑(只有 ctrl/cmd 会起它, 而起它
+--   之前必然先加载)。所以"问在不在跑"不需要把模块拉进来。
+--   poll_tried=false 表示"从没问过要加载", 这时才允许免加载查询;
+--   一旦加载过(哪怕失败), 后面都按已加载处理, 避免反复 require。
+local poll_mod
+local poll_tried = false
+local function pollmod(load)
+    if load then
+        if not poll_tried then
+            poll_tried = true
+            local ok, p = pcall(require, "bus/poll")
+            poll_mod = ok and p or nil
+            if not poll_mod then log.warn("ctrl", "bus/poll 加载失败") end
+        end
+        return poll_mod
+    end
+    if not poll_tried then return nil end   -- 从没加载 => 一定没在跑
+    return poll_mod
+end
+
+-- 没加载 poll 时给前端看的空壳(字段名跟 poll.status() 一致, 前端不用改)
+local EMPTY_POLL = { running = false, timeout_ms = 500, baud = 9600, slave = 1,
+                     interval = 5000, timeout = 0, regs = 0, gen = 0, zero = 0,
+                     ok = 0, rounds = 0, werr = 0 }
+local EMPTY_WRITE = { done = 0, queued = 0, fail = 0, qmax = 8 }
 
 -- 34-fix: 当前模式. 之前 get_mode() 全靠 poll.is_running() / mon.is_running() 推导
 --   (manual=轮询在跑+poll 槽 / platform=轮询在跑+pull 槽 / sniff=mon 在跑 /
@@ -75,7 +104,9 @@ function M.switch_mode(mode, from_boot)
             stop_sniff()
             switch_delay()
         end
-        if poll.is_running() then poll.stop() end
+        -- 进 manual/platform 档必然要起轮询, 这里直接把 poll 拉进来
+        local pm = pollmod(true)
+        if pm and pm.is_running() then pm.stop() end
         -- 档位先切再起轮询: iot.set_manual 会断开重连换订阅清单, 必须在
         -- 拉取握手之前就位, 否则 hello 发出去没人应答(platform 才需要)。
         -- ⚠️ 别把这里写反: set_manual(true)=手动档(订用户 topic),
@@ -99,7 +130,8 @@ function M.switch_mode(mode, from_boot)
             have_cfg = cfgstore and cfgstore.has_pull_cfg and cfgstore.has_pull_cfg()
         end
         if have_cfg then
-            if not poll.start(slot) then return false, "FAIL poll start" end
+            -- pm 为 nil = bus/poll 加载失败(模块缺失), 当成起不来
+            if not (pm and pm.start(slot)) then return false, "FAIL poll start" end
         else
             log.info("ctrl", string.format(
                 "%s 档: %s 槽空, 暂不起轮询, 等配置就位后由 W:CFG / auto_apply 补起",
@@ -133,8 +165,11 @@ function M.switch_mode(mode, from_boot)
         return true, "OK manual started"
 
     elseif mode == "sniff" then
-        if poll.is_running() then
-            poll.stop()
+        -- sniff 档不跑轮询: poll 没加载过就说明它没在跑, 别为"问一句"
+        -- 把 14KB 常驻堆拉进来(12-fix-8)
+        local pm2 = pollmod(false)
+        if pm2 and pm2.is_running() then
+            pm2.stop()
             switch_delay()
         end
         if mon.is_running() then stop_sniff() end
@@ -171,7 +206,10 @@ function M.switch_mode(mode, from_boot)
         --   它现在无条件解绑 UART 回调 + 关串口。原来带守卫, 只跑过 mon
         --   没跑过 poll 时这个清理根本不执行, 切 idle 后 UART 还开着,
         --   总线上的字节照样被读走。
-        poll.stop()
+        --   12-fix-8: poll 从没加载过就不用停(它没绑过 UART), 也别为
+        --   停它把 14KB 常驻堆拉进来。
+        local pm3 = pollmod(false)
+        if pm3 then pm3.stop() end
         stop_sniff()
         local cleared = M.reset_user_cfg()
         S.cur = "idle"  -- 34-fix: 记下当前 mode
@@ -217,21 +255,29 @@ function M.get_mode()
 end
 
 function M.is_busy()
-    return poll.is_running() or mon.is_running()
+    local pm = pollmod(false)
+    return (pm and pm.is_running()) or mon.is_running()
+end
+
+-- 单元测试用: bus/poll 到底有没有被拉进来 (12-fix-8)。
+-- 模拟器里 package.loaded 不存在, 没法从外面查, 所以自己报。
+function M.poll_loaded()
+    return poll_mod ~= nil
 end
 
 function M.status()
+    local pm = pollmod(false)
     return {
         mode = M.get_mode(),
         busy = M.is_busy(),
         -- 前端区分"手动配置"和"拉取配置"两张卡用的就是这两个字段:
         -- poll_src = manual/pull 当前在采哪份; pull_ready = ds_pull 拉过没有
-        poll_src = (poll.is_running() and poll.cur_slot()) or nil,
+        poll_src = (pm and pm.is_running() and pm.cur_slot()) or nil,
         pull_ready = cfgstore.pull_src(),
         pull = iot and iot.pull_status() or nil,
-        poll = poll.status(),
+        poll = pm and pm.status() or EMPTY_POLL,
         mon = mon.status(),
-        write = poll.write_status(),
+        write = pm and pm.write_status() or EMPTY_WRITE,
     }
 end
 

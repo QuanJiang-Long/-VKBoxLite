@@ -32,9 +32,23 @@ local mqttcfg = require "iot/mqttcfg"
 local pubsched = require "iot/pubsched"   -- 12-fix-4: 统一上报调度(节奏都在那管)
 local collector = require "data/collector"
 local cfgstore = require "cfg"
-local pullcfg = require "iot/pullcfg"
 local mon = require "bus/mon"
 local MqttUtil = require "util/mqtt_util"
+
+-- ⚠️ 12-fix-8 (2026-10-28): pullcfg 改成【惰性 require】。
+--   sniff 档平台根本不下发配置(日志: "pullcfg done sniff 模式平台不下发配置"),
+--   这个模块在 sniff 档一次都用不到, 却无条件占着 ~7.5KB 常驻堆。
+--   现场实测: Lua 堆 307192 字节, idle 基线就 186KB(其中绝大部分是代码),
+--   每 KB 都要命 —— 池用满 98.6% 时连协程栈都分配不出来 -> VM exit 重启。
+--   只在 platform/pullpull 档(平台真的要下发配置时)才加载。
+local pullcfg_mod
+local function get_pullcfg()
+    if pullcfg_mod == nil then
+        local ok, p = pcall(require, "iot/pullcfg")
+        pullcfg_mod = (ok and p) or false
+    end
+    return pullcfg_mod or nil
+end
 
 -- ⚠️ 12-fix-7 (2026-10-28): U4 降级分包的每包点数。
 --   整包(77 个点 ≈ 6KB)拼不出来时(碎片化), 按这个数拆成 ~2KB 的小包,
@@ -107,12 +121,28 @@ end
 
 local M = {}
 
+-- 单元测试用: iot/pullcfg 有没有被拉进来 (12-fix-8)。
+-- sniff 档平台不下发配置, 这个模块一次都用不到, 白占 ~7.5KB 常驻堆。
+function M.pullcfg_loaded()
+    return pullcfg_mod ~= nil and pullcfg_mod ~= false
+end
+
 local S = {}
 
 -- 大块分配前按水位回收一次。
 -- ⚠️ 完整回收有毫秒级停顿, 所以【只在超水位时做】, 而且放在 iot 的
 --   巡检/发布路径上(不在 UART 收帧协程里 —— 那会让环形缓冲溢出丢帧)。
 --   现场帧率 52 帧/秒 ≈ 每 19ms 一帧, 几毫秒的停顿是安全的。
+--
+-- ⚠️ 12-fix-8 (2026-10-28): 现场证明【它救不了大块】。日志:
+--     18:27:38.723 reclaim before big alloc: lua=214.4KB -> collected
+--     18:27:38.768 topo_sig failed, skip this round: iot.lua:629:
+--                  not enough memory for buffer allocation
+--   收了垃圾 45ms 后照样切不出 6.4KB 连续块 —— LuatOS 的分配器不合并相邻
+--   空闲块, GC 只是把垃圾块还回池子, 拼不出连续大块。
+--   所以它现在的定位是"顺带把垃圾清掉, 让中等大小的分配(几百字节到
+--   几KB)有货可拿", 不是"腾大块"。真正的解法是少占常驻(12-fix-8 的
+--   poll/pullcfg 惰性 require)和把水位判据改对(保险丝 240 → 200)。
 local function reclaim_if_high()
     local kb = collectgarbage("count")
     if kb > BIG_ALLOC_KB then
@@ -505,7 +535,7 @@ local function census()
     end
     S.census_prev = { frames = cs.frames or 0, pushed = cs.pushed or 0, clock = now }
     log.info("iot", string.format(
-        "census lua=%.1fKB points=%d frames=%d aliases=%d rows=%d pub=%d/%d meta=%d topo=%d blk=%d fps=%d push=%d gc=%d bfail=%d rc=%d",
+        "census lua=%.1fKB points=%d frames=%d aliases=%d rows=%d pub=%d/%d meta=%d topo=%d blk=%d fps=%d push=%d gc=%d bfail=%d rc=%d err=%d aerr=%d",
         collectgarbage("count"),
         cs.points or 0, cs.frames or 0,
         ms.hist_aliases or 0, ms.infer_rows or 0,
@@ -518,7 +548,11 @@ local function census()
         --   —— 这个数不为 0 就是"上报已经瘸了"。
         S.build_fail or 0,
         -- rc = 大包分配前主动回收的次数(水位 >200KB 才回收)
-        S.reclaim_n or 0))
+        S.reclaim_n or 0,
+        -- 12-fix-8: err = 旁听解析出错次数(含丢帧), aerr = 其中"堆分配失败"
+        --   导致的丢帧(新加的 pcall 兜底记的)。aerr 不为 0 = 堆又在吃紧,
+        --   设备没崩但已经开始丢帧了 —— 这是崩溃前的先行指标。
+        ms.errs or 0, ms.alloc_err or 0))
 end
 
 -- ===== U2 拓扑上报 / U3 网关资源 / U7 指令回执 =====
@@ -1433,7 +1467,13 @@ M.reply_config = reply_config
 -- REPORT/WRITE/裸值都不带它, 不可能误判。
 -- 塞进拉取结果槽位以 done 态呈现, 前端复用回填渲染
 local function recv_push(t, payload)
-    local r, err = pullcfg.parse_snap(t, t.configSnapshot)
+    local pc = get_pullcfg()
+    if not pc then
+        S.push_err = "pullcfg 未加载(该档位不应收到配置推送)"
+        log.warn("iot", "push ignored: pullcfg not loaded")
+        return false
+    end
+    local r, err = pc.parse_snap(t, t.configSnapshot)
     if not r then
         S.push_err = tostring(err)
         -- 原始报文必须打出来: 解析失败只说"哪个字段不对", 不说了收到什么,
@@ -1780,7 +1820,11 @@ local function pull_step()
         if S.pull_payload then
             local payload = S.pull_payload
             S.pull_payload = nil
-            local r, err = pullcfg.parse(payload)
+            local pc = get_pullcfg()
+            if not pc then
+                return pull_finish("fail", "pullcfg 未加载")
+            end
+            local r, err = pc.parse(payload)
             if not r then
                 log.warn("iot", "pull parse fail: " .. tostring(err) .. " body=" .. tostring(payload))
                 return pull_finish("fail", tostring(err))
@@ -1896,22 +1940,30 @@ local function task_main()
             -- 攒到发 U3 时算成占比。os.clock() 在本工程里当秒级单调时钟用
             -- (见 bus/mon.lua 的配对超时), 不是 CPU 时间
             local t0 = os.clock()
-            -- ⚠️ 12-fix-5 (2026-10-28): 堆水位保险丝 —— 崩溃的最后一道防线。
-            --   现场崩前: E/mem used 282488/307192, 而 collectgarbage("count")
-            --   只有 ~220KB。差出来的 60KB 是【没收的垃圾 + 碎片】。
-            --   LuatOS 的分配器不合并相邻空闲块, 所以垃圾堆在那儿, 那块
-            --   地方就永远切不出连续大块: R:STAT(3.4KB)/R:FRAMES(9KB)/
-            --   拓扑(1.2KB) 全部 "not enough memory for buffer allocation",
-            --   顶层再叠上 mon 收帧协程的 parse_value → VM 退出 → 重启。
-            --   这里水位超阈值就收一次垃圾: 收了之后【那块地方能复用】,
-            --   碎片不再继续扩大。10 秒最多一次, 且不在 UART 热路径上
-            --   (task_main 每秒一轮), 一次全回收几毫秒。
-            --   ⚠️ 阈值 240 是"代码 190 + 数据 30 + 余量"的经验值, 现场
-            --   看 census 的 lua= 调; 12-fix-5 降完 churn 之后正常 sniff
-            --   应该稳在 220~235, 这条基本不会触发。
+            -- ⚠️ 12-fix-8 (2026-10-28): 阈值 240 → 200, 因为这条保险丝
+            --   【量错了对象】—— 它量的是 collectgarbage("count")(Lua 自己
+            --   记的字节数), 不是 Lua 堆池的真实用量。
+            --   现场实测(12-fix-8 崩溃日志, 18:28:35):
+            --     E/mem memory allocation failed total 307192, used 290368
+            --     同时 census lua=213.7KB
+            --   池实际用了 283.6KB, count 只报 213.7KB —— 差的那 ~70KB 是
+            --   【每个对象的 GC 头 + 池块头】(现场约 1900 个对象, 一个 ~40B)
+            --   再加碎片。count 永远看不到这一块。
+            --   240 的阈值因此形同虚设: count 停在 213 < 240 → 保险丝一次
+            --   都没触发(现场 census gc=0), 垃圾一路堆到池 98.6%, 最后连
+            --   协程栈都分配不出来 → "E/user.coroutine.resume not enough
+            --   memory" → VM exit → 重启。
+            --   换算: 池用量 ≈ count × 1.33。阈值 200KB(count) ≈ 池 266KB
+            --   ≈ 87%, 留够连续大块的余地。
+            --   ⚠️ 收完垃圾不会【合并】相邻空闲块(LuatOS 分配器不合并),
+            --   这条保险丝的作用是"别让池的总用量飘上去", 不是"腾出一块
+            --   连续大内存" —— 后者只能靠少占常驻(见 12-fix-8 的
+            --   bus/poll / iot/pullcfg 惰性 require)。
+            --   10 秒最多一次, 且不在 UART 热路径上(task_main 每秒一轮),
+            --   一次全回收几毫秒。
             if (os.clock() - (S.gc_at or -1e9)) >= 10 then
                 local kb = collectgarbage("count")
-                if kb > 240 then
+                if kb > 200 then
                     collectgarbage("collect")
                     S.gc_at = os.clock()
                     S.gc_trig = (S.gc_trig or 0) + 1
@@ -2118,7 +2170,33 @@ function M.start()
     end
     reset_state()
     S.want_run = true
-    if sys then sys.taskInit(task_main) end
+    if sys then
+        -- ⚠️ 12-fix-8 (2026-10-28): 给上报协程套一层 pcall。
+        --   现场崩溃日志:
+        --     18:28:35.367 E/mem memory allocation failed total 307192,
+        --                   used 302880, alloc 320
+        --     18:28:35.383 E/user.coroutine.resume not enough memory
+        --                   iot.lua:1898
+        --     18:28:35.886 E/main Lua VM exit!! reboot in 15000ms
+        --   堆用到 98.6% 时, 这一轮里任何一次分配失败都会把协程带死,
+        --   LuatOS 判定成致命错误 -> 整个 VM 退出 -> 设备重启(现场"翻页
+        --   就崩了")。这里兜住: 死一轮就清缓存 + 回收, 再拉起来,
+        --   最多丢一轮上报, 不再连累整个设备。
+        sys.taskInit(function()
+            while true do
+                local want = S.want_run
+                local ok, err = pcall(task_main)
+                if ok then break end          -- 正常退出(want_run=false)
+                log.warn("iot", "task_main error, restart: " .. tostring(err))
+                S.want_run = want              -- 恢复用户原本的意图
+                if not want then break end
+                pcall(collector.trim_cache)
+                pcall(mon.trim_reqs)
+                collectgarbage("collect")
+                if sys then sys.wait(1000) end
+            end
+        end)
+    end
     log.info("iot", "started")
     return true
 end
