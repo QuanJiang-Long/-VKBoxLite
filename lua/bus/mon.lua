@@ -67,7 +67,20 @@ local PAIR_TIMEOUT_MS = 250
 --   qty 的封顶逻辑在 util.clamp_qty (能单测), 这里只留总行数上限
 local MAX_INFER_ROWS = 512
 local stat = { frames = 0, reqs = 0, rsps = 0, errs = 0, paired = 0, orphans = 0,
-               detect_round = 0, detect_fail = 0, infer_clamped = 0 }
+               detect_round = 0, detect_fail = 0, infer_clamped = 0, rx_bytes = 0 }
+
+-- 识别进度: 当前正在试的 baud / parity。12-fix-2 起暴露给 R:STAT,
+-- 让前端/现场能看出"设备此刻在试什么", 而不是只看到一个转圈。
+-- 2026-10-27 现场: 4800 奇校验在盲扫里排第 32 位, 要等 ~52s, 全程黑盒。
+local try_baud = nil
+local try_parity = nil
+
+-- 已试过且没命中的候选 (12-fix-2)。key = "baud:parity"。
+-- 原来 detect_loop 落空后从第一个候选整个重扫, 21 个候选 × 2.5s 白扫第二遍,
+-- 总线上还在反复切 baud 打断外部主站。现在记住试过的, 轮次之间不重扫。
+-- ⚠️ 只在"新一轮识别"(M.request_detect / M.start)时清空 —— 同一轮里的
+--    重试要保留, 否则退化成每轮都从头扫。
+local tried = {}
 
 local function key(slave, qty) return tostring(slave) .. ":" .. tostring(qty) end
 
@@ -351,6 +364,13 @@ local function on_receive(id, len)
         if type(data) ~= "string" or #data == 0 then break end
         rxbuf = rxbuf .. data
         lastRx = os.time()
+        -- 12-fix-2: 收到多少【字节】(与 CRC 是否通过无关)。原来只有
+        -- stat.frames(CRC 合法帧数)这一个计数, 于是"这个 baud 上有流量、
+        -- 只是校验位不对"这个强信息被整个丢掉了 —— 而它正是把 21 个候选
+        -- 压到 7 个的关键(先用字节定位 baud, 再用 CRC 找 parity)。
+        -- 先把这个计数加上并打进日志, 用现场数据确认"parity 错时字节收不收得到",
+        -- 确认了再上 7 候选方案 (见 .agent-memory/detect-strategy-2026-10-27.md)。
+        stat.rx_bytes = stat.rx_bytes + #data
         if #rxbuf > 256 then rxbuf = rxbuf:sub(-128) end
     end
 end
@@ -516,6 +536,11 @@ function M.start(c)
     collector.clear_all()
     infer_cache = nil   -- 12-fix: 缓存是上一轮帧推断出来的, 新一轮必须重算
     _G.mon_detect_result = nil
+    -- 12-fix-2: 新一轮识别 = 候选记忆清零(从头扫)。
+    -- ⚠️ 只在 start / restart_detect 清, 不在 request_detect 清 ——
+    --    request_detect 也被 cmd.lua 的 R:AUTODETECT 轮询路径调用, 那里
+    --    清了就等于每轮从头扫, 候选记忆白做。
+    tried = {}
     -- sniff-2 fix: 重新进 sniff 时清 forceStop, 否则上次的 stop 标志会让
     --   auto_detect 立刻 return "stopped" (detect_loop 也会跟着退)
     forceStop = false
@@ -571,54 +596,75 @@ function M.auto_detect()
     -- sniff-2 fix: mon.start 后强制清 forceStop, 否则上次的 stop 标志
     --   会让本轮 auto_detect 立即 return "stopped"
     forceStop = false
-    -- sniff 启动后等 5s: 142 设备 UART 从 poll 切到 sniff 可能错乱,
-    -- 等它稳定再切 baud. 之前 0 帧就是 142 设备 UART 没准备好
-    log.info("mon", "auto_detect: wait 5s for 142 UART stable")
-    if not sniff_wait(5000) then return nil, "stopped" end
+    -- sniff 启动后等一会: 142 设备 UART 从 poll 切到 sniff 可能错乱,
+    -- 等它稳定再切 baud. 之前 0 帧就是 142 设备 UART 没准备好。
+    -- 12-fix-2: 硬编码 5000 → cfg.DETECT_SETTLE_MS(2000)。这 5 秒里什么
+    -- 都没干, 用户纯干等; 2 秒足够 UART 稳定。
+    log.info("mon", "auto_detect: wait " .. tostring(cfg.DETECT_SETTLE_MS)
+        .. "ms for 142 UART stable")
+    if not sniff_wait(cfg.DETECT_SETTLE_MS) then return nil, "stopped" end
     for _, p in ipairs({ 0, 1, 2 }) do
         for _, b in ipairs(cfg.DETECT_BAUDS) do
-            -- 完整复位 (合宙 Q1 修法): close + wait500 + setup + on
-            -- 在已打开的 485 口上 uart.setup 走 Uart_ChangeBR 快路径,
-            -- 只改分频不复位 RX/DE, 需 close+wait500 强制重开.
-            pcall(uart.close, mbus.UART_ID)
-            if not sniff_wait(500) then return nil, "stopped" end
-            rxbuf = ""
-            local ok = pcall(uart.setup, mbus.UART_ID, b, 8, 1, mbus.parity_to_uart(p))
-            if ok then
-                pcall(uart.on, mbus.UART_ID, "receive", on_receive)
-                -- 高 baud 切完多等 200ms (跟之前 D2 v5 一致, 142 设备 19200
-                -- t3.5=1.82ms 太早到 RX FIFO 接不住, 给驱动恢复窗口)
-                if b >= 19200 then
-                    if not sniff_wait(200) then return nil, "stopped" end
+            -- 12-fix-2: 跳过本轮已经试过且没命中的候选。原来落空后整个
+            -- 21 个候选重扫, 白扫第二遍还反复切 baud 打断外部主站。
+            -- (不用 goto: Lua 5.1 没有这个语法, 且 5.3 的 goto 不能跳进
+            --  局部变量的作用域, 用 if 包一层最稳)
+            local ckey = tostring(b) .. ":" .. tostring(p)
+            if not tried[ckey] then
+                tried[ckey] = true
+                -- 完整复位 (合宙 Q1 修法): close + wait500 + setup + on
+                -- 在已打开的 485 口上 uart.setup 走 Uart_ChangeBR 快路径,
+                -- 只改分频不复位 RX/DE, 需 close+wait500 强制重开.
+                pcall(uart.close, mbus.UART_ID)
+                if not sniff_wait(500) then return nil, "stopped" end
+                rxbuf = ""
+                local ok = pcall(uart.setup, mbus.UART_ID, b, 8, 1, mbus.parity_to_uart(p))
+                if ok then
+                    pcall(uart.on, mbus.UART_ID, "receive", on_receive)
+                    -- 12-fix-2: 暴露"当前在试什么", 前端/现场不用对着转圈猜
+                    try_baud, try_parity = b, p
+                    -- 高 baud 切完多等 200ms (跟之前 D2 v5 一致, 142 设备 19200
+                    -- t3.5=1.82ms 太早到 RX FIFO 接不住, 给驱动恢复窗口)
+                    if b >= 19200 then
+                        if not sniff_wait(200) then return nil, "stopped" end
+                    end
+                    -- ★ Q2: 静默监听 cfg.DETECT_WIN_MS (默认 800ms), 不主动发探针.
+                    -- 之前主动发 8 字节 modbus 请求会让 142 passive 设备响应, 但
+                    -- 也占用 485 总线跟其他 master 冲突. 静默监听切 baud 后看 RX
+                    -- 有没有 CRC 合法帧即可, 总线上有其他 master 在轮询就能命中.
+                    -- 142 设备场景无 master 时永远 0 帧, 由 cfg.BAUD 兜底 (见下).
+                    local before_frames = stat.frames
+                    local before_bytes = stat.rx_bytes
+                    if not sniff_wait(cfg.DETECT_WIN_MS) then return nil, "stopped" end
+                    -- 12-fix-2: bytes= 是这个窗口收到的【字节】数(与 CRC 无关),
+                    -- frames= 是 CRC 合法帧数。bytes>0 而 frames=0 说明"这个 baud
+                    -- 上有流量、只是校验位不对" —— 将来把 21 个候选压到 7 个的关键
+                    -- 判据, 现在先量出来看现场是不是这样。
+                    log.info("mon", "check baud=" .. b .. " p=" .. p
+                        .. " frames=" .. tostring(stat.frames - before_frames)
+                        .. " bytes=" .. tostring(stat.rx_bytes - before_bytes)
+                        .. " paired=" .. tostring(stat.paired)
+                        .. " rxbuf=" .. tostring(#rxbuf)
+                        .. " last_rx=" .. tostring(lastRx))
+                    -- ★ Q2: 命中条件改 any CRC 合法帧 (原来要 req+rsp 配对, 静默监听
+                    -- 收不到 master 的 rsp 时会漏检). 1 帧 CRC 误判 ~1/65536, 可接受.
+                    if stat.frames > before_frames then
+                        lastBaud = b
+                        try_baud, try_parity = nil, nil
+                        log.info("mon", "detect ok: baud=" .. b .. " parity=" .. p)
+                        return { baud = b, databits = 8, stopbits = 1, parity = p }
+                    end
                 end
-                -- ★ Q2: 静默监听 cfg.DETECT_WIN_MS (默认 2000ms), 不主动发探针.
-                -- 之前主动发 8 字节 modbus 请求会让 142 passive 设备响应, 但
-                -- 也占用 485 总线跟其他 master 冲突. 静默监听切 baud 后看 RX
-                -- 有没有 CRC 合法帧即可, 总线上有其他 master 在轮询就能命中.
-                -- 142 设备场景无 master 时永远 0 帧, 由 cfg.BAUD 兜底 (见下).
-                local before_frames = stat.frames
-                if not sniff_wait(cfg.DETECT_WIN_MS) then return nil, "stopped" end
-                log.info("mon", "check baud=" .. b .. " p=" .. p
-                    .. " frames=" .. tostring(stat.frames)
-                    .. " paired=" .. tostring(stat.paired)
-                    .. " rxbuf=" .. tostring(#rxbuf)
-                    .. " last_rx=" .. tostring(lastRx))
-                -- ★ Q2: 命中条件改 any CRC 合法帧 (原来要 req+rsp 配对, 静默监听
-                -- 收不到 master 的 rsp 时会漏检). 1 帧 CRC 误判 ~1/65536, 可接受.
-                if stat.frames > before_frames then
-                    lastBaud = b
-                    log.info("mon", "detect ok: baud=" .. b .. " parity=" .. p)
-                    return { baud = b, databits = 8, stopbits = 1, parity = p }
-                end
+                if not running or forceStop then return nil, "stopped" end
             end
-            if not running or forceStop then return nil, "stopped" end
         end
     end
     -- ★ Q2: 兜底 cfg.BAUD (restore_params 已经做了). 142 设备等 passive
     -- 从机场景没有其他 master 轮询, 静默监听永远 0 帧, 必须 user 配
     -- cfg.BAUD 才能 work. 返回 {..., fallback=true} 让 detect_loop 知道是兜底.
+    try_baud, try_parity = nil, nil
     restore_params()
-    log.warn("mon", "detect silent fail: 21 candidates no hit, fallback cfg.BAUD=" .. cfg.BAUD)
+    log.warn("mon", "detect silent fail: all candidates tried, fallback cfg.BAUD=" .. cfg.BAUD)
     return { baud = cfg.BAUD, databits = cfg.DATABITS,
              stopbits = cfg.STOPBITS, parity = cfg.PARITY,
              fallback = true }
@@ -668,6 +714,7 @@ end
 function M.restart_detect()
     if not running then return false, "not running" end
     collector.clear_all()
+    tried = {}   -- 12-fix-2: 用户主动重来 = 从头扫, 候选记忆清零
     return M.request_detect()
 end
 
@@ -693,6 +740,8 @@ function M.stop()
     rxbuf = ""
     pendingReqs, lastReqs = {}, {}
     infer_cache = nil   -- 12-fix: 帧都清了, 缓存的推断结果必须一起作废
+    try_baud, try_parity = nil, nil   -- 12-fix-2: 别把"在试什么"留在状态里
+    tried = {}                        -- 12-fix-2: 候选记忆也作废
     -- 2026-10: 退出 sniff 也清干净(值/帧/识别结果; 识别参数是会话级的,
     -- 不清的话下次进 sniff 前端会把上次的旧参数当成"已识别"显示)
     collector.clear_all()
@@ -719,6 +768,14 @@ function M.status()
     end)()
     st.last_rx = lastRx
     st.buf = #rxbuf
+    -- 12-fix-2: 识别进度 —— 当前正在试的 baud/parity。现场原来只能看到一个
+    -- 转圈, 不知道设备此刻在试什么(2026-10: 4800 奇校验盲扫第 32 位,
+    -- 要等 ~52s, 全程黑盒)。
+    st.try_baud = try_baud
+    st.try_parity = try_parity
+    -- 12-fix-2: 累计收到的字节数(与 CRC 无关)。用来判断"这个 baud 上有
+    -- 流量、只是校验位不对" —— 将来把 21 个候选压到 7 个的关键判据。
+    st.rx_bytes = stat.rx_bytes
     return st
 end
 

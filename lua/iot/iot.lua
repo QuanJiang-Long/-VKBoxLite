@@ -124,6 +124,10 @@ local function reset_state()
         -- 资源的时间(OS time)。cpu_percent 的两个累加量也在这里, reset 时归零,
         -- 否则重连后会拿上一个生命周期的残留算占比
         meta_sig = nil, topo_sig = nil, res_at = 0,
+        -- 12-fix-2: 上次【重建拓扑】的时刻 (os.clock, 秒级单调)。拓扑重建
+        --   按 cfg.TOPO_REBUILD_MS(5s) 节流, 降 build_nodes 的分配速率。
+        --   置 -1e9 = 还没重建过, 第一轮立刻重建(不等 5 秒)。
+        topo_at = -1e9,
         busy_s = 0, span_s = 0,
         -- hello_at 是【连接生命周期内最后一次 hello 成功发送】的时间(OS time),
         -- 不是上电时间 —— task_main 靠它算 pollpull 档 30min 重发。置 0 表示
@@ -366,16 +370,25 @@ end
 --   放在热路径上有让 UART 环形缓冲溢出的风险。本文件里 collect("collect")
 --   只出现在 destroy_client() 和 OOM 兜底两处, 都不在 UART 路径上。
 --
--- ⚠️ 临时诊断插桩 (11-fix, 2026-10-27), 定位完可以摘掉。
+-- ⚠️ 内存水位插桩已摘除 (12-fix-2, 2026-10-27)。
+--   原来 build_nodes() 里每轮打两行 "mem bn infer/nodes" (collectgarbage
+--   ("count") 读真 Lua 堆用量)。摘掉的理由:
+--     1) 它自己就是热路径上的分配(两次 string.format + 两次 collectgarbage
+--        调用), 每秒 2 行;
+--     2) 常态下它被门槛(MEM_LOG_KB=210)挡住时, 三处 lua_kb() 调用仍然是
+--        实打实跑着的, 白花;
+--     3) 真正的水位现在从 R:STAT 的 lua_kb 字段看(零常态开销, 前端想看就看),
+--        真要报警再单独加阈值检查。
+--   ⚠️ 千万别改回 collectgarbage("collect") —— 那是真回收, 有毫秒级暂停,
+--      放热路径上有让 UART 环形缓冲溢出的风险。
+--
+-- 只给 status() 用: R:STAT 是 5s/次的人工查看路径, 在这里读一次堆水位
+-- 零常态开销 (原来挂在 build_nodes 的每秒热路径上才是浪费)。
+-- ⚠️ 读的是【真 Lua 堆用量】。别用 rtos.meminfo("sys") —— 那是系统内存,
+--    实测和 Lua 堆差 3 倍 (同刻 sys 报 67KB/198KB, 这里报 ~200KB)。
 local function lua_kb()
     return collectgarbage("count")
 end
-
--- 插桩的打印门槛 (KB)。实测 (sniff 档, 2026-10-27):
---   稳态 infer 起点 ~198KB / 轮内峰值 ~204KB, 刚识别完那一下瞬时 ~222KB。
---   取 210 —— 常态静默, 超标才报。既不每秒刷 2 行 log, 又能在满负荷
---   验证或异常膨胀时一眼看出水位。
-local MEM_LOG_KB = 210
 
 -- 内部 parity 0/1/2 -> 平台单字母。PULL_PARITY(core/config.lua)是正方向
 -- "none/even/odd"->0/1/2, 这里是它的逆; 单独写死而不是反查 PULL_PARITY,
@@ -456,7 +469,6 @@ local function build_nodes()
     local mode = get_mode()
     local nodes, err = {}, nil
     if mode == "sniff" then
-        local m0 = lua_kb()   -- ⚠️ 临时插桩 (11-fix), 定位完可摘
         local at, by = {}, {}
         -- sniff 别名表 (2026-10): 用户起的名字直接作为平台物模型的 id/name
         local smap = cfgstore.alias_map()
@@ -488,13 +500,6 @@ local function build_nodes()
             end
             put(r.slave, { addr = r.addr, count = r.count, fc = r.fc, dtype = dt, pid = pid, pname = pname })
         end
-        -- ⚠️ 临时插桩 (11-fix): mon.infer() 是这条路径上最大的一次分配
-        --   (整张推断表重建 + 排序), 这行定出它的水位。12-fix 起加了门槛,
-        --   常态不刷屏, 超 MEM_LOG_KB 才报。
-        local m1 = lua_kb()
-        if m0 >= MEM_LOG_KB or m1 >= MEM_LOG_KB then
-            log.info("iot", string.format("mem bn infer %.1f->%.1fKB", m0, m1))
-        end
         local pc = cfgstore.load_pull()
         for _, r in ipairs((pc and pc.regs) or {}) do
             put(pc.slave, r)
@@ -512,13 +517,6 @@ local function build_nodes()
         table.sort(sl)
         for i, s in ipairs(sl) do
             nodes[#nodes + 1] = node_json(i, s, ser, by[s])
-        end
-        -- ⚠️ 临时插桩 (11-fix): 崩溃点就在下面 build_nodes 末尾的
-        --   table.concat(nodes, ",") 和 node_json 里的 table.concat(props),
-        --   这行日志定出崩溃前的最后一个水位。12-fix 起加了门槛。
-        local m2 = lua_kb()
-        if m2 >= MEM_LOG_KB then
-            log.info("iot", string.format("mem bn nodes %.1fKB slaves=%d", m2, #nodes))
         end
         err = "还没识别到在线的从机"
     else
@@ -1766,12 +1764,29 @@ local function task_main()
             --   普通 Lua error, 拦不住 LuatOS 分配器级的 OOM fatal —— 真要防住
             --   只能【少分配】, 也就是下面把 build_nodes 从每轮两次降到一次。
             --   pcall 留着当普通 error 的兜底。
+            --
+            -- ⚠️ 12-fix-2 (2026-10-27): 拓扑【重建】节流 cfg.TOPO_REBUILD_MS
+            --   (5s)。build_nodes 每秒调一次, 每轮分配 ~14KB (infer 重建整张
+            --   推断表 + node_json 拼 JSON + 两次 concat), 满负荷时(主站把
+            --   dataCache 轮询到 128 个地址)实测峰值 236KB, 越过了 ~231KB 的
+            --   崩溃线。
+            --   拓扑只在"推断出的寄存器集变了"时才需要重发, 晚 5 秒完全无影响,
+            --   所以节流的是【重建】本身, 不是主循环 —— 心跳/上行/平台推送
+            --   照旧 1 秒一轮。
+            --   ⚠️ 节流期内 sig 保持 nil → 本轮不比对、不重发。这是故意的:
+            --     拓扑变化最多晚 5 秒被认出来。
             if pub_topo and not pub_blocked() then
-                local ok, s, n = pcall(topo_sig)
-                if ok then
-                    sig, nodes_json = s, n
-                else
-                    log.warn("iot", "topo_sig failed, skip this round: " .. tostring(s))
+                -- ⚠️ os.clock() 是【秒】级单调时钟(项目口径), 配置里是毫秒,
+                --   这里必须除 1000 —— 直接比 5000 就变成 83 分钟才重建一次。
+                local due = (os.clock() - (S.topo_at or 0)) >= (cfg.TOPO_REBUILD_MS / 1000)
+                if due then
+                    local ok, s, n = pcall(topo_sig)
+                    if ok then
+                        sig, nodes_json = s, n
+                        S.topo_at = os.clock()
+                    else
+                        log.warn("iot", "topo_sig failed, skip this round: " .. tostring(s))
+                    end
                 end
             end
             if sig and sig ~= S.topo_sig then
@@ -1939,6 +1954,12 @@ function M.status()
         autosave_regs = S.autosave_regs,
         sn = _G.get_device_sn and tostring(_G.get_device_sn()) or nil,
         heap = (function() local a, b = heap_info(); return { total = a, used = b } end)(),
+        -- 12-fix-2: 真·Lua 堆水位 (KB)。heap 那份是 rtos.meminfo("sys") 的
+        --   【系统内存】, 和 Lua 堆差 3 倍 (同刻 sys 报 67KB/198KB, 这里
+        --   ~200KB), 判断"Lua 堆还剩多少"只能看这个字段。
+        --   替代原来 build_nodes 里每秒打两行的 "mem bn ..." 插桩 ——
+        --   R:STAT 是人工查看路径, 在这里读一次零常态开销。
+        lua_kb = lua_kb(),
     }
 end
 
