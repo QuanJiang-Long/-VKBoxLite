@@ -1883,7 +1883,12 @@ local function pull_step()
         end
         -- 退避中(上一次发送失败定的重发时刻还没到)就等着, 不重发
         if p.deadline > os.time() then return end
-        local ok, onboard, err = send_hello()
+        -- ⚠️ 12-fix-11 (2026-10-29): 原来写的是 local ok, onboard, err = send_hello()
+        --   —— 但 send_hello 只返回【两个】值(成功: true,onboarding模式;
+        --   失败: false,失败原因), 于是 err 永远是 nil, 日志里那句
+        --   "hello 发送失败: nil" 把真实原因(比如"识别未完成")吞掉了。
+        --   现在只接两个: 失败时 res 是原因, 成功时 res 是 onboarding 模式。
+        local ok, res = send_hello()
         if not ok then
             -- 按文档 1s/3s/9s 退避重发, 不立即判死: 发送失败多半是连接刚被
             -- refresh_subs 抽走, 下一轮就好了。超过 3 次才报 —— 真连不上就该
@@ -1891,11 +1896,11 @@ local function pull_step()
             p.hello_try = (p.hello_try or 0) + 1
             local bo = cfg.HELLO_BACKOFF_S[p.hello_try]
             if not bo then
-                return pull_finish("fail", "hello 发送失败: " .. tostring(err))
+                return pull_finish("fail", "hello 发送失败: " .. tostring(res))
             end
             p.deadline = os.time() + bo
             log.warn("iot", string.format("hello 发送失败(%d/3), %ds 后重发: %s",
-                p.hello_try, bo, tostring(err)))
+                p.hello_try, bo, tostring(res)))
             return
         end
         p.hello_try = 0
@@ -1903,7 +1908,7 @@ local function pull_step()
         -- 干等一个 PULL_TIMEOUT_MS 只会让前端显示"平台未下发配置(超时)"这种假故障。
         -- hello 本身照发：它负责建/更新网关设备、回写 fw/hw/ip，与推不推配置无关。
         -- 这里也不回 U6：没有收到 D1，没有 msgId 可核销
-        if onboard == "sniff" then
+        if res == "sniff" then
             return pull_finish("done", "sniff 模式平台不下发配置，寄存器表用本地嗅探结果")
         end
         p.state = "waiting"
