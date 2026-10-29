@@ -503,7 +503,7 @@ JS 侧只在 `setManualMode()` 里 `document.body.classList.toggle('mq-manual', 
 | 前端动作 | 指令 | 应答 | 说明 |
 |---|---|---|---|
 | 读最近解译帧 | `R:FRAMES[=n]` | `RET:FRAMES=[json]` | n 默认 20，最大 50 |
-| 推断轮询表 | `R:INFER` | `RET:INFER={json}` | `{regs,slaves,stat}`，从监听到的 REQ 帧反推，`regs` 项带 `value`（旁听应答最新解析值，没解出过为空显示 `--`）、`name`（**参数名称**列）和 `id`（**建议标识符**列），没起名时都 = `reg<addr>`。**识别成功后自动推一次**（含手动"重新识别"、页面刷新兜底；fallback 不触发），按钮仍可手动重推。**只读**：dtype 猜不准（旁听拿不到类型信息，全按 uint16 会解错电压类寄存器），需人工核对 |
+| 推断轮询表 | `R:INFER[=off,n]` | `RET:INFER={json}` | `{regs,slaves,stat,total,off,n,pages,page}`，从监听到的 REQ 帧反推（**常驻累加器**，只增不减，顺序 = 发现顺序）。⚠️ **2026-10-29 起分页**：`off`=起始行号(0 起)、`n`=本页行数（上限 32）。`regs` 是**本页**的行（带 `value`：旁听应答最新解析值，没解出过显示 `--`）；`slaves/ignored/stat/total/pages` 是**整张表**的口径。**参数名称 / 建议标识符不在行上**，改挂顶层 `names` 表（`{"reg230":{"id":"x","name":"y"}}`，只有跟默认值 `reg<addr>` 不一样的才登记，没有的条目前端自己退回 `reg<addr>`）。**识别成功后自动推一次**（含手动"重新识别"、页面刷新兜底；fallback 不触发），按钮仍可手动重推。**只读**：dtype 猜不准（旁听拿不到类型信息，全按 uint16 会解错电压类寄存器），需人工核对 |
 | **给推断出的寄存器起名** | `R:SALIAS` / `W:SALIAS={key,id,name}` | `RET:SALIAS={json}` / `RET:SALIAS=OK` | 推断表里**点「参数名称」/「建议标识符」单元格**弹窗改名。存设备 fskv(`ds_alias`)，`id`/`name` 都留空 = 恢复默认。**上报即生效**：sniff 档的 U2 拓扑属性 id/name 与 U4 数据项 id/name 都用这套名字，平台上显示的就是你起的字（改标识符会让平台按新 id 重建物模型） |
 | 静默侦听总线 | `R:SNIFF=ms` | `RET:SNIFF=帧数` | ms 500~15000，不切模式纯收听 |
 | **识别通讯参数** | `R:AUTODETECT` | `RET:AUTODETECT={json}` | 扫 21 组候选定 baud/parity，最坏 21s。**只用于本次会话**，不写任何配置 |
