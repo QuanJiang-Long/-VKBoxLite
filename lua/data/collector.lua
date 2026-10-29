@@ -15,35 +15,21 @@ local stat = { pushed = 0, frames = 0, raw = 0 }
 local MAX_DATA_POINTS = cfg.MAX_REGS
 local dataOrder = {}
 
--- ⚠️ 12-fix-7 (2026-10-28): "reg<addr>" 这个 alias 串【缓存】下来。
---   原来 mon.push_rsp_value / pickDtype 每帧每槽都现拼一次 "reg" .. (addr+i)
---   (现场 52 帧/秒 × 10 槽 = 520 次/秒)。
---   ⚠️ 实测结论(别再拿"省内存"当理由): 短串拼接【不分配堆】——
---   Lua 的 luaV_concat 对 ≤256 字节的结果走栈缓冲, 再 intern 进短串表。
---   所以这一项的 churn 本来就是 0 (tests/lua/test_churn.lua 实测
---   pick_dtype 改前 29.5 字节/次、改后 29.9 字节/次, 纹丝不动)。
---   缓存的真实收益是省掉每次的 intern 查表(CPU 级, 很小),
---   保留它是为了"一个地址一个串对象"这条约定(dataCache 的 key 与
---   推断表/上报里的 alias 指向同一个串), 代价 = 一张小表。
-local aliasCache = {}
-local aliasCacheN = 0
-local ALIAS_CACHE_MAX = 256
-
--- 返回该地址的规范 alias("reg<addr>")。**返回的是缓存里的同一个串对象**,
---   调用方可以放心留着它(不要再改 —— 字符串不可变 ✓)。
+-- ⚠️ 12-fix-11 (2026-10-29): aliasCache 【删掉】—— 它是多余的。
+--   原来缓存 "reg<addr>" 是为了"一个地址一个串对象"(dataCache 的 key 与
+--   推断表/上报里的 alias 指向同一个串)。但这条约定 Lua 自己就保证了:
+--   luaV_concat 对 ≤256 字节的结果走栈缓冲, 再 intern 进【全局短串表】——
+--   同样内容的短串在 Lua 里本来就是同一个对象, 不需要我们自己缓存。
+--   (12-fix-7 当时的实测也说了这一点: 短串拼接【不分配堆】,
+--    pick_dtype 改前 29.5 字节/次、改后 29.9 字节/次, 纹丝不动。)
+--   代价却是实打实的: 这是一张独立的哈希表, 128 个地址 = 256 个节点
+--   (每个 24B) + 数组段 ≈ 6KB 常驻, 外加每地址约 40 字节的记账。
+--   删掉后: -6KB 一次性 + 每地址 -40 字节, 行为零变化(串还是同一个对象)。
+--
+-- 返回该地址的规范 alias("reg<addr>")。**返回的是全局串表里的同一个对象**
+--   (Lua 的短串 intern 保证了), 调用方可以放心留着它(不要再改 —— 字符串不可变 ✓)。
 function M.alias_of(addr)
-    local a = aliasCache[addr]
-    if not a then
-        a = "reg" .. tostring(addr)
-        -- 地址空间有 65536 个, 缓存必须有上限(异常总线能刷出上万个地址)
-        if aliasCacheN >= ALIAS_CACHE_MAX then
-            aliasCache = {}
-            aliasCacheN = 0
-        end
-        aliasCache[addr] = a
-        aliasCacheN = aliasCacheN + 1
-    end
-    return a
+    return "reg" .. tostring(addr)
 end
 
 local function ring_add(s)
@@ -97,6 +83,15 @@ end
 --   而它只有一个读者: collector.snapshot() 的 R:VAL(前端只用 name/addr/
 --   value, 不用 hex —— 报文卡那儿的 hex 更全)。总线报文卡里本来就有 hex。
 --   现场 300KB 的堆现在每一 KB 都要算: 64 个地址已经占 290KB(95.8%)。
+--
+-- ⚠️ 12-fix-11 (2026-10-29): 点表【只留 4 个字段】(addr/value/ts/dtype)。
+--   原来 6 个: addr/value/ts/dtype/conf/status —— 其中 conf 和 status
+--   【全项目没有任何读者】(前端 R:VAL 只用 name/addr/value/ts/dtype;
+--    推断表那列 conf 来自 mon 的推断行, 不是这张表; U4 只用 value+ts;
+--    状态是前端按 conf 推的)。留着它们不只是浪费, 还会把哈希段顶到 8 槽:
+--   Lua 哈希槽按 2 的幂走, ≤4 字段 = 4 槽 = 96 字节, 5~8 字段 = 8 槽 = 192 字节。
+--   砍到 4 个字段 = 哈希段直接减半, 每地址 -96 字节
+--   (现场 82 个地址 = -7.9KB count; 128 个地址 = -12.3KB count)。
 function M.push_data(addr, alias, hex, value, ts, dtype, conf, status)
     if value == nil then return false end
     if not alias or alias == "" then alias = "r" .. addr end
@@ -110,7 +105,7 @@ function M.push_data(addr, alias, hex, value, ts, dtype, conf, status)
         end
         d = {
             addr = addr, value = value, ts = ts,
-            dtype = dtype, conf = conf, status = status,
+            dtype = dtype,
         }
         dataCache[alias] = d
     else
@@ -118,8 +113,6 @@ function M.push_data(addr, alias, hex, value, ts, dtype, conf, status)
         d.value = value
         d.ts = ts
         d.dtype = dtype
-        d.conf = conf
-        d.status = status
     end
     stat.pushed = stat.pushed + 1
     -- ⚠️ 12-fix-4: 原来这里每次都 string.format 一条再丢进 ring(80 次/秒),

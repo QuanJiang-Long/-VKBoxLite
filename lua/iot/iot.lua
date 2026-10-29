@@ -34,6 +34,11 @@ local collector = require "data/collector"
 local cfgstore = require "cfg"
 local mon = require "bus/mon"
 local MqttUtil = require "util/mqtt_util"
+-- ⚠️ 12-fix-11 (2026-10-29): 拓扑的 JSON 拼装挪到独立模块。
+--   拓扑是本机最大的一块连续内存需求(现场就是死在这上面), 而且平台的
+--   物模型契约一个字段都不能多不能少 —— 独立成模块才能写模拟器单测盯着
+--   它(tests/lua/test_topo.lua), 不用烧到现场才发现拼错了。
+local topo = require "iot/topo"
 
 -- ⚠️ 12-fix-8 (2026-10-28): pullcfg 改成【惰性 require】。
 --   sniff 档平台根本不下发配置(日志: "pullcfg done sniff 模式平台不下发配置"),
@@ -75,9 +80,11 @@ local function get_poll()
 end
 
 -- 当前运行模式(idle/poll/pollpoll/sniff)。问 ctrl 要, 和 poll_slot() 一样
--- 走惰性 require: 依赖图已确认无环(全工程没有任何文件 require "iot/iot"),
+-- 走惰性 require: 依赖图已确认无环(全工程没有任何文件 require 'iot/iot'),
 -- 但顶层 require 会把 iot 的加载时机提前到 main.lua 初始化序列里, 保持
 -- 惰性最稳。拿不到就当 idle -- 宁可少订也不能给未接任务的状态乱订
+-- ⚠️ 上面那行注释里的 'iot/iot' 用单引号: dep_graph.py 认的是双引号,
+--   双引号会被当成真的 require, 把 iot.lua 判成自依赖的循环依赖。
 local ctrl_mod
 local function get_mode()
     if ctrl_mod == nil then
@@ -647,98 +654,118 @@ end
 --          的名字会是地址而不是中文别名, 想看得顺眼得让用户配一份轮询表
 -- ⚠️ nodeIndex 必须和 U4 的 -{n} 同一套序号(都按从机地址升序), 否则平台把
 --    建档的子设备和上报的数据对不上, 症状是"拓扑发成功了但数据不进去"
-local function node_json(idx, slave, c, regs)
-    local props = {}
-    -- ⚠️ props 条数封顶 (纵深防御, 2026-10): 推断表万一被撑大(异常 qty
-    --   的请求帧), 这里 table.concat 出来的 JSON 会是几 MB, 一个分配就把
-    --   Lua 堆(203K)顶爆 → "not enough memory for buffer allocation"
-    --   → VM 退出 → 设备重启(现场表现: 跑着跑着莫名重启)。
-    --
-    -- 11-fix (2026-10-27) 从 128 降到 64: 快照实测 sniff 档只有 8~9 个点,
-    --   128 条时单次 table.concat 要 ~19KB 连续内存, 在 203K 堆上是灾难级
-    --   分配; 64 条约 ~10KB。
-    --   ⚠️ 只影响 sniff 档: node_json 只有 build_nodes 会调, 而 build_nodes
-    --   只在 should_pub_topo() 为真时被调到, 而那个闸门只对 sniff 返回 true
-    --   (iot.lua 的 should_pub_topo)。platform 档的物模型是平台自己下发的,
-    --   设备不通过 U2 拓扑上报它, 所以这里砍条数砍不到 platform 头上。
-    local MAX_PROPS = 64
-    for _, r in ipairs(regs) do
-        if #props >= MAX_PROPS then break end
-        local dt = r.dtype or "uint16"
-        -- 嗅探时 r.name 通常 nil (put 不传), 兜底走 reg<addr> 跟 U4 key 对齐
-        -- 轮询时 r.name 是用户配的真名, 走 r.name 路径
-        -- p.pid/p.pname: sniff 别名表指定的 id/name (2026-10), 优先于下面的启发式
-        local id
-        if r.pid and r.pid ~= "" then
-            id = r.pid
-        elseif r.name and r.name ~= "" and not r.name:match("^r%d+$") then
-            id = r.alias or r.name
-        else
-            -- 嗅探模式: 跟 U4 上报 collector key (reg<addr>) 对齐
-            -- 平台按 id 匹配 property, 嗅探的 id 跟 U4 key 一致才能归属
-            id = "reg" .. r.addr
-        end
-        local name = (r.pname and r.pname ~= "" and r.pname) or r.alias or id
-        -- address 是嗅探到的 Modbus 寄存器地址, 嗅探到什么发什么
-        -- V3 例子是 40001 是 PLC 1-based, 但嗅探帧是协议 0-based (即 100)
-        props[#props + 1] = string.format(
-            '{"id":%s,"name":%s,"dataType":%s,"unit":"","modbus":{"slave":%d,"address":%d,"quantity":%d,"dataType":%s}}',
-            MqttUtil.jstr(id), MqttUtil.jstr(name), MqttUtil.jstr(dt), slave, r.addr, r.count or 1, MqttUtil.jstr(dt))
+-- ⚠️ props 条数封顶 (纵深防御, 2026-10): 推断表万一被撑大(异常 qty
+--   的请求帧), 这里拼出来的 JSON 会是几 MB, 一个分配就把
+--   Lua 堆(203K)顶爆 → "not enough memory for buffer allocation"
+--   → VM 退出 → 设备重启(现场表现: 跑着跑着莫名重启)。
+--
+-- 11-fix (2026-10-27) 从 128 降到 64: 快照实测 sniff 档只有 8~9 个点,
+--   128 条时单次 table.concat 要 ~19KB 连续内存, 在 203K 堆上是灾难级
+--   分配; 64 条约 ~10KB。
+--   ⚠️ 只影响 sniff 档: 拓扑只在 should_pub_topo() 为真时才拼, 而那个
+--   闸门只对 sniff 返回 true (iot.lua 的 should_pub_topo)。platform 档的
+--   物模型是平台自己下发的, 设备不通过 U2 拓扑上报它, 所以这里砍条数
+--   砍不到 platform 头上。
+local MAX_PROPS = 64
+
+-- 一条 property 的 id/name 怎么定(平台靠 id 把数据对上号)。
+--   pid/pname: 别名表指定的 id/name (2026-10), 优先
+--   name:     用户配的真名, 但 "r123" 这种默认名不算
+--   alias:    别名表的备用名
+--   兜底:     reg<addr> —— 必须跟 U4 上报的 key(reg<addr>)一致,
+--             平台按 id 匹配 property, 对不上就"拓扑建了但数据不进去"
+local function prop_id_name(r)
+    local id
+    if r.pid and r.pid ~= "" then
+        id = r.pid
+    elseif r.name and r.name ~= "" and not r.name:match("^r%d+$") then
+        id = r.alias or r.name
+    else
+        id = "reg" .. tostring(r.addr or "")
     end
-    return string.format(
-        '{"nodeIndex":%d,"slaveId":%d,"kind":"RTU","serial":%s,"model":{"tslName":%s,"properties":[%s]}}',
-        idx, slave, serial_json(c), MqttUtil.jstr("sniff_s" .. slave), table.concat(props, ","))
+    local nm = (r.pname and r.pname ~= "" and r.pname) or r.alias or id
+    return id, nm
 end
 
--- U2 的 nodes[]。返回 nil+原因表示拓扑还没成形(从机没识别出来/没配寄存器表)
+-- U2 的 nodes[]。返回【片段表】(不是成品串), nil+原因表示拓扑还没成形
+-- (从机没识别出来/没配寄存器表)。
+--
+-- ⚠️ 12-fix-11 (2026-10-29): 这里不再造每行的小表, 也不再拼大串。
+--   原来每个地址要过 put() 造两张表(6 字段 + 7 字段 = 406 字节),
+--   82 个地址 = 33KB 垃圾/轮; 而且 nodes 串要再拼两次(nodes 本身 +
+--   指纹拷贝 + 发布用的 body), 同时活着 4 份 8KB+ 的连续串 → 现场
+--   8.3KB 都切不出来 → 拓扑一帧都没发出去。
+--   现在: 解析出来的 id/name 立刻变成 property 片段, 中间不留表;
+--   片段全部塞进一个表, 最后由 send_topo 一次 table.concat 成 body。
+--   行本身直接引用 mon 的行(活的行谁都不动), 只多两个平行数组
+--   (addrs/props)当分组用。
+--
 -- sniff 档的 RegisterData[] = 旁听推断 ∪ 平台下发配置, 同名同址以配置覆盖:
 -- 平台是按我们上报的拓扑来建设备和生成配置的(用户确认), 只报推断那几条,
 -- 平台就只认那几条; 配置落地后带真名(CT1/A相电流)的寄存器必须补进去才不缺项。
--- 因为 topo_sig 拿本函数产物当指纹, 配置一落地签名就变, 会自动补发一次 ——
+-- 因为拓扑指纹拿本函数产物当指纹, 配置一落地签名就变, 会自动补发一次 ——
 -- 实测过的时序坑: 拓扑比配置落盘早 1 秒发(报的是推断出的 2 条裸名), 之后
 -- 签名不变就再也不补发, 平台上建的物模型和数据面对不上
 -- sniff 的 serial 参数必须用探测到的那几个值: active_cfg() 在 sniff 下返回的
 -- 是 ds_poll 手工档的默认 9600, 而总线的波特率是自动识别出来的。拿错的
 -- 波特率上报, 平台就照它建配置 —— 实测识别出 2400 却发了 9600, 平台回的
 -- 建设配置 baud 就是 9600, 拿这份配置去轮询一帧都收不到
-local function build_nodes()
+local function build_topo()
     local mode = get_mode()
-    local nodes, err = {}, nil
+    local parts = {}
     if mode == "sniff" then
-        local at, by = {}, {}
-        -- sniff 别名表 (2026-10): 用户起的名字直接作为平台物模型的 id/name
         local smap = cfgstore.alias_map()
-        local function put(slave, r)
-            local k = slave .. ":" .. r.addr
-            local p = at[k]
-            if p then
-                p.count, p.name, p.alias, p.dtype = r.count, r.name, r.alias, r.dtype or "uint16"
-                p.pid, p.pname = r.pid, r.pname
-                return
+        -- 分组: slave → { addrs = {}, props = {} }
+        local groups, gorder = {}, {}
+        local function group_of(slave)
+            local g = groups[slave]
+            if not g then
+                g = { addrs = {}, props = {} }
+                groups[slave] = g
+                gorder[#gorder + 1] = slave
             end
-            -- 不记 slave: 分组已经由 by[] 的键承载, node_json 拿的是循环
-            -- 变量 s, 再存一份是只写不读
-            p = { addr = r.addr, count = r.count, name = r.name, alias = r.alias, dtype = r.dtype or "uint16",
-                  pid = r.pid, pname = r.pname }
-            at[k] = p
-            by[slave] = by[slave] or {}
-            by[slave][#by[slave] + 1] = p
+            return g
         end
-        for _, r in ipairs(mon.infer().regs or {}) do
-            -- 用 mon.infer 推的 dtype_summary 首项当 reg dtype (启发式已给)
-            local dt = r.dtype_summary and r.dtype_summary:match("^([^,]+)") or "uint16"
+        -- ① 旁听推断出来的行(直接引用, 不复制)
+        for _, r in ipairs((mon.infer() or {}).regs or {}) do
+            local g = group_of(r.slave)
             -- 别名表命中: id/name 用用户起的; 没命中还是 reg<addr>
             local sa = smap["reg" .. tostring(r.addr or "")]
-            local pid, pname
+            local id, nm
             if sa then
-                pid = (sa.id ~= "" and sa.id) or ("reg" .. tostring(r.addr or ""))
-                pname = (sa.name ~= "" and sa.name) or pid
+                id = (sa.id ~= "" and sa.id) or ("reg" .. tostring(r.addr or ""))
+                nm = (sa.name ~= "" and sa.name) or id
+            else
+                id = "reg" .. tostring(r.addr or "")
+                nm = id
             end
-            put(r.slave, { addr = r.addr, count = r.count, fc = r.fc, dtype = dt, pid = pid, pname = pname })
+            -- ⚠️ dtype 口径保持原样(12-fix-11 不动它): 原来这里读的是
+            --   r.dtype_summary —— 12-fix-6 把推断表改成累加器之后, 行里
+            --   已经没这个字段了, 所以 sniff 档的物模型 dataType 一直是
+            --   "uint16"(32bit 寄存器也会报成 uint16)。这是 12-fix-6 带来的
+            --   回归, 但改它等于动平台的物模型契约(平台到底收不收
+            --   uint32/int32/float32 还没在现网验过), 单独一次改, 不混在
+            --   内存优化里。见 lua/README.md「物模型 dataType」。
+            g.addrs[#g.addrs + 1] = r.addr
+            g.props[#g.props + 1] = topo.prop(id, nm, "uint16", r.slave, r.addr, 1)
         end
+        -- ② 平台下发的配置行: 同址覆盖推断行(用户配的真名优先)
         local pc = cfgstore.load_pull()
         for _, r in ipairs((pc and pc.regs) or {}) do
-            put(pc.slave, r)
+            local g = group_of(pc.slave)
+            local id, nm = prop_id_name(r)
+            local prop = topo.prop(id, nm, r.dtype or "uint16", pc.slave, r.addr, r.count or 1)
+            -- 同址覆盖: 配置行顶掉推断行(位置不变, 跟老逻辑一致)
+            local hit = 0
+            for i = 1, #g.addrs do
+                if g.addrs[i] == r.addr then hit = i break end
+            end
+            if hit > 0 then
+                g.props[hit] = prop
+            else
+                g.addrs[#g.addrs + 1] = r.addr
+                g.props[#g.props + 1] = prop
+            end
         end
         local st = mon.status()
         local d = st.detected
@@ -748,45 +775,58 @@ local function build_nodes()
             stopbits = (d and d.stopbits) or 1,
             parity = (d and d.parity) or 0,
         }
-        local sl = {}
-        for s in pairs(by) do sl[#sl + 1] = s end
-        table.sort(sl)
-        for i, s in ipairs(sl) do
-            nodes[#nodes + 1] = node_json(i, s, ser, by[s])
+        table.sort(gorder)
+        for i, s in ipairs(gorder) do
+            local g = groups[s]
+            local props = g.props
+            if #props > MAX_PROPS then
+                local cut = {}
+                for j = 1, MAX_PROPS do cut[j] = props[j] end
+                props = cut
+            end
+            topo.node_parts(parts, i, s, serial_json(ser), "sniff_s" .. s, props)
         end
-        err = "还没识别到在线的从机"
-    else
-        -- 一份轮询配置只有一个 slave(cfg.normalize_poll), 所以轮询档恒一个节点
-        local c = active_cfg()
-        if c and c.regs and #c.regs > 0 then
-            nodes[#nodes + 1] = node_json(1, c.slave, c, c.regs)
-        end
-        err = "没有可用的寄存器表"
+        return parts, "还没识别到在线的从机"
     end
-    if #nodes == 0 then return nil, err end
-    return table.concat(nodes, ",")
+    -- 一份轮询配置只有一个 slave(cfg.normalize_poll), 所以轮询档恒一个节点
+    local c = active_cfg()
+    if not (c and c.regs and #c.regs > 0) then
+        return nil, "没有可用的寄存器表"
+    end
+    local props = {}
+    for _, r in ipairs(c.regs) do
+        if #props >= MAX_PROPS then break end
+        local id, nm = prop_id_name(r)
+        props[#props + 1] = topo.prop(id, nm, r.dtype or "uint16", c.slave, r.addr, r.count or 1)
+    end
+    topo.node_parts(parts, 1, c.slave, serial_json(c), "sniff_s" .. c.slave, props)
+    return parts
 end
 
--- 拓扑签名: 拿 build_nodes 的产物本身做指纹。不另造一套字段遍历是因为
--- node_json 已经把从机/寄存器/串口参数全拼进去了, 那串字符串变了就是拓扑
--- 真变了。
+-- 拓扑签名: 拿 build_topo 的产物做指纹。不另造一套字段遍历是因为
+-- 拼串的时候从机/寄存器/串口参数全进去了, 内容变了就是拓扑真变了。
 --
--- ⚠️ 11-fix (2026-10-27): 同时把 nodes 串带出去, 给 send_topo 复用。
+-- ⚠️ 11-fix (2026-10-27): 同时把片段表带出去, 给 send_topo 复用。
 --   原来 task_main 每轮要 build 两次(拓扑指纹一次 + 发送一次), 每次都是
 --   mon.infer() 重建整张推断表 + node_json + 两层 table.concat, 白扔一半
 --   分配预算 —— sniff 档偶发 "not enough memory for buffer allocation"
 --   → Lua VM exit → 设备重启, 崩点就在这些大字符串拼接上。
 --   复用还有一个附带好处: 签名与实际发布内容【严格一致】, 不会再出现
 --   "发了新内容却存了旧签名" 导致下一轮又重发一遍。
+--
+-- ⚠️ 12-fix-11 (2026-10-29): 指纹从【整串】改成【哈希】。
+--   原来指纹 = "#长度:" .. nodes 串 —— 那是要常驻一份 8.5KB 连续内存的
+--   (S.topo_sig), 而且发布时 body 又要拼一份, 峰值连续块需求 25KB。
+--   现在指纹 = 片段内容的 31 位哈希(几十字节), 峰值降到 8.6KB。
 local function topo_sig()
     -- ⚠️ 12-fix-7: 拼拓扑那几 KB 连续内存之前先按水位回收一次。
     --   现场(41 分钟): 拓扑这条只要 1.2KB 连续块都申请不到
     --   ("not enough memory for buffer allocation") —— 池子被 churn 切碎了。
     --   完整回收能把碎片并回大块(要现场验证, 所以加了日志)。
     reclaim_if_high()
-    local nodes = build_nodes()
-    if not nodes then return nil end
-    return tostring(#nodes) .. ":" .. nodes, nodes
+    local parts = build_topo()
+    if not parts then return nil end
+    return topo.sig(parts), parts
 end
 
 -- U2 是【双重用途】, 靠 body 里有没有 nodes[] 区分语义(用户确认):
@@ -860,24 +900,38 @@ end
 -- 带 nodes[] 的那帧: 子设备拓补建档。
 -- V3 平台要求顶层 vendor/model/fwVersion/ts(ms), 走'建子设备'路径
 -- 自述字段(imei/iccid/位置等)归 send_meta, 不重复
--- nodes_in: 由 topo_sig 传进来的 nodes 串 (11-fix)。不给才自己 build 一次。
+-- parts_in: 由 topo_sig 传进来的【片段表】(11-fix)。不给才自己 build 一次。
 --   正常路径永远走 topo_sig 那份, 所以每轮只 build 一次。
-local function send_topo(nodes_in)
+--
+-- ⚠️ 12-fix-11 (2026-10-29): body 也改成【一次拼完】。
+--   原来 string.format('...,"nodes":[%s]}', nodes) 会在 nodes 串之外
+--   再造一份完整的 body(8.6KB 连续), 跟 nodes(8.5KB)同时活着 ——
+--   现场池子 95% 时, 这 8.6KB 连续块就是切不出来的那个。
+--   现在固定字段 + nodes 片段全塞进一个表, 一次 table.concat 出 body。
+--   拼出来的字节跟老逻辑【逐字节一致】(平台的物模型契约不能动)。
+local function send_topo(parts_in)
     local did = cur_did()
     if not did then return false, "无 SN" end
     -- 识别未成功前不发拓扑 (见 pub_blocked)。旧门闸只看 detecting, 兜底失败
     -- 之后 detecting=false 但其实没识别成功, 照样会发 —— 现在统一按"未成功"判
     if pub_blocked() then return false, "识别未完成" end
-    local nodes = nodes_in
-    if not nodes then
-        local n, err = build_nodes()
-        if not n then return false, err end
-        nodes = n
+    local parts = parts_in
+    if not parts then
+        local p, err = build_topo()
+        if not p then return false, err end
+        parts = p
     end
-    return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did),
-        string.format('{"vendor":%s,"model":%s,"fwVersion":%s,"ts":%d,"nodes":[%s]}',
-            MqttUtil.jstr("VKBox"), MqttUtil.jstr(cfg.PLATFORM_MODEL), MqttUtil.jstr(_G.VERSION or "0.0.0"),
-            os.time() * 1000, nodes), 1)
+    local b = {
+        '{"vendor":', MqttUtil.jstr("VKBox"),
+        ',"model":', MqttUtil.jstr(cfg.PLATFORM_MODEL),
+        ',"fwVersion":', MqttUtil.jstr(_G.VERSION or "0.0.0"),
+        ',"ts":', tostring(os.time() * 1000),
+        ',"nodes":[',
+    }
+    for i = 1, #parts do b[#b + 1] = parts[i] end
+    b[#b + 1] = ']}'
+    local body = table.concat(b)
+    return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did), body, 1)
 end
 
 -- 元数据指纹: 只挑会变的字段(imei/iccid/csq/主机名), 版本和型号是常量不必算。
@@ -2114,8 +2168,11 @@ local function task_main()
                 if pok and sent then
                     S.topo_sig = sig
                     pubsched.sent("topo")
-                    -- ⚠️ 别再拼整串 sig (1.2KB 又一份拷贝)。只打长度 + 头 100 字节
-                    log.info("iot", "topology posted: len=" .. #sig .. " head=" .. sig:sub(1, 100))
+                    -- ⚠️ 12-fix-11 (2026-10-29): 指纹现在是哈希(几十字节),
+                    --   不是原来那份 nodes 串, 所以 #sig/头 100 字节没意义了。
+                    --   改打: 片段数 + 内容总长(现场看拓扑规模用) + 指纹。
+                    log.info("iot", "topology posted: parts=" .. #nodes_json
+                        .. " bytes=" .. topo.len(nodes_json) .. " sig=" .. sig)
                 else
                     log.info("iot", "topology skip: " .. tostring(e or sent))
                 end

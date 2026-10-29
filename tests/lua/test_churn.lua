@@ -30,7 +30,14 @@ local LIMITS = {
     decode_frame = 500,     -- 解一帧(新建表; 现场已不走这条, poll 走 parse_frame)
     decode_frame_reuse = 230,-- 解一帧(复用表, 现场真正走的路; 改前 450×2)
     push_data = 20,         -- 存一个点 (改前 192)
-    alias_of = 1,           -- 取规范 alias(12-fix-7: 缓存命中 → 0 字节)
+    -- ⚠️ 12-fix-11 (2026-10-29): 上限 1 → 4。
+    --   aliasCache 被删了(它是一张独立的哈希表: 128 个地址 = 256 个节点
+    --   ≈ 6KB 常驻 + 每地址约 40 字节), 现在 alias_of 现场拼串。
+    --   代价: 每次 1.7 字节(数字→串的转换, 串本身还是全局 intern 的同一个
+    --   对象, 不占堆)。现场 52 帧/秒 × 10 槽 = 520 次/秒 → 0.9KB/s,
+    --   跟整帧的 churn(几十 KB/s)比是 2~5%, 可以忽略。
+    --   换来的: -6KB 一次性 + 每地址 -40 字节常驻(现场 82 个地址 = -3.3KB)。
+    alias_of = 4,
 }
 
 local N = 50
@@ -103,12 +110,12 @@ check("push_data", measure("push_data", function()
     collector.push_data(1, "reg1", "aabb", 123, os.time(), "uint16", 90, "ok")
 end), LIMITS.push_data)
 
--- ⚠️ 12-fix-7: alias 串走缓存。实测结论: 短串拼接【本来就不分配堆】
---   (Lua 的 luaV_concat 对 ≤256 字节的结果走栈缓冲), 所以这一项的
---   churn 改前改后都是 0 —— 缓存省的是 intern 查表(CPU 级)。
---   这里钉住"命中缓存时 0 字节", 免得以后有人把它改回现拼还自以为在省内存。
-collector.alias_of(12345)      -- 先把 12345 建进缓存
-check("alias_of", measure("alias_of(命中缓存)", function()
+-- ⚠️ 12-fix-11 (2026-10-29): aliasCache 已删, alias_of 现场拼串。
+--   串本身还是全局 intern 的同一个对象(Lua 的短串表保证), 所以
+--   "一个地址一个串对象" 这条约定没破; 变的只是每次多一次数字→串转换
+--   (1.7 字节/次)。换来的是省掉一整张哈希表(≈6KB) + 每地址 40 字节。
+collector.alias_of(12345)
+check("alias_of", measure("alias_of(现拼)", function()
     collector.alias_of(12345)
 end), LIMITS.alias_of)
 

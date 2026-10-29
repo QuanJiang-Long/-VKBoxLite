@@ -91,6 +91,7 @@ lua/
 ├── iot/
 │   ├── mqttcfg.lua     MQTT 配置（{sn}/{id} 占位 + normalize）
 │   ├── pullcfg.lua     平台配置下发解析（只提取，无副作用）
+│   ├── topo.lua        拓扑(U2)的 JSON 拼装 + 指纹（一次成串）
 │   └── iot.lua         连接编排 + 上报 + 下行 + 配置拉取状态机
 └── svc/
     ├── guard.lua       看门狗喂狗 + 运行监控
@@ -776,6 +777,93 @@ calcContinuity: 逐位解出"最近 5 帧里有多少帧是这个类型"
 （79.5KB 常驻，选项 B，见下面"常驻还是大"那条）。分页 + 腾挪解决的是
 **碎片化**（不再要 8KB 连续块、不再造 65KB 瞬时垃圾），不是总量。
 
+## 拓扑一次成串 + 每地址瘦身（2026-10-29，12-fix-11）
+
+### 现场症状：拓扑一帧都没发出去（`topo=0`）
+
+现场 SN VL20261019001，跑到 82 个地址时：
+
+```
+W/user.iot topo_sig failed, skip this round: iot.lua:690: not enough memory for buffer allocation
+```
+
+`iot.lua:690` 就是拓扑拼串的那行 `table.concat(props, ",")`。**连 8.3KB 的
+连续块都切不出来**，所以拓扑一帧都没发出去 → 平台那边没有物模型 →
+用户在平台上只看到一部分数据（这就是"只报了一部分数据"的根因）。
+
+### 为什么拓扑这么吃内存：它同时活着 4 份 8KB+ 的连续串
+
+| 步骤 | 产物 | 常驻/瞬时 |
+|---|---|---|
+| `props[64]` | 64 个 property 片段（每个 ~130B） | 8.3KB（小块，散着） |
+| `table.concat(props, ",")` | **8.3KB 连续** | 瞬时 |
+| `string.format(...)` 拼 node | **8.5KB 连续** | 瞬时 |
+| `table.concat(nodes, ",")` | **8.5KB 连续** | 瞬时 |
+| 指纹 `tostring(#nodes)..":"..nodes` | **8.5KB 连续** | **常驻**（`S.topo_sig`） |
+| `string.format(...)` 拼 body | **8.6KB 连续** | 瞬时 |
+
+峰值 = **25.6KB 连续内存同时活着**；另外 `build_nodes` 里的 `put()` 还给
+每个地址造两张表（6 字段 + 7 字段 = 406 字节），82 个地址 = **33KB 垃圾/轮**。
+
+### 改法
+
+1. **拓扑一次成串**（新模块 `lua/iot/topo.lua`）
+   - `topo.prop()` 出一条 property 片段；`topo.node_parts()` 往调用方的表里
+     塞节点的片段；**最后一次 `table.concat` 才出 body**。
+   - 指纹从"整串"改成**片段内容的 31 位哈希**（几十字节）——`S.topo_sig`
+     不再常驻 8.5KB。
+   - 峰值连续需求：**25.6KB → 8.6KB**；总分配量实测 **-34%**
+     （`tests/lua/test_topo.lua` 里钉着这条线）。
+   - 输出**逐字节不变**：拓扑的字节就是平台的物模型契约，
+     `test_topo.lua` 把老逻辑的格式串抄了一份做基准，逐字节对比。
+2. **不再给每行造小表**：`build_topo()` 直接引用 `mon` 的活行，
+   解析出的 id/name 立刻变成 property 片段；分组用两个平行数组
+   （`addrs`/`props`）而不是每行一张表。
+3. **数据点瘦成 4 个字段**（`data/collector.lua`）
+   - 原来 6 个：`addr/value/ts/dtype/conf/status` —— 其中 `conf` 和 `status`
+     **全项目没有任何读者**（前端的 conf 来自推断行，状态是前端按 conf 推的）。
+   - Lua 表的哈希段按 2 的幂走：≤4 字段 = 4 槽 = 96B，5~8 字段 = 8 槽 = 192B。
+     砍到 4 个字段 = 哈希段直接减半，**每地址 -96 字节**。
+4. **删掉 `aliasCache`**：`"reg<addr>"` 本来就是全局 intern 的同一个串对象
+   （Lua 的短串表保证），自己再缓存一张哈希表纯属白占
+   （128 个地址 ≈ 6KB 一次性 + 每地址 ~40 字节）。
+   代价是每次 `alias_of` 多 1.7 字节的数字→串转换（现场 520 次/秒 ≈ 0.9KB/s，
+   跟整帧几十 KB/s 的 churn 比是 2~5%）。`test_churn.lua` 的上限相应从 1 放宽到 4。
+5. **JSON 应答只拼一次**（`svc/cmd.lua`）
+   - `M.reply("RET:X=" .. jencode(t))` 会造三份大字符串（jencode 产物、
+     拼好的整行、再拼 `\r\n`）。`R:STAT` 现场实测 2226 字节 × 3 = 6.7KB 垃圾，
+     **每 5 秒一次**。现在统一走 `reply_json()`，全程只留一份。
+
+### 实测（PC 模拟器）
+
+| | 64 地址常驻 | 每地址 |
+|---|---|---|
+| 旧 `12-fix-9` | 34.69 KB | 555 B |
+| 新 `12-fix-11` | **29.69 KB** | **475 B**（−80 B，−14.4%） |
+
+拓扑构建（64 条 property）：老链路 65026 字节 → 新链路 42641 字节（**−34%**）。
+
+### 顺带查出来的两个真 bug（**没改**，单独排期）
+
+1. **物模型的 `dataType` 一直是 `uint16`**：`build_nodes` 原来读的是
+   `r.dtype_summary`，而 12-fix-6 把推断表改成累加器之后，行里已经没有这个
+   字段了 → sniff 档的 32bit 寄存器也被报成 `uint16`。
+   修它等于动平台的物模型契约（平台到底收不收 `uint32/int32/float32`
+   还没在现网验过），**必须单独一次改**，别混在内存优化里。
+2. **32 位固件上 `os.time()*1000` 整数回绕**：实测 `os.time()*1000` =
+   **-2036609728**（负数！）。`send_meta` / `send_topo` / `check_event_threshold`
+   三处的 `ts` 都是这个回绕值。框架里已经有正确的写法
+   （`MqttUtil.ms_of(os.time())`），但那三处还没换。
+   ⚠️ 换的话 `ts` 会从"数字"变成"字符串"（32 位机上毫秒数放不进 int32），
+   U4 的 ts 早就是字符串、平台认，所以大概率没问题 —— 但仍要单独验一次。
+
+### 新增测试
+
+| 测试 | 钉住什么 |
+|---|---|
+| `tests/lua/test_topo.lua` | 拓扑的字节与老逻辑**逐字节一致**；指纹的性质；拓扑构建的分配量 |
+| `tests/lua/test_cmd_stat.lua` | `R:STAT` 的结构（括号配平/逗号不错位/四个段都在）；一次应答只拼一份 |
+
 
 ## 内存缓冲上限（Air780EP，Lua 堆 ~300KB）
 
@@ -1066,18 +1154,23 @@ E/main Luat: not enough memory → Lua VM exit!! reboot in 15000ms
 
 | 模块 | 编译后占堆 | 模块 | 编译后占堆 |
 |---|---|---|---|
-| `iot/iot.lua` | **79.5 KB** | `sn/prov.lua` | 13.1 KB |
+| `iot/iot.lua` | **79.6 KB** | `sn/prov.lua` | 13.2 KB |
 | `bus/mon.lua` | **38.1 KB** | `iot/pullcfg.lua` | 11.6 KB |
-| `svc/cmd.lua` | 26.9 KB | `sn/sn.lua` | 10.7 KB |
-| `cfg.lua` | 22.0 KB | `util.lua` | 10.4 KB |
-| `bus/poll.lua` | 21.6 KB | `iot/mqttcfg.lua` | 9.5 KB |
-| `bus/mbus.lua` | 16.0 KB | `lbsLoc2.lua` | 8.2 KB |
-| `data/collector.lua` | 8.2 KB | 其余 4 个 | 14.1 KB |
-| `bus/ctrl.lua` | 8.3 KB | **合计** | **300.2 KB** |
+| `svc/cmd.lua` | 28.3 KB | `sn/sn.lua` | 10.7 KB |
+| `bus/poll.lua` | 21.6 KB | `cfg.lua` | 14.0 KB |
+| `lbsLoc2.lua` | 16.0 KB | `iot/mqttcfg.lua` | 9.5 KB |
+| `bus/mbus.lua` | 16.0 KB | `bus/ctrl.lua` | 8.3 KB |
+| `data/collector.lua` | 7.8 KB | `util.lua` | 8.3 KB |
+| `svc/guard.lua` | 6.0 KB | `iot/topo.lua` | 2.6 KB |
+| `core/config.lua` | 4.2 KB | `util/mqtt_util.lua` | 3.4 KB |
+| `iot/pubsched.lua` | 4.5 KB | 其余 2 个 | 0.4 KB |
+| **合计** | **303.9 KB** | | |
 
-> ⚠️ 上表是 **2026-10-29（12-fix-9 之后）** 的实测（`tests/lua/test_heapsize.lua`
+> ⚠️ 上表是 **2026-10-29（12-fix-11 之后）** 的实测（`tests/lua/test_heapsize.lua`
 > 在 PC 模拟器里逐个编译模块、留住产物、量 `collectgarbage("count")` 的增量）。
-> 红线 320KB，现在 **300.2KB，余量只有 19.8KB** —— 下次再加代码前先看这张表。
+> 红线 320KB，现在 **303.9KB，余量只有 16.1KB** —— 下次再加代码前先看这张表。
+> ⚠️ `iot/topo.lua` 是 12-fix-11 新加的模块（+2.6KB），换来的是拓扑指纹
+> 不再常驻 8.5KB —— 净账是赚的。
 
 设备上 idle 档 `collectgarbage("count")` = **190KB**（LuatOS 这个接口返回 KB，
 不是标准 Lua 的字节），堆总量只有 300KB —— **留给运行期数据的只有 ~110KB**。

@@ -76,6 +76,42 @@ local function reply_big(key, payload)
     pcall(uart.write, UART_ID, s)
 end
 
+-- ⚠️ 12-fix-11 (2026-10-29): JSON 应答【只拼一次】。
+--   原来的写法 M.reply("RET:X=" .. jencode(t)) 会造两份大字符串:
+--   一份是 jencode 的产物, 一份是拼接后的整行; M.reply 里再 s.."\r\n"
+--   又是第三份。R:STAT 现场实测 2226 字节, 每 5 秒问一次 →
+--   每次 6.7KB 垃圾(2226×3), 一年不停 —— 现场池子 95% 的碎片就是这么攒的。
+--   这里把 key / 各段 / 花括号 / 换行 全塞进一个表, 一次 table.concat 拼完,
+--   全程只留【一份】大字符串: 2226 + 2235 = 4.4KB, 少造 2.3KB/次。
+--   传 table 时按 "{" frag "," frag "}" 拼(给 R:STAT 这种多段 JSON 用)。
+local function json_reply_str(key, val)
+    local t
+    if type(val) == "table" then
+        t = { key, "{" }
+        for i = 1, #val do
+            if i > 1 then t[#t + 1] = "," end
+            t[#t + 1] = val[i]
+        end
+        t[#t + 1] = "}"
+    else
+        t = { key, val }
+    end
+    t[#t + 1] = "\r\n"
+    return table.concat(t)
+end
+local function reply_json(key, val)
+    local s = json_reply_str(key, val)
+    log.debug("cmd", "tx:", #s, "B:", s:sub(1, 80))
+    pcall(uart.write, UART_ID, s)
+end
+
+-- 只拼不发(给单测用)。模拟器里 uart 是 C 库的只读表, 换不掉 write,
+-- 截不到串口上的东西 —— 所以把"拼"这一步单独露出来, tests/lua/test_cmd_stat.lua
+-- 直接验拼出来的结构。
+function M._json_reply_str(key, val)
+    return json_reply_str(key, val)
+end
+
 -- 识别期间挡住会动串口的命令
 local function blocked_while_detecting(cmd)
     if not mon.is_detecting() then return false end
@@ -148,7 +184,7 @@ local function reg_cmds()
         local pc = okc and c or nil
         local okm, mc = pcall(mqtt_cfg.load)
         local mq = okm and mc or nil
-        M.reply("RET:INFO=" .. jencode({
+        reply_json("RET:INFO=", jencode({
             project = _G.PROJECT,
             version = _G.VERSION,
             sn = _G.get_device_sn and _G.get_device_sn(),
@@ -168,7 +204,7 @@ local function reg_cmds()
 
     -- R:MODE: 前端 renderHome 读 st.mode/st.busy/st.poll/st.mon
     M.reg("R:MODE", function()
-        M.reply("RET:MODE=" .. jencode(ctrl.status()))
+        reply_json("RET:MODE=", jencode(ctrl.status()))
     end)
 
     M.reg("W:MODE", function(arg)
@@ -196,7 +232,7 @@ local function reg_cmds()
         -- 之前这里写 poll_src() 永远查 K_POLL, 前端拿 src='default' 误判
         -- "平台没下发", 实际 ds_pull 已经有平台配置. 用 slot 决定查哪个 src
         local src = (slot == SLOT_PULL) and cfgstore.pull_src() or cfgstore.poll_src()
-        M.reply("RET:CFG=" .. jencode({ cfg = cfg, slot = slot, src = src }))
+        reply_json("RET:CFG=", jencode({ cfg = cfg, slot = slot, src = src }))
     end)
 
     M.reg("W:CFG", function(arg)
@@ -248,20 +284,16 @@ local function reg_cmds()
         -- poll 没加载 = 没起过轮询, 回空表即可(前端 manual 档下 poll 必然已加载)
         local pm = pollmod(false)
         local regs = pm and pm.get_regs() or nil
-        M.reply("RET:REG=" .. jencode(regs or {}))
+        reply_json("RET:REG=", jencode(regs or {}))
     end)
 
     M.reg("R:VAL", function()
-        M.reply("RET:VAL=" .. jencode(collector.snapshot()))
+        reply_json("RET:VAL=", jencode(collector.snapshot()))
     end)
 
-    -- R:STAT: 前端 readHome 读 mode/data/guard/mqtt 段
-    -- ⚠️ 12-fix-5 (2026-10-28): iot 状态原来被【编码两遍】(iot 段一份、
-    --   mqtt 段又一份, 两段内容完全一样), 白白让应答大一倍。现场实测
-    --   R:STAT 的应答 3471 字节, 而它要的是一整块连续内存 —— 堆碎到
-    --   282488/307192 时, 连这 3.4KB 都切不出来(E/mem alloc 3471 失败),
-    --   前端于是收到空 JSON(RET:STAT={})。现在只编码一次, 拼两遍字符串。
-    M.reg("R:STAT", function()
+    -- R:STAT 的片段表。单独抽出来是为了让单测能直接验结构
+    --   (tests/lua/test_cmd_stat.lua) —— 模拟器里截不到串口输出。
+    local function stat_parts()
         local parts = {}
         local m = ctrl.status()
         if m then parts[#parts + 1] = '"mode":' .. jencode(m) end
@@ -280,8 +312,23 @@ local function reg_cmds()
             local j = jencode(it)
             parts[#parts + 1] = '"mqtt":' .. j
         end
-        M.reply("RET:STAT={" .. table.concat(parts, ",") .. "}")
+        return parts
+    end
+
+    -- R:STAT: 前端 readHome 读 mode/data/guard/mqtt 段
+    M.reg("R:STAT", function()
+        -- ⚠️ 12-fix-11 (2026-10-29): 改走 reply_json —— 原来这里
+        --   "RET:STAT={" .. table.concat(parts, ",") .. "}" 拼两次,
+        --   M.reply 里再 s.."\r\n" 拼第三次 = 2226×3 = 6.7KB 垃圾/次,
+        --   而 R:STAT 每 5 秒就被前端问一次。现在全程只拼一次(4.4KB)。
+        reply_json("RET:STAT=", stat_parts())
     end)
+
+    -- 给单测用: 返回 R:STAT 的片段表和拼好的整行(模拟器里 uart.write 换不掉)
+    function M._stat_reply()
+        local parts = stat_parts()
+        return parts, json_reply_str("RET:STAT=", parts)
+    end
 
     -- 平台配置拉取: W 发起, R 轮询状态
     M.reg("W:PULLCFG", function()
@@ -294,7 +341,7 @@ local function reg_cmds()
 
     M.reg("R:PULLCFG", function()
         if not iot then return M.reply("RET:FAIL:PULLCFG:iot 不可用") end
-        M.reply("RET:PULLCFG=" .. jencode(iot.pull_status()))
+        reply_json("RET:PULLCFG=", jencode(iot.pull_status()))
     end)
 
     -- 38-fix: W:CLRPULL 清空 ds_pull. 场景: 前端从 platform 切 manual/sniff
@@ -319,7 +366,7 @@ local function reg_cmds()
     -- R:MQTT: 前端读 cfg / auto_pass / manual_on / pub / sub
     M.reg("R:MQTT", function()
         local e = mqtt_cfg.effective(device_id_str())
-        M.reply("RET:MQTT=" .. jencode({
+        reply_json("RET:MQTT=", jencode({
             cfg = e.cfg,
             auto_pass = e.cfg.auto and e.cfg.auto.pass or "",
             manual_on = e.cfg.manual_on,
@@ -361,7 +408,7 @@ local function reg_cmds()
 
     -- R:SALIAS: 读 sniff 别名表 (用户给 reg<addr> 起的 id/name)
     M.reg("R:SALIAS", function()
-        M.reply("RET:SALIAS=" .. jencode(cfgstore.load_alias()))
+        reply_json("RET:SALIAS=", jencode(cfgstore.load_alias()))
     end)
 
     -- W:SALIAS={key,id,name}: 单条 upsert, id/name 都空 = 删这条
@@ -405,7 +452,7 @@ local function reg_cmds()
         end
         if n < 1 then n = 1 end
         if n > 50 then n = 50 end
-        M.reply("RET:FRAMES=" .. jencode(mon.recent_frames(n)))
+        reply_json("RET:FRAMES=", jencode(mon.recent_frames(n)))
     end)
 
     -- R:INFER[=off,n]: 从旁听帧反推轮询表 (attach_names 给每行补 name 字段, 与
@@ -476,7 +523,7 @@ local function reg_cmds()
         end
         local last = mon.detect_result()
         if last then
-            return M.reply("RET:AUTODETECT=" .. jencode({
+            return reply_json("RET:AUTODETECT=", jencode({
                 baud = last.baud, databits = last.databits,
                 stopbits = last.stopbits, parity = last.parity,
                 fallback = last.fallback or false,  -- Q2: 区分命中 vs 兜底 cfg.BAUD
@@ -536,7 +583,7 @@ local function reg_debug_cmds()
 
     M.reg("R:RING", function()
         local out = collector.get_ring()
-        M.reply("RET:RING=" .. jencode(out))
+        reply_json("RET:RING=", jencode(out))
     end)
 
 end -- R:FRAMES/R:INFER/R:AUTODETECT 已转正到 reg_cmds (2026-10, 见上面说明)

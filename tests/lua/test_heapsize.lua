@@ -16,7 +16,7 @@
 
 local MODS = {
     "util", "util/mqtt_util", "core/config", "data/collector", "bus/mbus",
-    "iot/pubsched", "iot/mqttcfg", "iot/pullcfg", "bus/mon", "bus/poll",
+    "iot/pubsched", "iot/mqttcfg", "iot/pullcfg", "iot/topo", "bus/mon", "bus/poll",
     "bus/ctrl", "iot/iot", "svc/cmd", "svc/guard", "sn/sn", "sn/prov",
     "lbsLoc2", "cfg", "_build_flag",
 }
