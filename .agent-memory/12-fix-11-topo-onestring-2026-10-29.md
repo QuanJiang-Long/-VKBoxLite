@@ -51,14 +51,16 @@ W/user.iot topo_sig failed, skip this round: iot.lua:690: not enough memory for 
 - **iot.lua 拆分（-14KB）**：平台配置拉取链路**没有任何模拟器测试**，风险最高，
   放最后且要补测试。本轮先用拓扑 + 每地址的改动腾出余量。
 
-## 顺带查出来的两个真 bug（**没改**，要单独排期）
+## 顺带查出来的两个真 bug
 
-1. **物模型 dataType 一直是 uint16**：`build_nodes` 读 `r.dtype_summary`，
+1. **32 位固件 `os.time()*1000` 整数回绕**：实测 = **-2036609728**（负数）。
+   `send_meta` / `send_topo` 两处的 ts 都是这个值。**本轮已修**（用户拍板）：
+   改用 `MqttUtil.ms_of(os.time())`（秒 → 13 位毫秒串），**ts 的 JSON 类型
+   从数字变成字符串**（U4 的 ts 本来就是字符串、平台在收 ✓）。
+2. **物模型 dataType 一直是 uint16**：`build_nodes` 读 `r.dtype_summary`，
    而 12-fix-6 改成累加器之后行里没这个字段了 → 32bit 寄存器被报成 uint16。
-   修它 = 动平台的物模型契约（平台收不收 uint32/int32/float32 没验过）。
-2. **32 位固件 `os.time()*1000` 整数回绕**：实测 = **-2036609728**（负数）。
-   `send_meta` / `send_topo` / `check_event_threshold` 三处的 ts 都是这个值。
-   正确写法是 `MqttUtil.ms_of(os.time())`（U4 已经在用），但换过去 ts 会变成字符串。
+   **用户决定先不修**（修它 = 动平台的物模型契约，平台收不收 uint32/int32/
+   float32 没验过），另开一次改 + 单独验平台。
 
 ## 教训
 

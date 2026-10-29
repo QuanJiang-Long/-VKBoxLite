@@ -205,6 +205,16 @@ check("新链路的总分配明显更少(至少省 30%)", new_bytes < old_bytes 
 --   这个"同时活着的字节数"没法直接量(中间垃圾在 GC 之前也算占位),
 --   所以这里只钉住总量, 大串的那部分在代码里一眼能看出来
 --   (老: 4 次大 concat; 新: 1 次)。
+-- ===== ⑤ ts: 32 位固件的整数回绕(12-fix-11 修掉的真 bug) =====
+local ms = MqttUtil.ms_of(os.time())
+check("ms_of 给的是 13 位毫秒串", #ms == 13 and ms:match("^%d+$") ~= nil, ms)
+if math.maxinteger and math.maxinteger < 2 ^ 40 then
+    -- 32 位固件: os.time()*1000 会整数回绕, 拿到的不是毫秒时间
+    local wrapped = os.time() * 1000
+    check("32 位机上 os.time()*1000 确实是错的(所以必须用 ms_of)",
+        tostring(wrapped) ~= ms, tostring(wrapped) .. " vs " .. ms)
+end
+
 if failed > 0 then
     print(string.format("FAIL: %d 项不通过", failed))
     os.exit(1)

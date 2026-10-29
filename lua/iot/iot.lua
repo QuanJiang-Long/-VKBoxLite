@@ -893,7 +893,14 @@ local function send_meta()
         p[#p + 1] = string.format('"longitude":%.6f', S.lbs.lng)
     end
     -- V3 平台 ts 毫秒 (13 位)
-    p[#p + 1] = string.format('"ts":%d', os.time() * 1000)
+    -- ⚠️ 12-fix-11 (2026-10-29): ts 改用 MqttUtil.ms_of(os.time())。
+    --   原来写的是 os.time()*1000 —— 32 位固件上这是【整数回绕】:
+    --   实测 os.time()*1000 = -2036609728(负数!), 因为 1.75e9 × 1000
+    --   早就超出了 32 位整数的范围, Lua 5.3 的整数乘法直接绕回去。
+    --   ms_of() 是框架里早就有的正确写法(秒 → 13 位毫秒串, 绕开 int32)。
+    --   ⚠️ ts 的 JSON 类型从"数字"变成"字符串" —— U4 的 ts 本来就是字符串
+    --   (平台在收 ✓), 这里跟 U4 保持一致。
+    p[#p + 1] = string.format('"ts":%s', MqttUtil.ms_of(os.time()))
     return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did), "{" .. table.concat(p, ",") .. "}", 1)
 end
 
@@ -925,7 +932,11 @@ local function send_topo(parts_in)
         '{"vendor":', MqttUtil.jstr("VKBox"),
         ',"model":', MqttUtil.jstr(cfg.PLATFORM_MODEL),
         ',"fwVersion":', MqttUtil.jstr(_G.VERSION or "0.0.0"),
-        ',"ts":', tostring(os.time() * 1000),
+        -- ⚠️ 12-fix-11 (2026-10-29): ts 用 MqttUtil.ms_of(os.time())(秒 → 毫秒串)。
+        --   原来写的是 tostring(os.time() * 1000) —— 32 位固件上整数回绕成
+        --   负数(实测 -2036609728)。ms_of 是框架里早就有的正确写法,
+        --   而且 U4 的 ts 本来就是字符串(平台在收 ✓), 这里跟 U4 保持一致。
+        ',"ts":"', MqttUtil.ms_of(os.time()), '"',
         ',"nodes":[',
     }
     for i = 1, #parts do b[#b + 1] = parts[i] end
