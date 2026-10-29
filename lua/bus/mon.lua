@@ -233,7 +233,26 @@ end
 -- 跨帧一致 +5% 加成. conf cap 100
 -- dtypeHistory FIFO 深度 5 (原 8): 越短, 单帧错位字/坏帧的格子越快被干净
 -- 流量翻回去; 8 深度要 ~6 帧, 现场看起来像"判死不认错" (2026-10, 2048)
-local dtypeHistory = {}  -- alias -> { d1, d2, ..., dN } FIFO 最近 N 帧 dtype
+-- 12-fix-9 (2026-10-29): 历史从【每 alias 一张小表】改成【每 alias 一个数】。
+--   原来存 {d1..d5}: 表头 56B + 数组段(5 个元素按 2 的幂取 8 槽) 128B
+--   ≈ 184 字节/alias。现场 64 个地址 = 11.8KB, 128 个地址 = 23.6KB ——
+--   在 300KB 的堆里这是笔大钱, 而它只为了记"最近 5 帧判成什么型"。
+--   改成: 每个 dtype 编一个 1~5 的号, 最近 5 帧打包成一个 16 进制数
+--   (最多 5 位, < 16^6, double 精确)。【数字是立即数, 不占堆】——
+--   每 alias 只剩哈希槽(16B), 省 168 字节/alias。
+--   ⚠️ 语义完全不变: 深度仍是 5 帧, 连续性权重(50%)和"与上一帧同型 +5"照旧,
+--   跨帧判型的准确度一点没变 —— 这也是为什么【不】把上限从 128 砍到 32:
+--   砍上限会让 64 个地址里只有最后 32 个留着历史, 其余 32 个每帧被淘汰一次
+--   又每帧被重建(thrash), 连续性权重直接失效, float32/int32 的判型会退步。
+--   打包数字省得更多(23.6KB @128 地址 vs 砍上限的 13.8KB)而且不伤判型。
+local DT_CODE = { int16 = 1, uint16 = 2, int32 = 3, uint32 = 4, float32 = 5 }
+local HIST_DEPTH = 5
+local HIST_MASK = 16 ^ HIST_DEPTH      -- 1048576 (16^5) —— pushHistory 的窗口
+-- 单测钩子可以一次塞 8 帧(老的 seed_history 就是这么干的: 直接塞整张表不截断,
+--   test_dtype_band 靠这个口径验"历史污染下 float32 仍胜出")。所以打包数
+--   留得下 8 位, 但正常路径 pushHistory 只维持 5 帧。
+local HIST_SEED_MOD = 16 ^ 8            -- 4294967296 (double 里精确)
+local dtypeHistory = {}  -- alias -> 打包数(最近 5 帧的 dtype 码)
 -- alias 数的硬上限 (12-fix-3, 2026-10-28)。
 --   ⚠️ dtypeHistory 原来【是全项目唯一没有硬上限的常驻结构】: 主站每轮询
 --   一个新地址就多一条 alias, 只在 mon.start() 整表清空 —— mon.stop() 都不清。
@@ -241,22 +260,23 @@ local dtypeHistory = {}  -- alias -> { d1, d2, ..., dN } FIFO 最近 N 帧 dtype
 --   这个不对称就是缺口。估算: 每 alias ≈ 200 字节, 128 个地址 ≈ 26KB,
 --   512 个 ≈ 100KB, 2000 个 ≈ 400KB(单这一项就爆 300KB 的堆)。
 --   上限取 128, 与 collector.dataCache 的 MAX_REGS 对齐 (同一批地址)。
+--   12-fix-9: 打包成数字后每 alias 只剩 ≈ 48 字节, 128 个地址 ≈ 6KB。
 local MAX_HIST_ALIAS = 128
 local histOrder = {}   -- alias 的插入顺序, 用来淘汰最旧的
 
 local function pushHistory(alias, dtype)
-    local h = dtypeHistory[alias]
-    if not h then
+    local code = DT_CODE[dtype]
+    if not code then return end          -- 不认识的 dtype 不进历史
+    local old = dtypeHistory[alias]
+    -- 追加一位, 只留最近 HIST_DEPTH 位(高位自然被截掉)
+    dtypeHistory[alias] = ((old or 0) * 16 + code) % HIST_MASK
+    if old == nil then
         -- 新 alias: 记账并封顶 (超了就淘汰最旧的那条)
-        dtypeHistory[alias] = { dtype }
         histOrder[#histOrder + 1] = alias
         while #histOrder > MAX_HIST_ALIAS do
             dtypeHistory[table.remove(histOrder, 1)] = nil
         end
-        return
     end
-    h[#h + 1] = dtype
-    if #h > 5 then table.remove(h, 1) end
 end
 
 -- dtype 判型历史必须随会话清: 它决定连续性 50% 的权重, 不清的话上一轮
@@ -270,13 +290,24 @@ local function clear_history()
     histOrder = {}
 end
 
--- 连续性: 跟历史 dtype 一致率 (本帧 + 历史最近 5 帧 FIFO)
+-- 连续性: 跟历史 dtype 一致率 (历史最近 5 帧)
+--   12-fix-9: 历史是【打包数】, 这里逐位拆出来数命中个数。
+--   语义跟旧实现一致: 历史为空 → 50(中性); 命中/总数 → 百分比(向下取整)。
 local function calcContinuity(alias, cand)
-    local h = dtypeHistory[alias] or {}
-    if #h == 0 then return 50 end  -- 首帧不给满分也不给 0, 中性
-    local same = 0
-    for _, d in ipairs(h) do if d == cand then same = same + 1 end end
-    return math.floor(same / #h * 100)
+    local h = dtypeHistory[alias]
+    if not h or h == 0 then return 50 end  -- 首帧不给满分也不给 0, 中性
+    local code = DT_CODE[cand]
+    if not code then return 0 end           -- 不认识的类型: 跟旧实现一样算 0 命中
+    local same, total = 0, 0
+    local t = h
+    while t > 0 do
+        local d = t % 16
+        total = total + 1
+        if d == code then same = same + 1 end
+        t = math.floor(t / 16)
+    end
+    if total == 0 then return 50 end
+    return math.floor(same / total * 100)
 end
 
 -- 值域: 类型范围内给高分, 超出给 0
@@ -331,8 +362,9 @@ local function score(data, off, dtype, word_swap, alias)
     local cont = calcContinuity(alias, dtype)
     local bnd = calcBoundary(dtype, v)
     local conf = math.floor(cont * 0.5 + range * 0.3 + bnd * 0.2)
-    local h = dtypeHistory[alias] or {}
-    if #h > 0 and h[#h] == dtype then conf = conf + 5 end
+    -- 12-fix-9: 历史是打包数, 【最低位 = 最近一帧】的 dtype 码
+    local h = dtypeHistory[alias]
+    if h and h ~= 0 and (h % 16) == DT_CODE[dtype] then conf = conf + 5 end
     if conf > 100 then conf = 100 end
     return dtype, v, conf
 end
@@ -385,7 +417,22 @@ M.calc_range = calcRange
 M.calc_boundary = calcBoundary
 M.pick_dtype = pickDtype
 M.clear_history = clear_history
-M.seed_history = function(alias, list) dtypeHistory[alias] = list end
+M.seed_history = function(alias, list)
+    -- 12-fix-9: 历史改成打包数, 这里把"字符串列表"打包进去(单元测试仍按老
+    -- 样子传 { 'float32', 'float32', ... }); 也接受直接给一个打包数。
+    if type(list) == "number" then
+        dtypeHistory[alias] = list % HIST_SEED_MOD
+        return
+    end
+    local h = 0
+    if type(list) == "table" then
+        for _, d in ipairs(list) do
+            local c = DT_CODE[d]
+            if c then h = (h * 16 + c) % HIST_SEED_MOD end
+        end
+    end
+    dtypeHistory[alias] = h
+end
 
 local function push_rsp_value(slave, addr, f)
     if not f.data or not addr then return end
@@ -607,8 +654,8 @@ function M.infer(force)
     --   这类地址【也进表】(用户 2026-10-28 决定: 要看得见主站到底轮了什么),
     --   行上 answered=false, 前端显示成红色的 no_rsp。
     --   ⚠️ 行对象直接给出去(不复制): 复制 48 行 = 每次 10KB 垃圾。代价是
-    --   调用方别改行里的字段 —— 现在的调用方 iot.attach_names 是【复制
-    --   一份】再挂 id/name 的(就地改会给行加第 9/10 个字段 → 表翻倍),
+    --   调用方别改行里的字段 —— 12-fix-9 起 iot.attach_names 不再复制行,
+    --   名字改成挂到顶层 names 表(行一个字段都不加, 8 槽不变)。
     --   活着的行谁都不动。
     local regs, slaves, ignored = {}, {}, 0
     for _, a in ipairs(infer_order) do
@@ -631,6 +678,87 @@ function M.infer(force)
     return result
 end
 
+-- ===== 12-fix-9 (2026-10-29): 推断表【分页】 =====
+--   现场(09:14~09:19, 64 个地址): Lua 池 294448/307192 = 95.8%,
+--   R:INFER 一次要 8158 字节的连续块 → "alloc 8158 failed" →
+--   json encode out of memory → RET:INFER={} → 系统池也见底 →
+--   "E/uart system is out of memory!!!" → 整机卡死(09:19:03)。
+--   一次 R:INFER 的临时分配有三块:
+--     ① attach_names 把 64 行【整表复制】成 10 字段表(每行 16 哈希槽
+--        = 363B) → 23KB 表 + 128 个 id/name 串 ≈ 28KB  ← iot.lua 改成 B3
+--     ② json.encode 的内部临时 + 8KB 结果串               ← 分页解决
+--     ③ 行本身(8 字段 203B)本来就常驻, 不算临时
+--   分页: 一次最多 INFER_PAGE_MAX 行, 应答从 8KB 降到 ~4KB, 峰值连续块
+--   需求减半; 前端按页取, 显示页码。
+--   ⚠️ 分页不改变"行只增不减、序号=发现顺序"的语义: 页只是视图, 行还是
+--   同一批(前端翻页看到的是同一张表的前后两段)。
+local INFER_PAGE_MAX = 32
+
+-- 前端当前在看哪一页(设备记住它, 好让主动推送也推同一页)
+local infer_view_off = 0
+local infer_view_n = INFER_PAGE_MAX
+
+function M.set_infer_view(off, n)
+    off = tonumber(off) or 0
+    n = tonumber(n) or INFER_PAGE_MAX
+    if off < 0 then off = 0 end
+    off = math.floor(off)
+    if n < 1 then n = 1 end
+    if n > INFER_PAGE_MAX then n = INFER_PAGE_MAX end
+    infer_view_off = off
+    infer_view_n = n
+end
+
+function M.infer_view()
+    return infer_view_off, infer_view_n
+end
+
+-- 取推断表的第 off 行起、共 n 行 (off 从 0 起, n = 0 表示"到末尾")
+-- 返回: regs(本页的行) + slaves/ignored/stat(【整张表】的, 不是本页的)
+--       + total(总行数) + off/n/pages(给前端算页码)
+function M.infer_page(off, n)
+    off = tonumber(off) or 0
+    n = tonumber(n) or INFER_PAGE_MAX
+    if off < 0 then off = 0 end
+    off = math.floor(off)
+    if n < 0 then n = 0 end
+    n = math.floor(n)
+    if n == 0 then n = INFER_PAGE_MAX end
+    if n > INFER_PAGE_MAX then n = INFER_PAGE_MAX end
+    local total = #infer_order
+    if off > total then off = total end
+    local last = off + n
+    if last > total then last = total end
+    local regs, slaves = {}, {}
+    local ignored = 0
+    -- 整表扫一遍统计 ignored/slaves(这两个是【整张表】的口径, 前端要
+    --   显示"共 N 个从机, M 个轮询项, 其中 K 个没应答")—— 只读不分配行
+    for i = 1, total do
+        local a = infer_order[i]
+        if not a.answered then ignored = ignored + 1 end
+        slaves[a.slave] = true
+    end
+    for i = off + 1, last do
+        regs[#regs + 1] = infer_order[i]
+    end
+    local sl = {}
+    for s in pairs(slaves) do sl[#sl + 1] = s end
+    table.sort(sl)
+    local pages = 1
+    if total > 0 then pages = math.ceil(total / n) end
+    return {
+        regs = regs,
+        slaves = sl,
+        ignored = ignored,
+        stat = stat,
+        total = total,
+        off = off,
+        n = n,
+        pages = pages,
+        page = (n > 0) and (math.floor(off / n) + 1) or 1,
+    }
+end
+
 function M.start(c)
     if running then return true end
     if not uart then return nil, "no uart" end  -- uart 弱加载后的判空 (设备恒有)
@@ -646,6 +774,9 @@ function M.start(c)
     infer_acc = {}
     infer_order = {}
     infer_dirty = true
+    -- 12-fix-9: 新一轮 sniff = 前端的页码也从头开始
+    infer_view_off = 0
+    infer_view_n = INFER_PAGE_MAX
     _G.mon_detect_result = nil
     -- 12-fix-2: 新一轮识别 = 候选记忆清零(从头扫)。
     -- ⚠️ 只在 start / restart_detect 清, 不在 request_detect 清 ——
@@ -855,6 +986,9 @@ function M.stop()
     infer_acc = {}
     infer_order = {}
     infer_dirty = true
+    -- 12-fix-9: 退出 sniff, 前端的页码也复位
+    infer_view_off = 0
+    infer_view_n = INFER_PAGE_MAX
     clear_history()     -- 12-fix-3: dtype 判型历史也清(原来只有 start 清)
     try_baud, try_parity = nil, nil   -- 12-fix-2: 别把"在试什么"留在状态里
     tried = {}                        -- 12-fix-2: 候选记忆也作废
@@ -901,6 +1035,9 @@ function M.status()
     -- 12-fix-6: 推断表现在是累加器, 行数直接问它(不再问 infer_cache ——
     -- 缓存里的数组是 2 秒前的快照, 累加器才是当前真相)
     st.infer_rows = #infer_order
+    -- 12-fix-9: 前端当前在看哪一页(设备侧记着, 主动推送也推这一页)
+    st.infer_view_off = infer_view_off
+    st.infer_view_n = infer_view_n
     return st
 end
 
@@ -935,11 +1072,17 @@ end
 -- (tests/lua/test_infer_acc.lua 用; 设备逻辑不依赖)
 M.test_note_req = acc_note_req
 M.test_note_rsp = acc_note_rsp
+-- 单测钩子: 直接喂判型历史。pushHistory 只在 push_rsp_value 里被调,
+-- 而 push_rsp_value 要一整张帧表 —— 单测里造不出那种帧, 所以单独开个口。
+-- (tests/lua/test_infer_mem.lua 量每个地址的常驻内存要用)
+M.test_push_history = pushHistory
 M.test_reset_acc = function()
     infer_acc = {}
     infer_order = {}
     infer_dirty = false
     stat.infer_clamped = 0
+    infer_view_off = 0
+    infer_view_n = INFER_PAGE_MAX
 end
 
 function M.recent_frames(n)

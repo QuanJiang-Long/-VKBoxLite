@@ -155,8 +155,8 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | W:GC | 强制 GC + 重连（**仅开发版注册**） |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配”（**仅开发版注册**——它能直接往总线上发帧，交付版不能开，见下「开发版 vs 发布版」） |
 | R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20，**正式注册**，sniff 报文卡依赖） |
-| R:INFER | 读**常驻推断表**（2026-10-28 起是累加器，不再每次重建）`{regs:[{slave,addr,fc,hits,answered,dtype,conf,value,id,name}], slaves, ignored, stat}`（**只读参考**，不写任何配置）。**行只增不减**：请求帧里出现过的地址就进表，顺序 = 嗅探到的发现顺序（前端第 1 列"序号"就是这个顺序，前端自己编号，设备不存序号字段）；`hits` = 累计被请求多少次；`answered`=false 表示主站轮询了但没收到应答（这类地址**也进表**）；`value` = 旁听应答最新解析值；`id`/`name` = U4 上报 payload 的 id/name（`alias` 映射，同 `iot.build_items` 一套，没配 alias 时 = `reg<addr>`）。**最多累计 128 行**（`MAX_INFER_ROWS`，见「内存缓冲上限」一节）；`ignored` = 表里"没应答"的地址数 |
-| W:INFERWATCH=1\|0 | 推断表**主动推送**开关（2026-10-28）。`1` = 设备每发现一个新地址就把整张表推过来（`RET:INFER_PUSH={...}`，格式同 `R:INFER`）；`0` = 停推。前端只在 sniff 面板打开时开、关面板就关 —— 没人看的时候设备一个字节都不发（串口让给报文/指令）。⚠️ 推送是**设备主动**发的，不受前端"单条未决指令"约束，前端必须先按 `INFER_PUSH` 键名把它跟在途指令分开（`frontend/renderer/app.js` 的 `onSerialLine`） |
+| R:INFER[=off,n] | 读**常驻推断表**（2026-10-28 起是累加器，不再每次重建）`{regs:[{slave,addr,fc,hits,answered,dtype,conf,value}], slaves, ignored, stat, total, off, n, pages, page}`（**只读参考**，不写任何配置）。**行只增不减**：请求帧里出现过的地址就进表，顺序 = 嗅探到的发现顺序（前端第 1 列"序号"就是这个顺序，前端自己编号，设备不存序号字段）；`hits` = 累计被请求多少次；`answered`=false 表示主站轮询了但没收到应答（这类地址**也进表**）；`value` = 旁听应答最新解析值。**最多累计 128 行**（`MAX_INFER_ROWS`，见「内存缓冲上限」一节）；`ignored` = 表里"没应答"的地址数。⚠️ **2026-10-29 起分页**：`off`=起始行号(0 起)、`n`=本页行数（上限 32）。`regs` 是**本页**的行，`slaves/ignored/stat/total/pages` 是**整张表**的口径。`id`/`name`（U4 上报 payload 的 id/name，别名映射）**不在行上**了，改挂顶层 `names` 表：`{"reg230":{"id":"x","name":"y"}}`，**只有跟默认值 `reg<addr>` 不一样的才登记**，没有的条目前端自己退回 `reg<addr>` |
+| W:INFERWATCH=1\|0 | 推断表**主动推送**开关（2026-10-28）。`1` = 设备每发现一个新地址就把**当前页**推过来（`RET:INFER_PUSH={...}`，格式同 `R:INFER`；2026-10-29 起推的是前端最近一次 `R:INFER=off,n` 要的那一页，不是整张表 —— 推整张表在 64 个地址时是 8KB，正是现场崩掉的那个大小）；`0` = 停推。前端只在 sniff 面板打开时开、关面板就关 —— 没人看的时候设备一个字节都不发（串口让给报文/指令）。⚠️ 推送是**设备主动**发的，不受前端"单条未决指令"约束，前端必须先按 `INFER_PUSH` 键名把它跟在途指令分开（`frontend/renderer/app.js` 的 `onSerialLine`） |
 | R:AUTODETECT[=restart] | 识别 sniff 通讯参数 `{baud,databits,stopbits,parity}`（**只用于本次会话**，不写 fskv）。**非阻塞**：回 `BUSY` / 参数 / `RET:FAIL:not in sniff mode`，由前端轮询。带 `=restart` = 强制重扫（先清旧帧旧值与旧结果，再从头扫），前端「重新识别通讯参数」按钮用 |
 | R:SALIAS / W:SALIAS={key,id,name} | sniff 侧别名表（`ds_alias` 槽）：用户在推断表里给 `reg<addr>` 起的**参数名称**(`name`)与**建议标识符**(`id`)。`W:SALIAS` 单条 upsert，`id`/`name` 都空 = 删掉这条（恢复默认 `reg<addr>`）。生效范围：sniff 档的 **U2 拓扑属性 id/name** 与 **U4 数据项 id/name** —— 平台上显示的就是用户起的名字 |
 | W:MODE=poll\|pollpull\|sniff\|idle | 切换 485 运行模式。`sniff` 会**自动起一轮识别**（非阻塞），立即回 OK；`pollpull` 会自动 hello 拉平台配置 |
@@ -648,6 +648,7 @@ sniff 的通讯参数**用户不配**（sniff 没有持久槽，是刻意的设�
   （前端按 `conf` 推）、`count`（数量 = `dtype` 的宽度，前端按类型推）。
 - `iot.attach_names()` 会给行加 `id`/`name` → 那是第 9/10 个字段 → 所以它
   **复制一份**再挂名字，不就地改活着的行（就地改 = +7.7KB 常驻堆）。
+  ⚠️ **12-fix-9 起连复制都取消了**：名字改挂到顶层 `names` 表（见下节 B3）。
 - `tests/lua/test_infer_acc.lua` 里有两条断言钉住这件事：行字段数 ≤ 8、
   48 行占用 < 12KB。改行结构时这个测试会先炸。
 
@@ -664,6 +665,116 @@ sniff 的通讯参数**用户不配**（sniff 没有持久槽，是刻意的设�
 
 `mon.start()` / `mon.stop()` 会清空累加器 —— 新一轮 sniff 的地址表从零开始
 （旧轮的地址混进新轮，平台上的物模型就串了）。
+
+
+## 推断表分页 + 名字表外置 + 两处腾挪（2026-10-29，12-fix-9）
+
+### 现场：第四次崩溃（09:14~09:19，SN VL20261019001）
+
+前端连点刷新 → 整机卡死（09:19:03 + ramdump）。链条：
+
+| 时刻 | 现象 | 数字 |
+|---|---|---|
+| 09:14~09:19 | Lua 池一路涨 | 290~294 KB / 307192 B（**95.8%**） |
+| 点刷新 | 整表应答要**一块连续内存** | 64 行 JSON = **8158 B** |
+| | 切不出来 | `alloc 8147 failed` |
+| | json 编码失败 | `E/json json encode out of memory!!!` ×4 |
+| | 应答变空表 | `RET:INFER={}` / `RET:STAT={"mode":{},...}` |
+| | 系统池也见底 | 190780 / 203040 B（**94%**） |
+| | 串口写不进去 | `E/uart system is out of memory!!!` |
+| 09:19:03 | 整机卡死 | ramdump |
+
+⚠️ 关键：**不是"总量不够"，是"要一块 8158 字节的连续块"**。LuatOS 的分配器
+不合并相邻空闲块（`iot.lua` 的老注释早就写明了），池里全是小洞，8KB 连续块
+根本切不出来 —— 现场日志里 `alloc 8147 failed` 后面 45ms 就是 `topo_sig failed`。
+
+> 顺带查清了另一件事：**系统池没有泄漏**。同一份固件另一次跑，uptime
+> 317s/327s/337s 的 `mem=145708/154168/154204` —— 涨 8.5KB 后就稳在
+> **≈154KB（75.9%）**。崩溃那次的 190KB 里，多出来的 ≈36KB 是**排队等发的
+> 8KB 应答**（R:INFER 的整表应答在 uart tx 缓冲里排着）。分页把应答砍一半，
+> 这块也跟着减半。
+
+### 四处改动
+
+| # | 改动 | 位置 | 省的是什么 |
+|---|---|---|---|
+| A | **分页**：`R:INFER=off,n`，一次最多 32 行 | `mon.infer_page` / `cmd.lua` | 峰值连续块需求 8158 → ~4000 B |
+| B3 | **名字表外置**：行一个字段都不加，名字挂顶层 `names` 表 | `iot.attach_names` | 一次 R:INFER 少造 ~50KB 瞬时垃圾 |
+| 腾挪1 | **dtype 历史打包成一个数**（每帧 1 个 16 进制位） | `mon.dtypeHistory` | 每地址常驻 −96 B |
+| 腾挪2 | **数据点不再存 hex**（那一行挂着整帧的十六进制串） | `collector.push_data` | 每地址常驻 −31 B |
+
+另外两处配套：`iot.alias_map()` / `cfgstore.alias_map()` 加了**缓存**
+（键 = 配置版本 + 槽位，写盘时失效），一次 R:INFER 少造 ~23KB 瞬时垃圾；
+`cmd.M.reply` 不再把整条应答打进日志（大应答走新的 `reply_big`，只打长度 +
+前 80 字节，一次省 2 份 8KB 拷贝）。
+
+### A：分页
+
+- 设备：`M.infer_page(off, n)` → `{regs(本页), slaves, ignored, stat, total, off, n, pages, page}`。
+  `slaves/ignored/stat` 是**整张表**的口径（前端要显示"共 N 个从机，M 个轮询项，
+  其中 K 个没应答"），`regs` 才是本页的。`n` 的硬上限是 `INFER_PAGE_MAX = 32`。
+- 设备记着前端在看哪一页（`mon.set_infer_view`），主动推送（`RET:INFER_PUSH`）
+  推的也是**那一页** —— 推整张表就是 8KB，正是现场崩掉的那个大小。
+- 前端：`Protocol.Enc.infer(off, n)` → 按页取，表格下方有"上一页/下一页/第 X/Y 页"。
+  序号列用**全局下标** `off + i + 1`（否则每页都从 1 开始，看不出是同一张表的两段）。
+  名字表跨页累积（每页只带自己那页的条目）。
+
+### B3：名字表外置
+
+12-fix-6 的做法是"复制一份行再挂 id/name"—— 那次是为了**不就地改**活着的行
+（就地改 = 第 9/10 个字段 = 哈希槽 8→16 = 每行 203→363 B）。复制本身在 64 个
+地址时是 **23KB 表 + 128 个 id/name 串 ≈ 28KB**，加上两张别名映射表，一次
+`R:INFER` 制造 **~65KB 短命垃圾** —— 现场就是这么被碎的。
+
+现在：
+
+- 行**一个字段都不加**（还是 8 字段 8 槽 = 203 B/行），常驻不变；
+- 名字挂到**顶层 `names` 表**，且**只有跟默认值 `reg<addr>` 不一样的才登记**
+  （用户改过名的通常只有几个）：
+  `{"regs":[...8 字段的行...], "names":{"reg230":{"id":"x","name":"y"}}}`；
+- **零复制**（`out.regs` 就是 `inf.regs`），每行还少两个字段 → 应答再小 ~30 B/行。
+- ⚠️ 前端要跟着改：`renderInfer` 显示名字时先查 `names['reg'+addr]`，查不到
+  就退回 `reg<addr>`（见 `frontend/renderer/app.js`）。
+
+### 腾挪 1：dtype 判型历史打包
+
+`dtypeHistory[alias]` 原来是 `{"uint16","uint16",...}`（最多 5 个字符串的表），
+一张表 ≈ 96 B/alias。现在打包成一个数：每帧占 1 个 16 进制位，5 帧 = 5 位
+（`16^5 = 1048576`，double 里精确）：
+
+```
+pushHistory:  dtypeHistory[alias] = ((old or 0) * 16 + code) % 16^5
+calcContinuity: 逐位解出"最近 5 帧里有多少帧是这个类型"
+```
+
+- 判型口径**一个字没变**（`score()` 里那条"最后一帧也是这个类型 +5 分"的
+  规则改成看最低位；`calcContinuity` 改成数位）。
+- 为什么不是"砍到 32 个 alias"：FIFO 深度砍了会把老 alias 挤出去，判型连续性
+  归零 → 现场那个"判死不认错"的毛病会回来（见 `test_dtype_band.lua`）。
+- 单测钩子 `seed_history` 还能一次塞 8 帧（老的 `seed_history` 就是直接塞整张
+  表不截断的），所以打包数留得下 8 位（`16^8`，double 里也精确）。
+
+### 腾挪 2：数据点不存 hex
+
+`collector.push_data(addr, alias, hex, ...)` 的 `hex` 参数还留着（调用点不用改），
+但**不再挂到数据点上**：那一行挂着的是**整帧的十六进制串**，每个地址各留一份
+引用（现场 64 个地址 = 64 个不同的帧串常驻）。而它只有一个读者 ——
+`collector.snapshot()` 的 `R:VAL`，而前端只用 `name/addr/value`，不用 `hex`
+（报文卡那儿的 hex 更全）。快照也不再带 `hex` 字段。
+
+### 实测（PC 模拟器，`tests/lua/test_infer_mem.lua`，同一份量法）
+
+64 个地址（累加器行 + dtype 历史 + 数据点）的**常驻**增量：
+
+| | 64 地址常驻 | 每地址 |
+|---|---|---|
+| 旧 `13304dc` | 42.63 KB | **682 B** |
+| 新 `12-fix-9` | **34.69 KB** | **555 B**（−127 B，−18.6%） |
+
+128 个地址就是 71KB（旧的 85KB）—— 堆只有 300KB，这 14KB 是实打实的余量。
+⚠️ 但**光靠腾挪还不够**：128 个地址要真正的余量，还得拆 `iot.lua`
+（79.5KB 常驻，选项 B，见下面"常驻还是大"那条）。分页 + 腾挪解决的是
+**碎片化**（不再要 8KB 连续块、不再造 65KB 瞬时垃圾），不是总量。
 
 
 ## 内存缓冲上限（Air780EP，Lua 堆 ~300KB）
@@ -683,6 +794,7 @@ sniff 的通讯参数**用户不配**（sniff 没有持久槽，是刻意的设�
 | `lastReqs` 最近请求索引 | `bus/mon.lua` | `MAX_LAST_REQ`(64) | **整表作废** |
 | 推断展开的 qty | `util.lua` `clamp_qty` | `MAX_INFER_QTY`(256) | 截到上限 |
 | **推断表行数（常驻累加器）** | `bus/mon.lua` `M.infer` / `acc_row` | `MAX_INFER_ROWS`(**128**，2026-10-28 从 512 降；**最多只累计 128 个参数地址**） | 不再新增行（`stat.infer_clamped` 计数） |
+| **推断表单次应答行数** | `bus/mon.lua` `M.infer_page` | `INFER_PAGE_MAX`(**32**，2026-10-29 新增) | 多的分页给前端（`R:INFER=off,n`） |
 | **dtype 判型历史** | `bus/mon.lua` `dtypeHistory` | **128 个 alias**（2026-10-28 新增上限） | 淘汰最旧的 alias |
 | 拓扑 properties 条数 | `iot.lua` `node_json` | 64（2026-10-27 从 128 降） | 不再拼进 JSON |
 
@@ -954,13 +1066,18 @@ E/main Luat: not enough memory → Lua VM exit!! reboot in 15000ms
 
 | 模块 | 编译后占堆 | 模块 | 编译后占堆 |
 |---|---|---|---|
-| `iot/iot.lua` | **73.1 KB** | `sn/prov.lua` | 13.1 KB |
-| `bus/mon.lua` | **33.1 KB** | `iot/pullcfg.lua` | 11.6 KB |
-| `svc/cmd.lua` | 22.6 KB | `sn/sn.lua` | 10.7 KB |
-| `bus/poll.lua` | 21.6 KB | `util.lua` | 10.4 KB |
-| `bus/mbus.lua` | 16.2 KB | `iot/mqttcfg.lua` | 9.5 KB |
-| `cfg.lua` | 13.5 KB | `lbsLoc2.lua` | 8.2 KB |
-| 其余 7 个 | 34.6 KB | **合计** | **276.5 KB** |
+| `iot/iot.lua` | **79.5 KB** | `sn/prov.lua` | 13.1 KB |
+| `bus/mon.lua` | **38.1 KB** | `iot/pullcfg.lua` | 11.6 KB |
+| `svc/cmd.lua` | 26.9 KB | `sn/sn.lua` | 10.7 KB |
+| `cfg.lua` | 22.0 KB | `util.lua` | 10.4 KB |
+| `bus/poll.lua` | 21.6 KB | `iot/mqttcfg.lua` | 9.5 KB |
+| `bus/mbus.lua` | 16.0 KB | `lbsLoc2.lua` | 8.2 KB |
+| `data/collector.lua` | 8.2 KB | 其余 4 个 | 14.1 KB |
+| `bus/ctrl.lua` | 8.3 KB | **合计** | **300.2 KB** |
+
+> ⚠️ 上表是 **2026-10-29（12-fix-9 之后）** 的实测（`tests/lua/test_heapsize.lua`
+> 在 PC 模拟器里逐个编译模块、留住产物、量 `collectgarbage("count")` 的增量）。
+> 红线 320KB，现在 **300.2KB，余量只有 19.8KB** —— 下次再加代码前先看这张表。
 
 设备上 idle 档 `collectgarbage("count")` = **190KB**（LuatOS 这个接口返回 KB，
 不是标准 Lua 的字节），堆总量只有 300KB —— **留给运行期数据的只有 ~110KB**。

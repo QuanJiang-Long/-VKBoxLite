@@ -45,9 +45,17 @@ end
 --   json_cache[k] = nil 会写到全局表上, 缓存永远不失效。
 local json_cache = {}   -- fskv key -> 解码后的原始表
 
+-- 12-fix-9 (2026-10-29): 配置版本号。写盘就 +1。
+--   给别的模块当缓存键用(别名映射一天可能只改一次, 不该每次 R:INFER
+--   都重建一遍 128 条的映射表 —— 那是十几 KB 的垃圾/次)。
+local cfg_ver = 0
+
+function M.version() return cfg_ver end
+
 local function kv_set(k, s)
     if not fskv then return false end
     json_cache[k] = nil   -- 12-fix-3: 写盘了, 解码缓存必须失效
+    cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号跟着涨(别名映射缓存靠它失效)
     fskv.set(k, s)
     if fskv.save then pcall(fskv.save) end
     return true
@@ -150,12 +158,26 @@ function M.normalize_alias(c)
 end
 
 -- 别名表查表: key -> {id,name}, 供 iot 上报时套用
+-- ⚠️ 12-fix-9 (2026-10-29): 结果【缓存】。
+--   原来每次调用都新建这张表: 最多 128 条 → 128 张 {id,name} 小表 + 一张
+--   哈希表 ≈ 15KB 垃圾/次, 外加 load_alias() 的归一化表。
+--   而 attach_names 每次 R:INFER 都要调它 —— 现场(09:14~09:19)前端连着
+--   点刷新, 一次调用就制造几十 KB 短命垃圾, 把 300KB 的堆打成碎片
+--   → "alloc 8147 failed" → json encode out of memory → 整机卡死。
+--   别名表一天可能只改一次(前端改名), 缓存到写盘(cfg_ver 变)时失效。
+local alias_map_cache = nil
+local alias_map_ver = -1
+
 function M.alias_map()
+    local v = cfg_ver
+    if alias_map_cache and alias_map_ver == v then return alias_map_cache end
     local m = {}
     local c = M.load_alias()
     for _, r in ipairs((c and c.regs) or {}) do
         m[r.key] = { id = r.id, name = r.name }
     end
+    alias_map_cache = m
+    alias_map_ver = v
     return m
 end
 
@@ -351,6 +373,7 @@ function M.reset_user()
         if ok and v ~= nil and v ~= "" then
             fskv.set(k, "")
             json_cache[k] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
+            cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号也要涨(别名映射缓存靠它失效)
             cleared[#cleared + 1] = name
         end
     end
@@ -369,6 +392,7 @@ function M.clear_pull()
     if v == nil or v == "" then return true, nil, false end
     fskv.set(K_PULL, "")
     json_cache[K_PULL] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
+    cfg_ver = cfg_ver + 1     -- 12-fix-9: 版本号也要涨(别名映射缓存靠它失效)
     if fskv.save then pcall(fskv.save) end
     return true, nil, true
 end

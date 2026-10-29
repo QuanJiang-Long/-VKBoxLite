@@ -53,7 +53,12 @@
 
     // ---- sniff 结果 ----
     frames:  (n)  => 'R:FRAMES' + (n ? '=' + n : ''),   // 最近解译帧
-    infer:   ()   => 'R:INFER',                          // 推断轮询表+从机列表（只读参考，不写配置）
+    // 12-fix-9: 推断表【分页】。off = 起始行号(0 起), n = 本页行数。
+    //   整表应答在 64 个地址时是 8158 字节的 JSON, 峰值连续块需求 8158,
+    //   现场 Lua 堆 95.8% 时直接 "alloc 8147 failed" → json encode out of
+    //   memory → RET:INFER={} → 系统池见底 → 整机卡死。分页后一次最多
+    //   32 行(约 4KB), 前端按页取、显示页码。
+    infer:   (off, n) => 'R:INFER' + (off != null ? '=' + off + ',' + (n || 32) : ''),
     autoDetect: () => 'R:AUTODETECT',                    // 识别 baud/parity（只用于本次 sniff 会话）
     // 12-fix-6: 推断表订阅开关。打开后设备每发现一个新地址就主动推
     // 一整张表过来(RET:INFER_PUSH=), 前端不用手动点刷新。

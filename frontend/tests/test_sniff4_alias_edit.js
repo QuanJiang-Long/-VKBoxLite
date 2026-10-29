@@ -66,7 +66,18 @@ assertEq(/cfgstore\.alias_map\(\)/.test(iotLua), true,
   'sniff-4: iot.lua 用别名表');
 assertEq(/r\.pid/.test(iotLua), true,
   'sniff-4: node_json 支持 pid/pname (拓扑属性用别名)');
-assertEq(/a\.id = /.test(iotLua), true,
-  'sniff-4: attach_names 补 id (推断表两列显示的就是上报值)');
+// 12-fix-9: 名字不再挂到行上(那会给活着的行加第 9/10 个字段, 哈希槽 8→16,
+//   每行 203→363 字节), 改成顶层 names 表 —— 行一个字段都不加, 零复制。
+assertEq(/out\.names\s*=\s*names/.test(iotLua), true,
+  'sniff-4: attach_names 把名字挂到顶层 names 表 (12-fix-9)');
+assertEq(/names\[k\]\s*=\s*\{\s*id\s*=\s*id,\s*name\s*=\s*name\s*\}/.test(iotLua), true,
+  'sniff-4: names 表的条目是 {id, name}');
+assertEq(/a\.id\s*=/.test(iotLua), false,
+  'sniff-4: attach_names 不再给行就地加 id (12-fix-9, 省堆)');
+// 前端: 显示名字时先查 names 表, 查不到退回 reg<addr>
+assertEq(/S\.inferNames\[akey\]/.test(appJs), true,
+  'sniff-4: 前端从 names 表取名字 (12-fix-9)');
+assertEq(/out\.regs\s*=\s*inf\.regs/.test(iotLua), true,
+  'sniff-4: attach_names 不复制行 (12-fix-9, 零复制)');
 
 console.log('PASS: sniff-4 推断表参数名称/建议标识符可编辑 (弹窗+存设备+上报生效, 18 个测试点通过)');

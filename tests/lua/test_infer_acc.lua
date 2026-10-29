@@ -139,9 +139,39 @@ local nf = 0
 for _ in pairs(mon.infer(true).regs[1]) do nf = nf + 1 end
 ok(nf <= 8, '推断行的字段数 ≤ 8 (现在 ' .. nf .. ' 个)')
 
--- 12) ⚠️ attach_names 必须【复制】而不是就地改: 就地改会给活着的行加
---   id/name → 第 9/10 个字段 → 哈希槽 8 → 16 → 每行 203 → 363 字节
---   (实测), 现场的 48 行就是 +7.7KB 常驻堆。
+-- 11c) 12-fix-9: 分页接口 infer_page(off, n)
+--   现场 64 个地址时整表应答是 8158 字节的 JSON, 峰值连续块需求 8158,
+--   池 95.8% 时直接 "alloc 8147 failed" → 整机卡死。分页后一次最多 32 行。
+mon.test_reset_acc()
+for i = 0, 9 do mon.test_note_req(1, i * 10, 1, 3) end   -- 10 行
+local pg = mon.infer_page(0, 4)
+eq(#pg.regs, 4, '第 1 页 4 行')
+eq(pg.regs[1].addr, 0, '第 1 页第一行就是表里的第一行')
+eq(pg.regs[4].addr, 30, '第 1 页第四行')
+eq(pg.total, 10, 'total 是整张表的行数')
+eq(pg.pages, 3, '10 行 / 每页 4 行 = 3 页')
+eq(pg.page, 1, '页码从 1 起')
+local pg2 = mon.infer_page(4, 4)
+eq(#pg2.regs, 4, '第 2 页 4 行')
+eq(pg2.regs[1].addr, 40, '第 2 页第一行是表里的第 5 行')
+eq(pg2.page, 2, '第 2 页')
+local pg3 = mon.infer_page(8, 4)
+eq(#pg3.regs, 2, '第 3 页只剩 2 行(不够一页)')
+eq(pg3.page, 3, '第 3 页')
+local pg4 = mon.infer_page(100, 4)
+eq(#pg4.regs, 0, '越界的 off → 空页(不报错)')
+eq(pg4.total, 10, '越界也不改 total')
+eq(pg4.ignored, 10, 'ignored 是【整张表】的口径, 不是本页的')
+-- 视图记忆: 设备记住前端在看哪一页, 主动推送也推那一页
+mon.set_infer_view(4, 4)
+local vo, vn = mon.infer_view()
+eq(vo, 4, '记住前端在看第 2 页')
+eq(vn, 4, '记住每页 4 行')
+
+-- 12) ⚠️ 12-fix-9: attach_names 【不复制行、不加字段】——
+--   名字挂到顶层 names 表, 只有跟默认值(reg<addr>)不一样的才登记。
+--   老的"复制一份"方案(12-fix-6): 64 行 × 363 字节 = 23KB 表 + 128 个
+--   名字串 ≈ 28KB 垃圾/次, 现场把 300KB 的堆打碎 → 整机卡死。
 local ok_iot, iot = pcall(require, "iot/iot")
 if ok_iot then
   mon.test_reset_acc()
@@ -153,11 +183,46 @@ if ok_iot then
   for _ in pairs(live.regs[1]) do nf = nf + 1 end
   ok(nf <= 8, 'attach_names 之后活着的行还是 ≤8 字段 (现在 ' .. nf .. ' 个)')
   eq(live.regs[1].id, nil, '活着的行没被就地加 id')
-  eq(named.regs[1].id, 'reg100', '复制出来的那份带上了 id')
-  eq(named.regs[1].name, 'reg100', '复制出来的那份带上了 name')
-  eq(named.regs[1].value, 7, '复制出来的那份值没丢')
+  eq(named.regs[1], live.regs[1], 'attach_names 不复制行(同一个行对象)')
+  eq(named.regs[1].id, nil, '行上也不加 id(名字在顶层 names 表里)')
+  eq(type(named.names), 'table', '顶层有 names 表')
+  eq(named.names['reg100'], nil, '默认名不占 names 表(前端自己补 reg<addr>)')
+  eq(named.regs[1].value, 7, '值没丢')
 else
   print('  (跳过 attach_names 用例: iot/iot 在本环境装不上)')
+end
+
+-- 13) 12-fix-9: 一次只给一页 —— 峰值连续块需求砍一半。
+--   现场(64 个地址)整表应答 8158 字节, 池 95.8% 时 "alloc 8147 failed"
+--   → json encode out of memory → RET:INFER={} → 整机卡死。
+--   分页后一次最多 32 行, 应答 ~4KB。
+--   (应答的真实字节数只能在设备上量: PC 模拟器没有 json 模块)
+mon.test_reset_acc()
+for i = 0, 63 do
+  mon.test_note_req(1, i * 10, 1, 3)    -- fc=1: 一个地址一行(64 行)
+  mon.test_note_rsp(1, i * 10, i, 'uint16', 100)
+end
+local full = mon.infer_page(0, 128)     -- 问 128 行 → 设备只给 32 行(硬上限)
+eq(full.total, 64, '64 个地址都在表里')
+eq(#full.regs, 32, '一次最多 32 行(问 128 也只给 32, 峰值连续块需求封顶)')
+eq(full.pages, 2, '64 行 / 每页 32 行 = 2 页')
+local p1 = mon.infer_page(0, 32)
+eq(#p1.regs, 32, '第 1 页 32 行')
+local p2 = mon.infer_page(32, 32)
+eq(#p2.regs, 32, '第 2 页 32 行')
+eq(p2.regs[1].addr, 320, '第 2 页第一行 = 第 33 行')
+eq(p2.page, 2, '第 2 页')
+-- 名字表: 行一个字段都不加, 名字挂顶层
+local ok_iot2, iot2 = pcall(require, "iot/iot")
+if ok_iot2 then
+  local named = iot2.attach_names(p1)
+  local nf = 0
+  for _ in pairs(p1.regs[1]) do nf = nf + 1 end
+  ok(nf <= 8, '一页的行还是 ≤8 字段 (现在 ' .. nf .. ' 个)')
+  eq(named.regs[1], p1.regs[1], 'attach_names 不复制行')
+  eq(type(named.names), 'table', '顶层有 names 表')
+else
+  print('  (跳过 names 用例: iot/iot 在本环境装不上)')
 end
 
 if fails > 0 then

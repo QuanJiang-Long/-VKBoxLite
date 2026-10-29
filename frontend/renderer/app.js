@@ -49,7 +49,13 @@ const S = {
                        // 保存时拿它判断用户到底改没改过，没改就发空串，
                        // 见 saveHomeMqtt()（R1）
   frames: [],          // 最近解译帧
-  infer: null,         // R:INFER / RET:INFER_PUSH 返回的推断结果
+  infer: null,         // R:INFER / RET:INFER_PUSH 返回的推断结果(当前页)
+  // 12-fix-9: 推断表改成【分页】。设备一次最多回 32 行(整表 64 行时应答
+  //   8158 字节, 现场堆 95.8% 时 "alloc 8147 failed" → 整机卡死)。
+  //   inferNames 跨页累积(每页只带自己那页的名字), 翻回旧页不用重取名字。
+  inferNames: {},      // reg<addr> -> {id, name}
+  inferPage: 1,        // 当前页(1 起)
+  inferPageSize: 32,   // 每页行数(设备的硬上限也是 32)
   sniffTabActive: false, // sniff 面板当前是否打开。12-fix-6: 打开时让设备
                          // 主动推推断表(RET:INFER_PUSH), 关掉就停推。
   detected: null,      // R:AUTODETECT 识别出的通讯参数（仅本次会话，未写配置）
@@ -186,6 +192,9 @@ const el = new Proxy({
   frameFilter: $('frameFilter'), frameAuto: $('frameAuto'), frameLog: $('frameLog'),
   btnInfer: $('btnInfer'), inferTbody: $('inferTbody'),
   inferHint: $('inferHint'),
+  // 12-fix-9: 分页控件
+  inferPager: $('inferPager'), inferPageInfo: $('inferPageInfo'),
+  btnInferPrev: $('btnInferPrev'), btnInferNext: $('btnInferNext'),
   btnAutoDetect: $('btnAutoDetect'), detectHint: $('detectHint'),
   // 33-fix: platform 档两个提示横幅的 DOM 引用
   pMqttHint: $('pMqttHint'), pMqttHintText: $('pMqttHintText'),
@@ -658,17 +667,37 @@ function onSerialLine(line) {
   }
 }
 
-// 12-fix-6: 收到设备推来的整张推断表 -> 直接换掉本地这份并重绘。
+// 12-fix-6: 收到设备推来的推断表 -> 直接换掉本地这份并重绘。
 //   不用等用户点"推断轮询表"(用户 2026-10-28 要求: 新地址自己冒出来)。
 //   sniff 面板没开就不处理 —— 面板关着的时候表显示在哪都看不见。
+//
+// 12-fix-9: 设备推的是【当前页】(它记着前端最近一次 R:INFER 要的是哪一页,
+//   见 mon.set_infer_view)。所以:
+//   · 页对得上 → 换掉本页的行 + 更新总数/页数
+//   · 页对不上(前端刚翻页、设备还没收到请求) → 只更新总数/页数, 行不换
 function onInferPush(data) {
   if (!data || !Array.isArray(data.regs)) return;
   if (!S.sniffTabActive) return;
-  S.infer = data;
+  if (data.names && typeof data.names === 'object') Object.assign(S.inferNames, data.names);
+  const cur = S.infer || {};
+  const total = (data.total != null) ? data.total : toArr(data.regs).length;
+  const pages = data.pages || 1;
+  const samePage = (data.off != null && cur.off != null) ? (data.off === cur.off) : true;
+  S.infer = Object.assign({}, cur, {
+    regs: samePage ? data.regs : cur.regs,
+    slaves: data.slaves || cur.slaves,
+    ignored: (data.ignored != null) ? data.ignored : cur.ignored,
+    stat: data.stat || cur.stat,
+    total: total,
+    pages: pages,
+    page: (data.page != null) ? data.page : cur.page,
+    off: (data.off != null) ? data.off : cur.off,
+    n: data.n || cur.n,
+    names: S.inferNames,
+  });
   renderInfer();
-  const n = data.regs.length;
-  if (n) {
-    status('推断表已更新（' + n + ' 个地址）', true);
+  if (samePage && data.regs.length) {
+    status('推断表已更新（' + total + ' 个地址）', true);
   }
 }
 
@@ -1314,7 +1343,11 @@ function resetSniffView() {
   S.detected = null;      // 已识别参数
   S.infer = null;         // 推断结果
   S.frames = [];          // 总线报文(设备端也清了)
+  S.inferPage = 1;        // 12-fix-9: 页码复位
+  S.inferNames = {};      // 12-fix-9: 名字缓存复位
   if (el.inferHint) el.inferHint.textContent = '';
+  if (el.inferPager) el.inferPager.style.display = 'none';
+  if (el.inferPageInfo) el.inferPageInfo.textContent = '';
   if (el.inferTbody) {
     el.inferTbody.innerHTML = '<tr><td colspan="10" style="color:#999;">点击"推断轮询表"从已监听到的报文反推</td></tr>';
   }
@@ -1419,6 +1452,41 @@ async function setInferWatch(on) {
   return false;
 }
 
+// 12-fix-9: 取【一页】推断表。
+//   设备一次最多回 32 行(整表在 64 个地址时是 8158 字节的 JSON, 现场
+//   Lua 堆 95.8% 时 "alloc 8147 failed" → json encode out of memory →
+//   RET:INFER={} → 系统池见底 → "E/uart system is out of memory!!!" →
+//   整机卡死)。所以前端按页取, 显示页码, 一次只占设备 ~4KB 的连续块。
+async function fetchInferPage(page, silent) {
+  const size = S.inferPageSize;
+  const off = Math.max(0, (page - 1) * size);
+  const r = await sendCmd(Protocol.Enc.infer(off, size), 'INFER', 4000);
+  const d = r.data || {};
+  // 名字表跨页累积(每页只带自己那页的)
+  if (d.names && typeof d.names === 'object') Object.assign(S.inferNames, d.names);
+  const total = (d.total != null) ? d.total : toArr(d.regs).length;
+  // 表被清空/变小(新一轮 sniff)而当前页已经越界 → 回到第 1 页重取
+  if (toArr(d.regs).length === 0 && page > 1 && off >= total) {
+    S.inferPage = 1;
+    return fetchInferPage(1, silent);
+  }
+  S.inferPage = (d.page != null) ? d.page : page;
+  S.infer = {
+    regs: toArr(d.regs),
+    slaves: toArr(d.slaves),
+    ignored: d.ignored || 0,
+    stat: d.stat || {},
+    total: total,
+    pages: d.pages || 1,
+    page: S.inferPage,
+    off: (d.off != null) ? d.off : off,
+    n: d.n || size,
+    names: S.inferNames,
+  };
+  renderInfer();
+  return S.infer;
+}
+
 async function doInfer(silent) {
   // silent: 自动触发(切 sniff 面板)时用 —— 每次切面板都弹一次 toast 太吵
   // ⚠️ 撞"上一条指令尚未返回"时重试一次: 串口是单未决设计, 同一时刻只能
@@ -1426,11 +1494,9 @@ async function doInfer(silent) {
   //   刷新会静默失败 —— 表现就是"切进 sniff 面板表没更新"
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const r = await sendCmd(Protocol.Enc.infer(), 'INFER', 4000);
-      S.infer = r.data;
-      renderInfer();
-      if (toArr(S.infer && S.infer.regs).length) {
-        if (!silent) status('推断出 ' + toArr(S.infer.regs).length + ' 个轮询项', true);
+      const inf = await fetchInferPage(S.inferPage, silent);
+      if (toArr(inf && inf.regs).length) {
+        if (!silent) status('推断出 ' + (inf.total || 0) + ' 个轮询项', true);
         // 不能提"应用到轮询配置": 那个按钮和 W:APPLYINFER 已经删了,
         // 推断结果只作参考, 由人工核对后自行配置(见 lua/README.md 配置隔离)
         if (!silent) toast('推断完成，结果仅供参考，请核对后自行配置');
@@ -1452,6 +1518,20 @@ async function doInfer(silent) {
       }
       return;
     }
+  }
+}
+
+// 翻页
+async function gotoInferPage(page) {
+  const inf = S.infer || {};
+  const pages = inf.pages || 1;
+  if (page < 1) page = 1;
+  if (page > pages) page = pages;
+  S.inferPage = page;
+  try {
+    await fetchInferPage(page, true);
+  } catch (e) {
+    console.warn('[sniff] 翻页失败:', e.message);
   }
 }
 
@@ -1478,10 +1558,26 @@ function inferStatus(r) {
 function renderInfer() {
   const inf = S.infer || {};
   const regs = toArr(inf.regs);
-  el.inferHint.textContent = regs.length
-    ? '监听到 ' + toArr(inf.slaves).length + ' 个从机，共 ' + regs.length + ' 个轮询项'
+  const total = (inf.total != null) ? inf.total : regs.length;
+  const pages = inf.pages || 1;
+  const page = inf.page || S.inferPage || 1;
+  const off = (inf.off != null) ? inf.off : (page - 1) * S.inferPageSize;
+  el.inferHint.textContent = total
+    ? '监听到 ' + toArr(inf.slaves).length + ' 个从机，共 ' + total + ' 个轮询项'
       + (inf.ignored ? '；其中 ' + inf.ignored + ' 个地址主站轮询了但没收到应答' : '')
+      + (pages > 1 ? '（第 ' + page + '/' + pages + ' 页）' : '')
     : '';
+  // 12-fix-9: 页码控件
+  if (el.inferPager) {
+    el.inferPager.style.display = total ? 'flex' : 'none';
+    if (el.inferPageInfo) {
+      el.inferPageInfo.textContent = total
+        ? ('第 ' + page + ' / ' + pages + ' 页  （共 ' + total + ' 项，本页 ' + regs.length + ' 项）')
+        : '';
+    }
+    if (el.btnInferPrev) el.btnInferPrev.disabled = (page <= 1);
+    if (el.btnInferNext) el.btnInferNext.disabled = (page >= pages);
+  }
   if (regs.length === 0) {
     el.inferTbody.innerHTML = '<tr><td colspan="10" style="color:#999;">暂无推断结果</td></tr>';
     return;
@@ -1489,14 +1585,21 @@ function renderInfer() {
   // 12-fix-6: 第一列从"从机地址"改成"序号" —— 总线上常常就一个从机,
   //   那一列永远是 1, 占着位置没用。序号 = 表里的行号(设备那边按【发现
   //   顺序】排, 所以序号 = 嗅探到的先后, 越靠前越早被认出来)。
+  // 12-fix-9: 分页后, 序号要用【全局下标】= 本页 off + i + 1, 否则每页
+  //   都从 1 开始, 翻页看不出这是同一张表的前后两段。
+  // 12-fix-9: 名字/id 不在行上了(设备不再给行加字段), 统一从顶层 names
+  //   表查; 查不到就是默认值 reg<addr>(前端自己补)。
   el.inferTbody.innerHTML = regs.map((r, i) => {
     // 最新值: 设备只带被解出过的地址; 浮点显示截 4 位小数(纯展示, 不改数据)
     const v = (r.value != null && typeof r.value === 'number' && !Number.isInteger(r.value))
       ? Math.round(r.value * 1e4) / 1e4 : r.value;
     const akey = 'reg' + r.addr;
+    const nm = (S.inferNames && S.inferNames[akey]) || null;
+    const rid = (nm && nm.id) ? nm.id : akey;
+    const rname = (nm && nm.name) ? nm.name : rid;
     const st = inferStatus(r);
     return '<tr>' +
-    '<td>' + (i + 1) + '</td>' +
+    '<td>' + (off + i + 1) + '</td>' +
     '<td>' + esc(r.addr) + '</td>' +
     '<td>' + esc(inferWidth(r.dtype)) + '</td>' +
     '<td>0x' + (r.fc != null ? r.fc.toString(16).padStart(2, '0').toUpperCase() : '?') + '</td>' +
@@ -1513,10 +1616,10 @@ function renderInfer() {
     // 参数名称: 与 U4 上报 payload 的 name 同一字段 (设备端 attach_names 给的);
     // 可点击改名 (2026-10)。老固件不带 name 时退显示 reg<addr>
     '<td class="ed-cell" data-alias-key="' + esc(akey) + '" data-alias-field="name" ' +
-      'title="点击编辑上报用的参数名称">' + esc(r.name || akey) + '</td>' +
+      'title="点击编辑上报用的参数名称">' + esc(rname) + '</td>' +
     // 建议标识符: 上报用的 id。改名会让平台按新 id 重建物模型
     '<td class="ed-cell" data-alias-key="' + esc(akey) + '" data-alias-field="id" ' +
-      'title="点击编辑上报用的标识符(id)">' + esc(r.id || akey) + '</td>' +
+      'title="点击编辑上报用的标识符(id)">' + esc(rid) + '</td>' +
     '</tr>';
   }).join('');
 }
@@ -2410,6 +2513,9 @@ if (el.btnHomeMqttPassEye) el.btnHomeMqttPassEye.onclick = togglePassEye;
 //   btnFrameRefresh/btnFrameClear 在总线报文子分段, 绑 frameLog
 //   btnInferRefresh/btnInferClear 在 sniff嗅探 panel-title (刷新=重推一轮, 清空=推断表还原)
 if (el.btnInferRefresh) el.btnInferRefresh.onclick = doInfer;
+// 12-fix-9: 推断表翻页
+if (el.btnInferPrev) el.btnInferPrev.onclick = () => gotoInferPage((S.inferPage || 1) - 1);
+if (el.btnInferNext) el.btnInferNext.onclick = () => gotoInferPage((S.inferPage || 1) + 1);
 el.btnFrameRefresh.onclick = () => {
   // sniff-3 i: 总开关 (frameSectionOn) 关时手动刷新也不发 R:FRAMES
   if (el.frameSectionOn && !el.frameSectionOn.checked) return;
@@ -2424,6 +2530,11 @@ if (el.btnInferClear) {
     }
     if (el.inferHint) el.inferHint.textContent = '';
     if (el.detectHint) el.detectHint.textContent = '';
+    // 12-fix-9: 页码/名字缓存一起复位(表清了, 页码也回第 1 页)
+    S.inferPage = 1;
+    S.inferNames = {};
+    if (el.inferPager) el.inferPager.style.display = 'none';
+    if (el.inferPageInfo) el.inferPageInfo.textContent = '';
     // 同步清掉 S 里保存的推断结果
     if (S.infer) S.infer = null;
     status('已清空推断结果', true);
@@ -2731,24 +2842,34 @@ function mockReply(line) {
     { slave: 2, fc: 3, kind: 'req', addr: 0, qty: 10, hex: '02 03 00 00 00 0A', len: 8, pair_state: 'req' },
     { slave: 2, fc: 3, kind: 'rsp', bc: 20, vhex: '0001000200030004', hex: '02 03 14 00 01 …', len: 25, pair_state: 'orphan' }
   ]);
-  else if (line === 'R:INFER') {
-    // 别名表里的名字要反映到推断表 (浏览器预览里改名后重推能看到变化)
-    const mregs = [
+  else if (line.indexOf('R:INFER') === 0) {
+    // 12-fix-9: 分页 —— 浏览器预览里也按 off,n 切, 翻页控件能看效果
+    let off = 0, n = 32;
+    const q = line.slice('R:INFER'.length);
+    if (q.charAt(0) === '=') {
+      const parts = q.slice(1).split(',');
+      off = parseInt(parts[0], 10) || 0;
+      n = parseInt(parts[1], 10) || 32;
+    }
+    const mall = [
       { slave: 1, addr: 100, fc: 3, hits: 12, value: 42, dtype: 'uint16', conf: 95, answered: true },
       { slave: 2, addr: 0, fc: 3, hits: 5, value: null, dtype: 'uint16', conf: 0, answered: false }
-    ].map(r => {
-      const key = 'reg' + r.addr;
-      const sa = MOCK.alias.regs.find(x => x.key === key);
-      return Object.assign({}, r, {
-        id: sa ? (sa.id || key) : key,
-        name: sa ? (sa.name || sa.id || key) : key,
-      });
+    ];
+    // 12-fix-9: 名字挂顶层 names 表(设备端不再给行加 id/name 字段)
+    const names = {};
+    MOCK.alias.regs.forEach(x => {
+      const id = x.id || x.key, nm = x.name || x.id || x.key;
+      if (id !== x.key || nm !== x.key) names[x.key] = { id: id, name: nm };
     });
+    const total = mall.length;
+    const pages = Math.max(1, Math.ceil(total / n));
     resp = 'RET:INFER=' + JSON.stringify({
-      regs: mregs,
+      regs: mall.slice(off, off + n),
       slaves: [1, 2],
       ignored: 1,          // 1 个地址轮询了但没应答(no_rsp)
-      stat: { frames: 24, reqs: 12, rsps: 11, errs: 0, paired: 10, orphans: 1, detect_round: 0, detect_fail: 0 }
+      stat: { frames: 24, reqs: 12, rsps: 11, errs: 0, paired: 10, orphans: 1, detect_round: 0, detect_fail: 0 },
+      total: total, pages: pages, page: Math.floor(off / n) + 1, off: off, n: n,
+      names: names
     });
   }
   // sniff 别名表 (2026-10): 浏览器预览里也能改名

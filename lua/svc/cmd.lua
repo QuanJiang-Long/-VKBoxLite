@@ -56,8 +56,24 @@ if UART_ID == nil then UART_ID = 4 end
 local g_cmds = {}
 
 function M.reply(s)
-    log.debug("cmd", "tx:", s)
+    -- ⚠️ 12-fix-9 (2026-10-29): 【别把整条应答打进日志】。
+    --   原来 log.debug("cmd", "tx:", s) 把整条应答(64 个地址时 8158 字节)
+    --   原样交给日志模块格式化 —— 那就是又一份 8KB 的分配 + 8KB 的串口输出。
+    --   现场 300KB 的堆就是这样被一次次抄没的(池 294448/307192 = 95.8%,
+    --   "alloc 8147 failed" → json encode out of memory → 整机卡死)。
+    --   只打长度 + 前 80 字节: 排查够用, 代价是一条小日志。
+    log.debug("cmd", "tx:", #s, "B:", s:sub(1, 80))
     pcall(uart.write, UART_ID, s .. "\r\n")
+end
+
+-- 12-fix-9: 大应答专用(R:INFER / INFER_PUSH)。
+--   一次 table.concat 拼出整行, 省掉 "RET:INFER=" .. json .. "\r\n" 中间
+--   那两次拷贝 —— 每一次拷贝都是一份同样大的垃圾(json 8KB → +前缀 8KB
+--   → +换行 8KB = 24KB)。拼完只留一份。
+local function reply_big(key, payload)
+    local s = table.concat({ key, payload, "\r\n" })
+    log.debug("cmd", "tx:", #s, "B:", s:sub(1, 80))
+    pcall(uart.write, UART_ID, s)
 end
 
 -- 识别期间挡住会动串口的命令
@@ -92,19 +108,25 @@ end
 
 local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
 
--- 12-fix-6: 主动把推断表推给前端。设备每发现一个新地址就推一次整张表,
+-- 12-fix-6: 主动把推断表推给前端。设备每发现一个新地址就推一次,
 --   前端不用手动点刷新(用户 2026-10-28 要求)。
 --   ⚠️ 键名用 INFER_PUSH 而不是 INFER: 前端的"单未决指令"靠键名配对,
 --   跟 R:INFER 的应答撞名的话, 推送会被当成那条指令的应答吞掉。
 --   由 iot 的 1 秒巡检调用(不在 sniff 热路径上 —— 一次推送要拼几 KB JSON,
 --   放在收帧协程里就是新的碎片化来源)。
+--
+-- ⚠️ 12-fix-9 (2026-10-29): 推【当前页】, 不推整张表。
+--   设备记着前端最近一次 R:INFER 要的是哪一页(mon.set_infer_view),
+--   推同一页过去, 前端直接换掉那一页的缓存。
+--   推整张表的话, 64 个地址就是 8KB 的 JSON —— 正是现场崩掉的那个大小。
 function M.push_infer()
     if not mon then return false end
-    local ok, inf = pcall(mon.infer, true)
+    local off, n = mon.infer_view()
+    local ok, inf = pcall(mon.infer_page, off, n)
     if not ok or type(inf) ~= "table" then return false end
     -- 名字/标识符跟 R:INFER 走同一套映射(前端两处显示一致)
     if iot and iot.attach_names then inf = iot.attach_names(inf) end
-    M.reply("RET:INFER_PUSH=" .. jencode(inf))
+    reply_big("RET:INFER_PUSH=", jencode(inf))
     return true
 end
 
@@ -386,12 +408,31 @@ local function reg_cmds()
         M.reply("RET:FRAMES=" .. jencode(mon.recent_frames(n)))
     end)
 
-    -- R:INFER: 从旁听帧反推轮询表 (attach_names 给每行补 name 字段, 与
+    -- R:INFER[=off,n]: 从旁听帧反推轮询表 (attach_names 给每行补 name 字段, 与
     --   U4 上报的 name 同一套映射, 前端推断表"参数名称"列直接显示)
-    M.reg("R:INFER", function()
-        -- 12-fix: force=true 跳过 infer 的 2 秒 TTL 缓存 —— 前端推断表要
-        --   当前值, 缓存里的可能是两秒前的
-        M.reply("RET:INFER=" .. jencode(iot.attach_names(mon.infer(true))))
+    --
+    -- ⚠️ 12-fix-9 (2026-10-29): 【分页】。off=起始行号(0 起), n=本页行数。
+    --   现场(09:14~09:19, 64 个地址)整表应答是 8158 字节的 JSON, 峰值连续块
+    --   需求 8158, 而那会儿 Lua 池已经 294448/307192 = 95.8% →
+    --   "alloc 8147 failed" → json encode out of memory → RET:INFER={} →
+    --   系统池也见底 → "E/uart system is out of memory!!!" → 整机卡死。
+    --   分页后一次最多 32 行, 应答 ~4KB, 峰值需求减半。
+    --   ⚠️ 前端要一起改(app.js 的 doInfer/renderInfer): 按页取 + 显示页码。
+    M.reg("R:INFER", function(arg)
+        local off, n = 0, nil
+        if arg and arg ~= "" then
+            local a, b = arg:match("^(%d*)%s*,%s*(%d*)")
+            if a then
+                off = tonumber(a) or 0
+                n = tonumber(b)
+            else
+                local v = tonumber(arg)
+                if v then off = v end
+            end
+        end
+        -- 记下前端在看哪一页: 主动推送也推这一页
+        mon.set_infer_view(off, n)
+        reply_big("RET:INFER=", jencode(iot.attach_names(mon.infer_page(off, n))))
     end)
 
     -- 12-fix-6: W:INFERWATCH=1|0 —— 前端 sniff 面板打开/关闭。

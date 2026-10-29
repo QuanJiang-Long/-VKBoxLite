@@ -90,6 +90,13 @@ end
 --   原地改安全: 全项目没有任何地方跨帧持有这张表的引用 ——
 --   iot.build_items 每次现取现读 (iot.lua:269), mon.infer 同理 (mon.lua:482),
 --   collector.snapshot() 另建新表。
+-- ⚠️ 12-fix-9 (2026-10-29): 【不再存 hex】。
+--   hex 参数还留着(调用点不用改), 但不再挂到数据点上 —— 那一行挂着的是
+--   【整帧的十六进制串】, 每个地址各留一份引用, 现场 64 个地址就是 64 个
+--   不同的帧串常驻(每个 ~56 字节, 合计 ~3.6KB; 128 个地址 ~7.2KB)。
+--   而它只有一个读者: collector.snapshot() 的 R:VAL(前端只用 name/addr/
+--   value, 不用 hex —— 报文卡那儿的 hex 更全)。总线报文卡里本来就有 hex。
+--   现场 300KB 的堆现在每一 KB 都要算: 64 个地址已经占 290KB(95.8%)。
 function M.push_data(addr, alias, hex, value, ts, dtype, conf, status)
     if value == nil then return false end
     if not alias or alias == "" then alias = "r" .. addr end
@@ -102,13 +109,12 @@ function M.push_data(addr, alias, hex, value, ts, dtype, conf, status)
             dataCache[table.remove(dataOrder, 1)] = nil
         end
         d = {
-            addr = addr, hex = hex, value = value, ts = ts,
+            addr = addr, value = value, ts = ts,
             dtype = dtype, conf = conf, status = status,
         }
         dataCache[alias] = d
     else
         d.addr = addr
-        d.hex = hex
         d.value = value
         d.ts = ts
         d.dtype = dtype
@@ -201,7 +207,8 @@ end
 function M.snapshot()
     local out = {}
     for alias, d in pairs(dataCache) do
-        out[#out + 1] = { name = alias, addr = d.addr, value = d.value, hex = d.hex, ts = d.ts, dtype = d.dtype }
+        -- 12-fix-9: 不再带 hex(数据点上不存了, 见 push_data 的说明)
+        out[#out + 1] = { name = alias, addr = d.addr, value = d.value, ts = d.ts, dtype = d.dtype }
     end
     table.sort(out, function(a, b) return (a.addr or 0) < (b.addr or 0) end)
     return out

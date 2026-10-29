@@ -238,47 +238,74 @@ end
 -- ⚠️ 12-fix-3 (2026-10-28): c 可选 —— 传进来就复用, 不要再 active_cfg()。
 --   build_items() 一次调用里原来要 active_cfg() 两次(自己一次 + alias_map()
 --   里面一次), 每次都是把整份配置从 fskv 反序列化一遍。现在只取一次。
+--
+-- ⚠️ 12-fix-9 (2026-10-29): 结果【缓存】, 键 = 配置版本 + 槽位。
+--   原来每次都新建这张 name->alias 映射(最多 128 条 ≈ 8KB 垃圾/次),
+--   而 attach_names(每次 R:INFER) 和 build_items(每次发布)都要它。
+--   配置一天可能只改一次(用户手配 / 平台下发), 写盘时版本号涨 → 缓存失效;
+--   槽位(poll/pull)也算进键: 切档读的是另一个配置槽, 别拿串。
+local alias_map_cache = nil
+local alias_map_key = nil
 local function alias_map(c)
+    local key = tostring(cfgstore.version()) .. ":" .. tostring(poll_slot())
+    if alias_map_cache and alias_map_key == key then return alias_map_cache end
     c = c or active_cfg()
-    if not c or not c.regs then return {} end
     local m = {}
-    for _, r in ipairs(c.regs) do m[r.name] = r.alias or r.name end
+    if c and c.regs then
+        for _, r in ipairs(c.regs) do m[r.name] = r.alias or r.name end
+    end
+    alias_map_cache = m
+    alias_map_key = key
     return m
 end
 
 -- 推断结果补 name/id: 与上报同一套映射(用户别名表优先, 再 cfg alias_map)
 --
--- ⚠️ 12-fix-6 (2026-10-28): 【复制一份再挂名字, 不就地改】。
---   就地改会给活着的推断行加上 id/name 两个字段 → 第 9/10 个字段 →
---   Lua 的哈希槽从 8 涨到 16 → 每行 203 → 363 字节(实测) → 现场的 48 行
---   就是 +7.7KB 常驻堆。复制只发生在 R:INFER / 主动推送这两种稀疏调用上,
---   复制出来的表马上变成垃圾被回收, 活着的结构保持 8 字段/行。
+-- ⚠️ 12-fix-9 (2026-10-29): 【不再复制行】, 名字表挂到【顶层】。
+--   12-fix-6 的做法是"复制一份再挂名字": 每行复制一张 10 字段表(第 9/10 个
+--   字段 → Lua 哈希槽 8 涨到 16 → 203 → 363 字节/行)。现场 64 个地址就是:
+--     ① 64 张 10 字段表 = 23KB
+--     ② 再拼 64 个 id 串 + 64 个 name 串      ≈ 28KB 一次性垃圾
+--   加上 alias_map/alias_map 两张映射表(另 ~23KB), 一次 R:INFER 制造
+--   ~65KB 短命垃圾。现场(09:14~09:19, 池 294448/307192 = 95.8%)就是这么
+--   被打碎的: "alloc 8147 failed" → json encode out of memory →
+--   RET:INFER={} → 系统池也见底 → "E/uart system is out of memory!!!" →
+--   整机卡死(09:19:03)。
+--   现在:
+--     · 行【一个字段都不加】(还是 8 字段 8 槽 = 203 字节/行), 常驻不变
+--     · 名字表只在【跟默认值不一样】时才有条目(用户改过名的那些, 通常几个):
+--         {"regs":[...8 字段的行...], "names":{"reg230":{"id":"x","name":"y"}}}
+--     · 零复制, 每行还少两个字段(应答再小 ~30 字节/行)
+--   ⚠️ 前端要跟着改: 显示名字时先查 names['reg'+addr], 没有就用 reg<addr>
+--      (见 frontend/renderer/app.js 的 renderInfer)。
 function M.attach_names(inf)
     if type(inf) ~= "table" or type(inf.regs) ~= "table" then return inf end
     local amap = alias_map()
     local smap = cfgstore.alias_map()   -- sniff 别名表 (用户起的名字)
-    -- 顶层字段(slaves/ignored/stat)原样带过去
-    local out = {}
-    for k, v in pairs(inf) do out[k] = v end
-    local rows = {}
-    for i, a in ipairs(inf.regs) do
+    local names = {}
+    for _, a in ipairs(inf.regs) do
         local k = "reg" .. tostring(a.addr or "")
         local sa = smap[k]
         local id, name
         if sa then
-            id = (sa.id ~= "" and sa.id) or k
-            name = (sa.name ~= "" and sa.name) or id
+            local sid = sa.id or ""
+            local snm = sa.name or ""
+            id = (sid ~= "") and sid or k
+            name = (snm ~= "") and snm or id
         else
             id = k
             name = amap[k] or k   -- 没配 alias 时 = 本身, 与 U4 上报完全一致
         end
-        local c = {}
-        for kk, vv in pairs(a) do c[kk] = vv end
-        c.id = id
-        c.name = name
-        rows[i] = c
+        -- 只有跟默认值不一样才登记 —— 默认值前端自己就能补(reg<addr>)
+        if id ~= k or name ~= k then
+            names[k] = { id = id, name = name }
+        end
     end
-    out.regs = rows
+    -- 顶层字段(regs/slaves/ignored/stat/total/off/n/pages)原样带过去
+    local out = {}
+    for k, v in pairs(inf) do out[k] = v end
+    out.regs = inf.regs   -- 同一个数组, 不复制
+    out.names = names
     return out
 end
 
