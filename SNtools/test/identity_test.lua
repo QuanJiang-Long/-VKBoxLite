@@ -71,11 +71,11 @@ end)
 test("身份结构字段完整（含 fw 版本）", function()
     local identity = require "identity"
     local sn_core  = require "sn_core"
-    _G.VERSION = "1.0.0"
+    _G.VERSION = "1.0.2"
     identity.init()
     sn_core.init()
     local t = identity.get()
-    eq(t.fw, "1.0.0")
+    eq(t.fw, "1.0.2")
     eq(t.sn_status, "unset")
     truthy(type(t.clientid) == "string" and #t.clientid > 0)
 end)
