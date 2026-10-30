@@ -204,6 +204,11 @@ local function reset_state()
         --   与 topo_at(重建时刻)分开: census 的 topoago 用这个, 才能看出
         --   "拓扑多久没发出去了"。nil = 从未发送过。
         topo_sent_at = nil,
+        -- ⚠️ topo-oom-fix (2026-10-30): send_topo OOM 失败退避状态。
+        --   topo_fail_at = 上次失败的 os.clock(), 5 分钟后重置 topo_sig 触发重试
+        --   topo_fail_n = 累计失败次数, 进 census 方便观测
+        topo_fail_at = nil,
+        topo_fail_n = 0,
         -- 12-fix-4: 上次打【结构普查】的时刻 (os.clock, 秒)。每 30 秒一行,
         --   把各常驻结构的条目数 + 堆水位一次列出来 —— 现场一崩, 最后那行
         --   census 就直接指出是哪个数字在涨(不用再猜)。
@@ -596,7 +601,7 @@ local function census()
         topoago = math.floor(os.clock() - S.topo_sent_at)
     end
     log.info("iot", string.format(
-        "census lua=%.1fKB points=%d frames=%d aliases=%d rows=%d pub=%d/%d meta=%d topo=%d blk=%d fps=%d push=%d gc=%d bfail=%d rc=%d err=%d aerr=%d toposig=%s topoago=%ds",
+        "census lua=%.1fKB points=%d frames=%d aliases=%d rows=%d pub=%d/%d meta=%d topo=%d blk=%d fps=%d push=%d gc=%d bfail=%d rc=%d err=%d aerr=%d toposig=%s topoago=%ds tfail=%d",
         collectgarbage("count"),
         cs.points or 0, cs.frames or 0,
         ms.hist_aliases or 0, ms.infer_rows or 0,
@@ -614,7 +619,10 @@ local function census()
         --   导致的丢帧(新加的 pcall 兜底记的)。aerr 不为 0 = 堆又在吃紧,
         --   设备没崩但已经开始丢帧了 —— 这是崩溃前的先行指标。
         ms.errs or 0, ms.alloc_err or 0,
-        tostring(S.topo_sig or "nil"), topoago))
+        tostring(S.topo_sig or "nil"), topoago,
+        -- topo-oom-fix: send_topo OOM 累计失败次数。>0 = 拓扑发不出去,
+        --   平台侧物模型可能缺属性。5 分钟退避重试。
+        S.topo_fail_n or 0))
 end
 
 -- ===== U2 拓扑上报 / U3 网关资源 / U7 指令回执 =====
@@ -2215,6 +2223,8 @@ local function task_main()
                     -- 记【实际发送】时间, 不是重建时间。census 的 topoago 用这个,
                     -- 才能看出"拓扑多久没发出去了"。原来用的 S.topo_at 是重建时间
                     -- (每 30 秒刷新), 导致 topoago 永远是 0~30s, 没有诊断价值。
+                    S.topo_fail_at = nil  -- 发送成功了, 清掉失败退避标记
+                    S.topo_fail_n = 0
                     pubsched.sent("topo")
                     -- ⚠️ 12-fix-11 (2026-10-29): 指纹现在是哈希(几十字节),
                     --   不是原来那份 nodes 串, 所以 #sig/头 100 字节没意义了。
@@ -2222,8 +2232,27 @@ local function task_main()
                     log.info("iot", "topology posted: parts=" .. #nodes_json
                         .. " bytes=" .. topo.len(nodes_json) .. " sig=" .. sig)
                 else
-                    log.info("iot", "topology skip: " .. tostring(e or sent))
+                    -- ⚠️ topo-oom-fix (2026-10-30): 发送失败(通常 OOM)后:
+                    --   ① S.topo_sig = sig —— 记住"这个内容试过了", 防止下一轮
+                    --     30s 重建时又 sig != S.topo_sig → 又 send_topo → 又 OOM,
+                    --     每次失败还造一堆 fragments 垃圾, 堆更碎, 死循环。
+                    --   ② S.topo_fail_at = os.clock() —— 记失败时间, 5 分钟后重试。
+                    --   ③ S.topo_fail_n 累计失败次数, 进 census 方便观测。
+                    S.topo_sig = sig
+                    S.topo_fail_at = os.clock()
+                    S.topo_fail_n = (S.topo_fail_n or 0) + 1
+                    log.info("iot", "topology skip (fail_n=" .. S.topo_fail_n
+                        .. "): " .. tostring(e or sent))
                 end
+            end
+            -- topo-oom-fix: 失败退避 —— 5 分钟后重置 sig, 让下一轮重建重试。
+            --   只重置 S.topo_sig(让 sig != S.topo_sig 触发发送), 不触发重建
+            --   (重建由 pubsched.ready 控制, 不受影响)。
+            --   如果内容在 5 分钟内又变了(新参数进来), 上面的 sig ~= S.topo_sig
+            --   会直接走发送, 不等退避。
+            if S.topo_fail_at and (os.clock() - S.topo_fail_at) > 300 then
+                S.topo_sig = nil
+                S.topo_fail_at = nil
             end
             end  -- if pub_platform end
             -- 12-fix-4: 每 30 秒一行结构普查(见 census() 上面的说明)
