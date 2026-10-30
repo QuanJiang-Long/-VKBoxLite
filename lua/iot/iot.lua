@@ -213,6 +213,13 @@ local function reset_state()
         --   nil = 还没成功发过拓扑, U4 数据暂不发(平台没有物模型, 发了也白发)。
         --   拓扑成功时由 send_topo 成功路径写入, 用于 build_items 过滤新属性。
         topo_ack_props = nil,
+        -- ⚠️ incr-topo (2026-10-30): 增量拓扑状态。
+        --   topo_sent_props: 已发送的 property ID 集合 {id=true}, 用于检测新增属性
+        --   topo_prop_sig: property 列表指纹(用于检测 prop_ids 是否变化, 避免重建)
+        --   topo_sent_sig: 上次成功发送的拓扑签名(用于检测是否需要发送)
+        topo_sent_props = nil,
+        topo_prop_sig = nil,
+        topo_sent_sig = nil,
         -- 12-fix-4: 上次打【结构普查】的时刻 (os.clock, 秒)。每 30 秒一行,
         --   把各常驻结构的条目数 + 堆水位一次列出来 —— 现场一崩, 最后那行
         --   census 就直接指出是哪个数字在涨(不用再猜)。
@@ -772,7 +779,11 @@ end
 -- 是 ds_poll 手工档的默认 9600, 而总线的波特率是自动识别出来的。拿错的
 -- 波特率上报, 平台就照它建配置 —— 实测识别出 2400 却发了 9600, 平台回的
 -- 建设配置 baud 就是 9600, 拿这份配置去轮询一帧都收不到
-local function build_topo()
+-- ⚠️ incr-topo (2026-10-30): 新增 only_ids 参数(可选)。
+--   only_ids = nil: 构建完整拓扑(首次发送 / property 列表变化时)
+--   only_ids = {id=true}: 只构建这些 property 的拓扑(增量发送)
+--   增量拓扑只有几百字节, 不会 OOM; 完整拓扑 6KB+, 堆碎片时容易失败。
+local function build_topo(only_ids)
     local mode = get_mode()
     local parts = {}
     local prop_ids = {}  -- ⚠️ topo-ack-filter: 记录拓扑里的属性 ID, 用于 U4 过滤
@@ -809,9 +820,15 @@ local function build_topo()
             --   回归, 但改它等于动平台的物模型契约(平台到底收不收
             --   uint32/int32/float32 还没在现网验过), 单独一次改, 不混在
             --   内存优化里。见 lua/README.md「物模型 dataType」。
-            g.addrs[#g.addrs + 1] = r.addr
-            g.props[#g.props + 1] = topo.prop(id, nm, "uint16", r.slave, r.addr, 1)
-            prop_ids[#prop_ids + 1] = id  -- topo-ack-filter: 记录属性 ID
+            -- ⚠️ incr-topo (2026-10-30): 增量过滤 —— only_ids 不为 nil 时,
+            --   只包含在 only_ids 集合里的 property, 跳过其他的。
+            if only_ids and not only_ids[id] then
+                -- 增量模式, 这个 property 不是新增的, 跳过
+            else
+                g.addrs[#g.addrs + 1] = r.addr
+                g.props[#g.props + 1] = topo.prop(id, nm, "uint16", r.slave, r.addr, 1)
+                prop_ids[#prop_ids + 1] = id  -- topo-ack-filter: 记录属性 ID
+            end
         end
         -- ② 平台下发的配置行: 同址覆盖推断行(用户配的真名优先)
         local pc = cfgstore.load_pull()
@@ -825,12 +842,22 @@ local function build_topo()
                 if g.addrs[i] == r.addr then hit = i break end
             end
             if hit > 0 then
-                g.props[hit] = prop
-                prop_ids[hit] = id  -- topo-ack-filter: 覆盖旧的 ID
+                -- ⚠️ incr-topo (2026-10-30): 增量过滤
+                if only_ids and not only_ids[id] then
+                    -- 增量模式, 跳过(但保留原位置, 不覆盖)
+                else
+                    g.props[hit] = prop
+                    prop_ids[hit] = id  -- topo-ack-filter: 覆盖旧的 ID
+                end
             else
-                g.addrs[#g.addrs + 1] = r.addr
-                g.props[#g.props + 1] = prop
-                prop_ids[#prop_ids + 1] = id  -- topo-ack-filter: 新增 ID
+                -- ⚠️ incr-topo (2026-10-30): 增量过滤
+                if only_ids and not only_ids[id] then
+                    -- 增量模式, 跳过
+                else
+                    g.addrs[#g.addrs + 1] = r.addr
+                    g.props[#g.props + 1] = prop
+                    prop_ids[#prop_ids + 1] = id  -- topo-ack-filter: 新增 ID
+                end
             end
         end
         local st = mon.status()
@@ -863,8 +890,13 @@ local function build_topo()
     for _, r in ipairs(c.regs) do
         if #props >= MAX_PROPS then break end
         local id, nm = prop_id_name(r)
-        props[#props + 1] = topo.prop(id, nm, r.dtype or "uint16", c.slave, r.addr, r.count or 1)
-        prop_ids[#prop_ids + 1] = id  -- topo-ack-filter: 记录属性 ID
+        -- ⚠️ incr-topo (2026-10-30): 增量过滤
+        if only_ids and not only_ids[id] then
+            -- 增量模式, 跳过
+        else
+            props[#props + 1] = topo.prop(id, nm, r.dtype or "uint16", c.slave, r.addr, r.count or 1)
+            prop_ids[#prop_ids + 1] = id  -- topo-ack-filter: 记录属性 ID
+        end
     end
     topo.node_parts(parts, 1, c.slave, serial_json(c), "sniff_s" .. c.slave, props)
     return parts, prop_ids
@@ -885,13 +917,15 @@ end
 --   原来指纹 = "#长度:" .. nodes 串 —— 那是要常驻一份 8.5KB 连续内存的
 --   (S.topo_sig), 而且发布时 body 又要拼一份, 峰值连续块需求 25KB。
 --   现在指纹 = 片段内容的 31 位哈希(几十字节), 峰值降到 8.6KB。
-local function topo_sig()
+-- ⚠️ incr-topo (2026-10-30): 新增 only_ids 参数, 传给 build_topo 做增量构建。
+--   only_ids = nil: 完整构建; only_ids = {id=true}: 只构建新增属性。
+local function topo_sig(only_ids)
     -- ⚠️ 12-fix-7: 拼拓扑那几 KB 连续内存之前先按水位回收一次。
     --   现场(41 分钟): 拓扑这条只要 1.2KB 连续块都申请不到
     --   ("not enough memory for buffer allocation") —— 池子被 churn 切碎了。
     --   完整回收能把碎片并回大块(要现场验证, 所以加了日志)。
     reclaim_if_high()
-    local parts, prop_ids = build_topo()
+    local parts, prop_ids = build_topo(only_ids)
     if not parts then return nil end
     return topo.sig(parts), parts, prop_ids
 end
@@ -2232,69 +2266,122 @@ local function task_main()
             --   而重建本身很贵 —— 所以按时间闸门来, 而不是每轮都重建。
             if pub_topo and not pub_blocked() then
                 if pubsched.ready("topo") then
-                    local ok, s, n, pids = pcall(topo_sig)
-                    if ok then
-                        sig, nodes_json, prop_ids = s, n, pids
-                        S.topo_at = os.clock()
+                    -- ⚠️ incr-topo (2026-10-30): 增量拓扑逻辑
+                    local cur_pids = {}
+                    local smap = cfgstore.alias_map()
+                    local mode = get_mode()
+                    if mode == "sniff" then
+                        for _, r in ipairs((mon.infer() or {}).regs or {}) do
+                            local sa = smap["reg" .. tostring(r.addr or "")]
+                            local id = (sa and sa.id ~= "" and sa.id) or "reg" .. tostring(r.addr or "")
+                            cur_pids[id] = true
+                        end
+                        local pc = cfgstore.load_pull()
+                        for _, r in ipairs((pc and pc.regs) or {}) do
+                            local id, _ = prop_id_name(r)
+                            cur_pids[id] = true
+                        end
                     else
-                        -- 12-fix-7: 计数 + 记进 census —— 现场"拓扑停了"之前
-                        -- 只有这一行 warn, 光看 census 以为一切正常
-                        S.build_fail = (S.build_fail or 0) + 1
-                        log.warn("iot", "topo_sig failed, skip this round: " .. tostring(s))
+                        local c = active_cfg()
+                        if c and c.regs then
+                            for _, r in ipairs(c.regs) do
+                                local id, _ = prop_id_name(r)
+                                cur_pids[id] = true
+                            end
+                        end
+                    end
+                    local pid_list = {}
+                    for id in pairs(cur_pids) do pid_list[#pid_list + 1] = id end
+                    table.sort(pid_list)
+                    local prop_sig = table.concat(pid_list, ",")
+                    local need_rebuild = true
+                    if prop_sig == S.topo_prop_sig and S.topo_sent_sig then
+                        sig = S.topo_sent_sig
+                        prop_ids = S.topo_prop_ids
+                        need_rebuild = false
+                    end
+                    if need_rebuild then
+                        local ok, s, n, pids = pcall(topo_sig)
+                        if ok then
+                            sig = s
+                            nodes_json = n
+                            prop_ids = pids
+                            S.topo_at = os.clock()
+                            S.topo_prop_sig = prop_sig
+                            S.topo_prop_ids = prop_ids
+                        else
+                            S.build_fail = (S.build_fail or 0) + 1
+                            log.warn("iot", "topo_sig failed, skip this round: " .. tostring(s))
+                        end
+                    end
+                    if sig and prop_ids then
+                        local new_props = {}
+                        local has_new = false
+                        if S.topo_sent_props then
+                            for _, id in ipairs(prop_ids) do
+                                if not S.topo_sent_props[id] then
+                                    new_props[id] = true
+                                    has_new = true
+                                end
+                            end
+                        else
+                            for _, id in ipairs(prop_ids) do
+                                new_props[id] = true
+                            end
+                            has_new = true
+                        end
+                        if has_new then
+                            local incr_parts, incr_pids
+                            if S.topo_sent_props then
+                                local ok2, s2, n2, p2 = pcall(topo_sig, new_props)
+                                if ok2 then
+                                    incr_parts = n2
+                                    incr_pids = p2
+                                    sig = s2
+                                else
+                                    log.warn("iot", "incr topo_sig failed: " .. tostring(s2))
+                                end
+                            else
+                                incr_parts = nodes_json
+                                incr_pids = prop_ids
+                            end
+                            if incr_parts then
+                                local pok, sent, e = pcall(send_topo, incr_parts)
+                                if pok and sent then
+                                    S.topo_sig = sig
+                                    S.topo_sent_at = os.clock()
+                                    S.topo_fail_at = nil
+                                    S.topo_fail_n = 0
+                                    S.topo_sent_sig = sig
+                                    S.topo_sent_props = S.topo_sent_props or {}
+                                    for _, id in ipairs(incr_pids or prop_ids) do
+                                        S.topo_sent_props[id] = true
+                                    end
+                                    if prop_ids then
+                                        local ack = {}
+                                        for _, id in ipairs(prop_ids) do ack[id] = true end
+                                        S.topo_ack_props = ack
+                                    end
+                                    pubsched.sent("topo")
+                                    local incr_tag = (incr_pids and #incr_pids < #prop_ids) and "incr" or "full"
+                                    log.info("iot", "topology posted (" .. incr_tag .. "): parts=" .. #incr_parts
+                                        .. " bytes=" .. topo.len(incr_parts) .. " sig=" .. sig
+                                        .. " new_props=" .. (incr_pids and #incr_pids or 0))
+                                else
+                                    S.topo_sig = sig
+                                    S.topo_fail_at = os.clock()
+                                    S.topo_fail_n = (S.topo_fail_n or 0) + 1
+                                    log.info("iot", "topology skip (fail_n=" .. S.topo_fail_n
+                                        .. "): " .. tostring(e or sent))
+                                end
+                            end
+                        else
+                            sig = nil
+                        end
                     end
                 end
             end
-            if sig and sig ~= S.topo_sig then
-                -- pcall: send_topo 同样有大字符串拼接, 普通 Lua error 不该掀掉
-                --   整个 task。返回值拆成 pok/sent/e 三段 —— pcall 的第一个
-                --   返回值是"有没有出错", 不能当"发没发成功"用。
-                local pok, sent, e = pcall(send_topo, nodes_json)
-                if pok and sent then
-                    S.topo_sig = sig
-                    S.topo_sent_at = os.clock()  -- ⚠️ diag-2 fix (2026-10-30):
-                    -- 记【实际发送】时间, 不是重建时间。census 的 topoago 用这个,
-                    -- 才能看出"拓扑多久没发出去了"。原来用的 S.topo_at 是重建时间
-                    -- (每 30 秒刷新), 导致 topoago 永远是 0~30s, 没有诊断价值。
-                    S.topo_fail_at = nil  -- 发送成功了, 清掉失败退避标记
-                    S.topo_fail_n = 0
-                    -- ⚠️ topo-ack-filter (2026-10-30): 发送成功后, 把属性 ID 列表
-                    -- 存为集合, 用于 U4 数据过滤。新发现的属性(不在集合里)暂时不发
-                    -- U4, 等平台侧物模型建好(拓扑成功上报)后再发。避免平台收到
-                    -- 物模型里没有的属性数据, 导致数据被丢弃或报错。
-                    if prop_ids then
-                        local ack = {}
-                        for _, id in ipairs(prop_ids) do ack[id] = true end
-                        S.topo_ack_props = ack
-                    end
-                    pubsched.sent("topo")
-                    -- ⚠️ 12-fix-11 (2026-10-29): 指纹现在是哈希(几十字节),
-                    --   不是原来那份 nodes 串, 所以 #sig/头 100 字节没意义了。
-                    --   改打: 片段数 + 内容总长(现场看拓扑规模用) + 指纹。
-                    log.info("iot", "topology posted: parts=" .. #nodes_json
-                        .. " bytes=" .. topo.len(nodes_json) .. " sig=" .. sig)
-                else
-                    -- ⚠️ topo-oom-fix (2026-10-30): 发送失败(通常 OOM)后:
-                    --   ① S.topo_sig = sig —— 记住"这个内容试过了", 防止下一轮
-                    --     30s 重建时又 sig != S.topo_sig → 又 send_topo → 又 OOM,
-                    --     每次失败还造一堆 fragments 垃圾, 堆更碎, 死循环。
-                    --   ② S.topo_fail_at = os.clock() —— 记失败时间, 指数退避后重试。
-                    --   ③ S.topo_fail_n 累计失败次数, 进 census 方便观测。
-                    --   退避公式: 120 * 2^(fail_n-1), 上限 3600 秒(1 小时)。
-                    S.topo_sig = sig
-                    S.topo_fail_at = os.clock()
-                    S.topo_fail_n = (S.topo_fail_n or 0) + 1
-                    log.info("iot", "topology skip (fail_n=" .. S.topo_fail_n
-                        .. "): " .. tostring(e or sent))
-                end
-            end
-            -- topo-oom-fix: 失败退避 —— 指数退避(2min/4min/8min/...最长 1h)。
-            --   只重置 S.topo_sig(让 sig != S.topo_sig 触发发送), 不触发重建
-            --   (重建由 pubsched.ready 控制, 不受影响)。
-            --   如果内容在退避期间又变了(新参数进来), 上面的 sig ~= S.topo_sig
-            --   会直接走发送, 不等退避。
-            --   退避公式: 120 * 2^(fail_n-1), 上限 3600 秒(1 小时)。
-            --   fail_n=1: 2min, fail_n=2: 4min, fail_n=3: 8min, ..., fail_n>=6: 1h
-            local backoff = math.min(120 * (2 ^ ((S.topo_fail_n or 1) - 1)), 3600)
+            local backoff = math.min(10 * (3 ^ ((S.topo_fail_n or 1) - 1)), 60)
             if S.topo_fail_at and (os.clock() - S.topo_fail_at) > backoff then
                 log.info("iot", "topology retry after " .. backoff
                     .. "s backoff (fail_n=" .. (S.topo_fail_n or 0) .. ")")
