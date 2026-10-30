@@ -200,6 +200,10 @@ local function reset_state()
         --   ⚠️ 12-fix-4: 这个字段现在只留作观测(真正的闸门在 pubsched),
         --     TOPO_REBUILD_MS 从 5s 改成 30s。
         topo_at = -1e9,
+        -- ⚠️ diag-2 fix (2026-10-30): 上次【实际发送】拓扑的时刻。
+        --   与 topo_at(重建时刻)分开: census 的 topoago 用这个, 才能看出
+        --   "拓扑多久没发出去了"。nil = 从未发送过。
+        topo_sent_at = nil,
         -- 12-fix-4: 上次打【结构普查】的时刻 (os.clock, 秒)。每 30 秒一行,
         --   把各常驻结构的条目数 + 堆水位一次列出来 —— 现场一崩, 最后那行
         --   census 就直接指出是哪个数字在涨(不用再猜)。
@@ -322,8 +326,15 @@ end
 -- 抄 7 遍必然改一处漏一处。pub 同时是连接闸门: 未连接就返回 false, "未连接"
 local function pub(topic, body, qos)
     if not S.client or not S.connected then return false, "未连接" end
-    local ok, e = pcall(function() S.client:publish(topic, body, qos or 1) end)
-    if not ok then return false, tostring(e) end
+    -- ⚠️ diag-1 (2026-10-30): 捕获 MQTT 原生返回值。
+    --   原来 pcall 只判"有没有抛异常", 丢弃了 publish 的返回值 —— 但 MQTT
+    --   库完全可能返回 false(broker 拒收/缓冲区满/QoS 降级)而不抛异常,
+    --   此时 ok=true, 日志打 "topology posted" 实际是假成功。
+    --   改成 pcall(func, ...) 形式同时也省掉每次创建一个闭包(12-fix 系列
+    --   一直在压碎片, 闭包也是堆上的短命对象)。
+    local ok, result = pcall(S.client.publish, S.client, topic, body, qos or 1)
+    if not ok then return false, tostring(result) end
+    if result == false then return false, "mqtt publish returned false" end
     return true
 end
 
@@ -510,16 +521,18 @@ local function publish()
     local any = false
     for _, it in ipairs(items) do
         local topic = manual and base or (base .. "-" .. it.idx)
-        local ok, err = pcall(function()
-            S.client:publish(topic, it.body, qos)
-        end)
-        if ok then
+        -- ⚠️ diag-1 (2026-10-30): 同 pub() —— 捕获 MQTT 原生返回值, 不再丢弃。
+        --   result==false 说明 MQTT 库内部拒绝了这个包(缓冲区满/broker 限流),
+        --   跟 pcall 失败(抛异常)一样计入 failed, 日志里写清原因。
+        local ok, result = pcall(S.client.publish, S.client, topic, it.body, qos)
+        if ok and result ~= false then
             S.published = S.published + 1
             any = true
         else
             S.failed = S.failed + 1
+            local reason = ok and "mqtt publish returned false" or tostring(result)
             log.warn("iot", string.format("publish fail sub %d (slave %d): %s",
-                it.idx, it.slave, tostring(err)))
+                it.idx, it.slave, reason))
         end
     end
     if any then
@@ -568,8 +581,22 @@ local function census()
         end
     end
     S.census_prev = { frames = cs.frames or 0, pushed = cs.pushed or 0, clock = now }
+    -- ⚠️ diag-2 (2026-10-30): 加 toposig / topoago 两个字段。
+    --   S.topo_sig 和 S.topo_sent_at 分别记录【上次发送】的指纹和时间。
+    --   崩溃前最后一行 census 能直接看出: 拓扑指纹有没有变(推断表在动)、
+    --   拓扑多久没发出去了(>60s 就是拓扑这条已经瘸了)。不用翻几百行日志
+    --   找 "topology posted"。
+    --   topoago = os.clock() - S.topo_sent_at(os.clock 单调秒);
+    --   初始值 nil → 判"从未发送"显示 -1。
+    --   ⚠️ 注意: 原来用的 S.topo_at 是【重建】时间(每 30 秒刷新), 不是发送
+    --      时间, 会导致 topoago 永远 0~30s, 没有诊断价值。已改为 S.topo_sent_at
+    --      (在 send_topo 成功时设置, 见 ~2207 行)。
+    local topoago = -1
+    if S.topo_sent_at and S.topo_sent_at > 0 then
+        topoago = math.floor(os.clock() - S.topo_sent_at)
+    end
     log.info("iot", string.format(
-        "census lua=%.1fKB points=%d frames=%d aliases=%d rows=%d pub=%d/%d meta=%d topo=%d blk=%d fps=%d push=%d gc=%d bfail=%d rc=%d err=%d aerr=%d",
+        "census lua=%.1fKB points=%d frames=%d aliases=%d rows=%d pub=%d/%d meta=%d topo=%d blk=%d fps=%d push=%d gc=%d bfail=%d rc=%d err=%d aerr=%d toposig=%s topoago=%ds",
         collectgarbage("count"),
         cs.points or 0, cs.frames or 0,
         ms.hist_aliases or 0, ms.infer_rows or 0,
@@ -586,7 +613,8 @@ local function census()
         -- 12-fix-8: err = 旁听解析出错次数(含丢帧), aerr = 其中"堆分配失败"
         --   导致的丢帧(新加的 pcall 兜底记的)。aerr 不为 0 = 堆又在吃紧,
         --   设备没崩但已经开始丢帧了 —— 这是崩溃前的先行指标。
-        ms.errs or 0, ms.alloc_err or 0))
+        ms.errs or 0, ms.alloc_err or 0,
+        tostring(S.topo_sig or "nil"), topoago))
 end
 
 -- ===== U2 拓扑上报 / U3 网关资源 / U7 指令回执 =====
@@ -2183,6 +2211,10 @@ local function task_main()
                 local pok, sent, e = pcall(send_topo, nodes_json)
                 if pok and sent then
                     S.topo_sig = sig
+                    S.topo_sent_at = os.clock()  -- ⚠️ diag-2 fix (2026-10-30):
+                    -- 记【实际发送】时间, 不是重建时间。census 的 topoago 用这个,
+                    -- 才能看出"拓扑多久没发出去了"。原来用的 S.topo_at 是重建时间
+                    -- (每 30 秒刷新), 导致 topoago 永远是 0~30s, 没有诊断价值。
                     pubsched.sent("topo")
                     -- ⚠️ 12-fix-11 (2026-10-29): 指纹现在是哈希(几十字节),
                     --   不是原来那份 nodes 串, 所以 #sig/头 100 字节没意义了。
