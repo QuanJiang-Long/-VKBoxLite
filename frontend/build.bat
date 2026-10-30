@@ -1,37 +1,39 @@
 @echo off
 rem ============================================================
-rem  VKBoxLite 上位机一键打包
-rem  产物: dist\VKBoxLite Setup <ver>.exe   (NSIS 安装器)
-rem        dist\VKBoxLite <ver>.exe         (Portable 单文件)
-rem  图标: build\icon.ico (缺省则用 Electron 默认图标)
+rem  VKBoxLite host app one-shot packaging
+rem  Outputs: dist\VKBoxLite Setup <ver>.exe   (NSIS installer)
+rem           dist\VKBoxLite <ver>.exe         (Portable single file)
+rem  Icon: build\icon.ico (falls back to Electron default if missing)
+rem  NOTE: keep this file pure ASCII. Chinese comments here get
+rem        chopped by GBK codepage consoles and corrupt the batch.
 rem ============================================================
 cd /d %~dp0
 
-echo === 依赖检查 ===
+echo === deps check ===
 if not exist node_modules\electron-builder (
-  echo 首次打包, 安装依赖中 ...
+  echo installing deps ...
   call npm install
   if errorlevel 1 goto :fail
 )
 if not exist node_modules\electron\dist\electron.exe (
-  echo electron 二进制未就位, 重装依赖中 ...
+  echo electron binary missing, reinstalling deps ...
   call npm install
   if errorlevel 1 goto :fail
 )
 
-echo === [1/2] NSIS 安装包 ===
+echo === [1/2] NSIS installer ===
 call npm run dist
 if errorlevel 1 goto :fail
 
-echo === [2/2] Portable 单文件 ===
+echo === [2/2] Portable single file ===
 call npm run dist:portable
 if errorlevel 1 goto :fail
 
-echo === 产物清单 ===
+echo === artifacts ===
 dir /b dist\*.exe
-echo 完成. exe 未签名, 客户首装会有 SmartScreen 提示, 属正常.
+echo done. unsigned exe, SmartScreen prompt on first install is normal.
 exit /b 0
 
 :fail
-echo 打包失败, 见上方日志.
+echo packaging failed, see log above.
 exit /b 1
