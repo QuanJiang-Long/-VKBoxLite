@@ -2277,8 +2277,9 @@ local function task_main()
                     --   ① S.topo_sig = sig —— 记住"这个内容试过了", 防止下一轮
                     --     30s 重建时又 sig != S.topo_sig → 又 send_topo → 又 OOM,
                     --     每次失败还造一堆 fragments 垃圾, 堆更碎, 死循环。
-                    --   ② S.topo_fail_at = os.clock() —— 记失败时间, 2 分钟后重试。
+                    --   ② S.topo_fail_at = os.clock() —— 记失败时间, 指数退避后重试。
                     --   ③ S.topo_fail_n 累计失败次数, 进 census 方便观测。
+                    --   退避公式: 120 * 2^(fail_n-1), 上限 3600 秒(1 小时)。
                     S.topo_sig = sig
                     S.topo_fail_at = os.clock()
                     S.topo_fail_n = (S.topo_fail_n or 0) + 1
@@ -2286,14 +2287,17 @@ local function task_main()
                         .. "): " .. tostring(e or sent))
                 end
             end
-            -- topo-oom-fix: 失败退避 —— 2 分钟后重置 sig, 让下一轮重建重试。
+            -- topo-oom-fix: 失败退避 —— 指数退避(2min/4min/8min/...最长 1h)。
             --   只重置 S.topo_sig(让 sig != S.topo_sig 触发发送), 不触发重建
             --   (重建由 pubsched.ready 控制, 不受影响)。
-            --   如果内容在 2 分钟内又变了(新参数进来), 上面的 sig ~= S.topo_sig
+            --   如果内容在退避期间又变了(新参数进来), 上面的 sig ~= S.topo_sig
             --   会直接走发送, 不等退避。
-            if S.topo_fail_at and (os.clock() - S.topo_fail_at) > 120 then
-                log.info("iot", "topology retry after 2min backoff (fail_n="
-                    .. (S.topo_fail_n or 0) .. ")")
+            --   退避公式: 120 * 2^(fail_n-1), 上限 3600 秒(1 小时)。
+            --   fail_n=1: 2min, fail_n=2: 4min, fail_n=3: 8min, ..., fail_n>=6: 1h
+            local backoff = math.min(120 * (2 ^ ((S.topo_fail_n or 1) - 1)), 3600)
+            if S.topo_fail_at and (os.clock() - S.topo_fail_at) > backoff then
+                log.info("iot", "topology retry after " .. backoff
+                    .. "s backoff (fail_n=" .. (S.topo_fail_n or 0) .. ")")
                 S.topo_sig = nil
                 S.topo_fail_at = nil
             end
