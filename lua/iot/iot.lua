@@ -209,6 +209,10 @@ local function reset_state()
         --   topo_fail_n = 累计失败次数, 进 census 方便观测
         topo_fail_at = nil,
         topo_fail_n = 0,
+        -- ⚠️ topo-ack-filter (2026-10-30): 拓扑成功上报的属性 ID 集合。
+        --   nil = 还没成功发过拓扑, U4 数据暂不发(平台没有物模型, 发了也白发)。
+        --   拓扑成功时由 send_topo 成功路径写入, 用于 build_items 过滤新属性。
+        topo_ack_props = nil,
         -- 12-fix-4: 上次打【结构普查】的时刻 (os.clock, 秒)。每 30 秒一行,
         --   把各常驻结构的条目数 + 堆水位一次列出来 —— 现场一崩, 最后那行
         --   census 就直接指出是哪个数字在涨(不用再猜)。
@@ -422,6 +426,14 @@ local function build_items()
     local by_slave, order = {}, {}
     -- sniff 别名表: 用户在推断表里给 reg<addr> 起的名字, 优先于一切
     local smap = cfgstore.alias_map()
+    -- ⚠️ topo-ack-filter (2026-10-30): 拓扑未成功上报前, 不发 U4 数据。
+    --   S.topo_ack_props 为 nil 表示还没成功发过拓扑, 平台侧没有物模型,
+    --   发数据过去平台也认不出。等拓扑成功上报后, S.topo_ack_props 才会被设置。
+    local ack = S.topo_ack_props
+    if not ack then
+        -- 拓扑还没成功上报过, 不发 U4 (返回空 items)
+        return {}
+    end
     for k, d in pairs(collector.get_all_latest()) do
         local vs = MqttUtil.jnum(d.value)
         if vs then
@@ -429,19 +441,24 @@ local function build_items()
             -- 多从机同地址会冲突, 但 sniff 模式是单从机视角)
             local slave = tonumber(k:match("^reg%d+$") and "1") or cfg_slave
             if slave and (sniff_mode or allowed == nil or allowed[k]) then
-                if not by_slave[slave] then
-                    by_slave[slave] = {}
-                    order[#order + 1] = slave
-                end
                 -- id: 别名表配了用别名, 否则用键本身; name: 名字 > 别名 id > cfg alias > 键
                 local sa = smap[k]
                 local pid = (sa and sa.id ~= "" and sa.id) or k
-                local pname = (sa and sa.name ~= "" and sa.name)
-                    or (sa and sa.id ~= "" and sa.id)
-                    or amap[k] or k
-                by_slave[slave][#by_slave[slave] + 1] =
-                    string.format('{"id":%s,"name":%s,"value":%s,"ts":%s}',
-                        MqttUtil.jstr(pid), MqttUtil.jstr(pname), vs, MqttUtil.ms_of(d.ts))
+                -- ⚠️ topo-ack-filter: 只发拓扑里已成功上报的属性。
+                --   新发现的属性(不在 ack 里)暂时不发, 等拓扑更新后再发。
+                --   避免平台收到物模型里没有的属性数据, 导致数据被丢弃或报错。
+                if ack[pid] then
+                    if not by_slave[slave] then
+                        by_slave[slave] = {}
+                        order[#order + 1] = slave
+                    end
+                    local pname = (sa and sa.name ~= "" and sa.name)
+                        or (sa and sa.id ~= "" and sa.id)
+                        or amap[k] or k
+                    by_slave[slave][#by_slave[slave] + 1] =
+                        string.format('{"id":%s,"name":%s,"value":%s,"ts":%s}',
+                            MqttUtil.jstr(pid), MqttUtil.jstr(pname), vs, MqttUtil.ms_of(d.ts))
+                end
             end
         end
     end
@@ -600,8 +617,13 @@ local function census()
     if S.topo_sent_at and S.topo_sent_at > 0 then
         topoago = math.floor(os.clock() - S.topo_sent_at)
     end
+    -- topo-ack-filter: 统计已确认属性数(拓扑成功上报的属性)
+    local tack = 0
+    if S.topo_ack_props then
+        for _ in pairs(S.topo_ack_props) do tack = tack + 1 end
+    end
     log.info("iot", string.format(
-        "census lua=%.1fKB points=%d frames=%d aliases=%d rows=%d pub=%d/%d meta=%d topo=%d blk=%d fps=%d push=%d gc=%d bfail=%d rc=%d err=%d aerr=%d toposig=%s topoago=%ds tfail=%d",
+        "census lua=%.1fKB points=%d frames=%d aliases=%d rows=%d pub=%d/%d meta=%d topo=%d blk=%d fps=%d push=%d gc=%d bfail=%d rc=%d err=%d aerr=%d toposig=%s topoago=%ds tfail=%d tack=%d",
         collectgarbage("count"),
         cs.points or 0, cs.frames or 0,
         ms.hist_aliases or 0, ms.infer_rows or 0,
@@ -622,7 +644,11 @@ local function census()
         tostring(S.topo_sig or "nil"), topoago,
         -- topo-oom-fix: send_topo OOM 累计失败次数。>0 = 拓扑发不出去,
         --   平台侧物模型可能缺属性。5 分钟退避重试。
-        S.topo_fail_n or 0))
+        S.topo_fail_n or 0,
+        -- topo-ack-filter: 拓扑已成功上报的属性数。U4 只发这些属性的数据。
+        --   tack=0 表示拓扑还没成功上报过, U4 暂不发(平台没有物模型)。
+        --   tack < rows 表示有新属性还没被拓扑覆盖, U4 暂不发新属性数据。
+        tack))
 end
 
 -- ===== U2 拓扑上报 / U3 网关资源 / U7 指令回执 =====
@@ -749,6 +775,7 @@ end
 local function build_topo()
     local mode = get_mode()
     local parts = {}
+    local prop_ids = {}  -- ⚠️ topo-ack-filter: 记录拓扑里的属性 ID, 用于 U4 过滤
     if mode == "sniff" then
         local smap = cfgstore.alias_map()
         -- 分组: slave → { addrs = {}, props = {} }
@@ -784,6 +811,7 @@ local function build_topo()
             --   内存优化里。见 lua/README.md「物模型 dataType」。
             g.addrs[#g.addrs + 1] = r.addr
             g.props[#g.props + 1] = topo.prop(id, nm, "uint16", r.slave, r.addr, 1)
+            prop_ids[#prop_ids + 1] = id  -- topo-ack-filter: 记录属性 ID
         end
         -- ② 平台下发的配置行: 同址覆盖推断行(用户配的真名优先)
         local pc = cfgstore.load_pull()
@@ -798,9 +826,11 @@ local function build_topo()
             end
             if hit > 0 then
                 g.props[hit] = prop
+                prop_ids[hit] = id  -- topo-ack-filter: 覆盖旧的 ID
             else
                 g.addrs[#g.addrs + 1] = r.addr
                 g.props[#g.props + 1] = prop
+                prop_ids[#prop_ids + 1] = id  -- topo-ack-filter: 新增 ID
             end
         end
         local st = mon.status()
@@ -822,21 +852,22 @@ local function build_topo()
             end
             topo.node_parts(parts, i, s, serial_json(ser), "sniff_s" .. s, props)
         end
-        return parts, "还没识别到在线的从机"
+        return parts, prop_ids, "还没识别到在线的从机"
     end
     -- 一份轮询配置只有一个 slave(cfg.normalize_poll), 所以轮询档恒一个节点
     local c = active_cfg()
     if not (c and c.regs and #c.regs > 0) then
-        return nil, "没有可用的寄存器表"
+        return nil, nil, "没有可用的寄存器表"
     end
     local props = {}
     for _, r in ipairs(c.regs) do
         if #props >= MAX_PROPS then break end
         local id, nm = prop_id_name(r)
         props[#props + 1] = topo.prop(id, nm, r.dtype or "uint16", c.slave, r.addr, r.count or 1)
+        prop_ids[#prop_ids + 1] = id  -- topo-ack-filter: 记录属性 ID
     end
     topo.node_parts(parts, 1, c.slave, serial_json(c), "sniff_s" .. c.slave, props)
-    return parts
+    return parts, prop_ids
 end
 
 -- 拓扑签名: 拿 build_topo 的产物做指纹。不另造一套字段遍历是因为
@@ -860,9 +891,9 @@ local function topo_sig()
     --   ("not enough memory for buffer allocation") —— 池子被 churn 切碎了。
     --   完整回收能把碎片并回大块(要现场验证, 所以加了日志)。
     reclaim_if_high()
-    local parts = build_topo()
+    local parts, prop_ids = build_topo()
     if not parts then return nil end
-    return topo.sig(parts), parts
+    return topo.sig(parts), parts, prop_ids
 end
 
 -- U2 是【双重用途】, 靠 body 里有没有 nodes[] 区分语义(用户确认):
@@ -2175,6 +2206,7 @@ local function task_main()
             -- pub_blocked 同一口径
             local sig = nil
             local nodes_json = nil
+            local prop_ids = nil  -- topo-ack-filter: 拓扑里的属性 ID 列表
             -- ⚠️ pcall 包一层 (2026-10): topo_sig → build_nodes → node_json 里
             --   有大字符串拼接, 万一某次数据异常导致一次分配失败, 未捕获的话
             --   直接把整个 task 掀了("not enough memory for buffer allocation"
@@ -2200,9 +2232,9 @@ local function task_main()
             --   而重建本身很贵 —— 所以按时间闸门来, 而不是每轮都重建。
             if pub_topo and not pub_blocked() then
                 if pubsched.ready("topo") then
-                    local ok, s, n = pcall(topo_sig)
+                    local ok, s, n, pids = pcall(topo_sig)
                     if ok then
-                        sig, nodes_json = s, n
+                        sig, nodes_json, prop_ids = s, n, pids
                         S.topo_at = os.clock()
                     else
                         -- 12-fix-7: 计数 + 记进 census —— 现场"拓扑停了"之前
@@ -2225,6 +2257,15 @@ local function task_main()
                     -- (每 30 秒刷新), 导致 topoago 永远是 0~30s, 没有诊断价值。
                     S.topo_fail_at = nil  -- 发送成功了, 清掉失败退避标记
                     S.topo_fail_n = 0
+                    -- ⚠️ topo-ack-filter (2026-10-30): 发送成功后, 把属性 ID 列表
+                    -- 存为集合, 用于 U4 数据过滤。新发现的属性(不在集合里)暂时不发
+                    -- U4, 等平台侧物模型建好(拓扑成功上报)后再发。避免平台收到
+                    -- 物模型里没有的属性数据, 导致数据被丢弃或报错。
+                    if prop_ids then
+                        local ack = {}
+                        for _, id in ipairs(prop_ids) do ack[id] = true end
+                        S.topo_ack_props = ack
+                    end
                     pubsched.sent("topo")
                     -- ⚠️ 12-fix-11 (2026-10-29): 指纹现在是哈希(几十字节),
                     --   不是原来那份 nodes 串, 所以 #sig/头 100 字节没意义了。
