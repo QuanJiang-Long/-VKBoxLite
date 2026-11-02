@@ -441,6 +441,16 @@ local function build_items()
         -- 拓扑还没成功上报过, 不发 U4 (返回空 items)
         return {}
     end
+    -- ⚠️ diag (2026-11-02): 记录 ack 集合大小, 排查 hello-nodes U4 漏报
+    local ack_count = 0
+    for _ in pairs(ack) do ack_count = ack_count + 1 end
+    if ack_count > 0 and ack_count <= 30 then
+        -- 只在 ack 较小时打印(避免日志爆炸), 看看 hello 的 property 是否在 ack 里
+        local ack_ids = {}
+        for id in pairs(ack) do ack_ids[#ack_ids + 1] = id end
+        table.sort(ack_ids)
+        log.info("iot", "build_items: ack_count=" .. ack_count .. " ids=" .. table.concat(ack_ids, ","))
+    end
     for k, d in pairs(collector.get_all_latest()) do
         local vs = MqttUtil.jnum(d.value)
         if vs then
@@ -465,6 +475,9 @@ local function build_items()
                     by_slave[slave][#by_slave[slave] + 1] =
                         string.format('{"id":%s,"name":%s,"value":%s,"ts":%s}',
                             MqttUtil.jstr(pid), MqttUtil.jstr(pname), vs, MqttUtil.ms_of(d.ts))
+                else
+                    -- ⚠️ diag (2026-11-02): 记录被过滤的属性, 排查 hello-nodes U4 漏报
+                    log.info("iot", "build_items: filtered out pid=" .. pid .. " key=" .. k)
                 end
             end
         end
@@ -2013,6 +2026,7 @@ local function send_hello()
             S.topo_sent_props[id] = true
             S.topo_ack_props[id] = true
         end
+        log.info("iot", "hello-nodes ack: wrote " .. #hello_prop_ids .. " props to topo_ack_props")
     end
     return true, onboard
 end
