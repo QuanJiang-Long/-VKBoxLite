@@ -2227,6 +2227,19 @@ local function task_main()
             -- U1/U3/U5/U6/U7 + U2 拓扑 受 pub_platform gate 管: idle/manual 全不发
             if pub_platform then
                 if (os.time() - (S.res_at or 0)) >= c.interval_s then send_gw_res() end
+                -- ⚠️ hello-order-fix (2026-11-02): hello 必须在拓扑之前发送。
+                --   平台侧需要 hello 来建档，拓扑是建档后的补充。
+                --   原来拓扑在 hello 之前发送，导致平台收到拓扑时还没建档。
+                --   现在把 hello 移到拓扑之前，确保顺序正确。
+                if S.hello_at == 0 and not pulling() then
+                    log.info("iot", "hello on connect, mode=" .. get_mode())
+                    pcall(send_hello)
+                elseif S.hello_at and S.hello_at > 0 and get_mode() == "platform"
+                    and not pulling()
+                    and (os.time() - S.hello_at) >= cfg.HELLO_RE_S then
+                    log.info("iot", "hello re-send (30min), mode=platform")
+                    pcall(send_hello)
+                end
             -- U2 拓扑帧(带 nodes[]): 建子设备 + 绑定 + 物模型。签名没变就是子设备
             --   清单没变, 平台那边的档还在, 不需要重建 —— 实测(2026-10-08)留了
             --   个 60s 兜底重发, 平台一收到带 nodes 的 info/post 就重建模型并
@@ -2432,15 +2445,7 @@ local function task_main()
             -- 再点一次「拉取配置」。这正是文档"未拿到配置前每 30min 重发"的用途:
             -- 平台侧档案被重置/白名单到期时, 设备侧无从得知, 只靠上电那一次 hello
             -- 会永久失联且没有任何报错
-            if pub_platform and S.hello_at == 0 and not pulling() then
-                log.info("iot", "hello on connect, mode=" .. get_mode())
-                pcall(send_hello)
-            elseif pub_platform and S.hello_at and S.hello_at > 0 and get_mode() == "platform"
-                and not pulling()
-                and (os.time() - S.hello_at) >= cfg.HELLO_RE_S then
-                log.info("iot", "hello re-send (30min), mode=platform")
-                pcall(send_hello)
-            end
+            -- (hello 发送已移到拓扑之前，见 2230-2244 行)
         end
     end
 end
