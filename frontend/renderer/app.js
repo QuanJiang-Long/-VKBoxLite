@@ -169,6 +169,8 @@ const el = new Proxy({
   snMqHost: $('snMqHost'),
   snMqPort: $('snMqPort'),
   snMqInterval: $('snMqInterval'),
+  // 2026-11-02: U4 数据上报开关
+  snMqttReportOn: $('snMqttReportOn'),
   btnSnMqttRefresh: $('btnSnMqttRefresh'),
   // sniff 状态卡片 (字段名跟 manual 档 mMqStXxx 对齐: DevId/Subed/ExtraTopics)
   snStConn: $('snStConn'),
@@ -195,6 +197,8 @@ const el = new Proxy({
   // 12-fix-9: 分页控件
   inferPager: $('inferPager'), inferPageInfo: $('inferPageInfo'),
   btnInferPrev: $('btnInferPrev'), btnInferNext: $('btnInferNext'),
+  // 2026-11-02: 每页条数选择器
+  inferPageSizeSel: $('inferPageSize'),
   btnAutoDetect: $('btnAutoDetect'), detectHint: $('detectHint'),
   // 33-fix: platform 档两个提示横幅的 DOM 引用
   pMqttHint: $('pMqttHint'), pMqttHintText: $('pMqttHintText'),
@@ -511,6 +515,7 @@ function syncPullCfgBtn() {
 //   清的: 设备信息(只读框) + 所有状态卡的显示值 + 底栏的设备/模式/MQTT
 //   保留: 首页 MQTT 的服务器地址/端口/凭证密码(本地配置, 重连还要用)
 //   用户名(设备 SN 派生)清; ClientID 只在"还是设备自动值"时清(手输的保留)
+// 2026-11-02: 增加模式卡片重置 + sniff 面板清理
 function clearDeviceView() {
   [el.fSn, el.fImei, el.fIccid, el.fCsq, el.fVer, el.fProj, el.fUrl].forEach(e => {
     if (e) e.value = '';
@@ -534,6 +539,28 @@ function clearDeviceView() {
   if (el.stDev) el.stDev.textContent = '--';
   if (el.stMode) el.stMode.textContent = '--';
   if (el.stMqtt) el.stMqtt.textContent = '--';
+  // 2026-11-02: 重置模式卡片 (去掉 active 高亮)
+  ['mcIdle', 'mcPoll', 'mcPollpull', 'mcSniff'].forEach(id => {
+    const c = $(id);
+    if (c) c.classList.remove('active');
+  });
+  // 2026-11-02: 清理 sniff 面板数据
+  clearSniffState();
+}
+
+// 2026-11-02: 清理 sniff 面板的内存数据 (推断表 + 报文 + 识别结果)
+function clearSniffState() {
+  S.infer = null;
+  S.inferPage = 1;
+  S.inferNames = {};
+  S.frames = [];
+  S.detected = null;
+  if (el.inferTbody) el.inferTbody.innerHTML = '<tr><td colspan="10" style="color:#999;">点击"推断轮询表"从已监听到的报文反推</td></tr>';
+  if (el.inferHint) el.inferHint.textContent = '';
+  if (el.detectHint) el.detectHint.textContent = '';
+  if (el.inferPager) el.inferPager.style.display = 'none';
+  if (el.inferPageInfo) el.inferPageInfo.textContent = '';
+  if (el.frameLog) el.frameLog.innerHTML = '<div class="frame-line"><span class="fl-desc">未进入旁听模式 —— 切到"运行模式"页选择"sniff(嗅探)"后，这里会实时显示总线上解析出的报文。</span></div>';
 }
 
 function setPortState(open, path) {
@@ -1457,8 +1484,15 @@ async function setInferWatch(on) {
 //   Lua 堆 95.8% 时 "alloc 8147 failed" → json encode out of memory →
 //   RET:INFER={} → 系统池见底 → "E/uart system is out of memory!!!" →
 //   整机卡死)。所以前端按页取, 显示页码, 一次只占设备 ~4KB 的连续块。
+// 2026-11-02: 从选择器读取每页条数, 支持用户自定义 (20/32/50)
+function getInferPageSize() {
+  const sel = el.inferPageSizeSel;
+  if (sel && sel.value) return parseInt(sel.value, 10) || 32;
+  return 32;
+}
+
 async function fetchInferPage(page, silent) {
-  const size = S.inferPageSize;
+  const size = getInferPageSize();
   const off = Math.max(0, (page - 1) * size);
   const r = await sendCmd(Protocol.Enc.infer(off, size), 'INFER', 4000);
   const d = r.data || {};
@@ -1561,7 +1595,7 @@ function renderInfer() {
   const total = (inf.total != null) ? inf.total : regs.length;
   const pages = inf.pages || 1;
   const page = inf.page || S.inferPage || 1;
-  const off = (inf.off != null) ? inf.off : (page - 1) * S.inferPageSize;
+  const off = (inf.off != null) ? inf.off : (page - 1) * getInferPageSize();
   el.inferHint.textContent = total
     ? '监听到 ' + toArr(inf.slaves).length + ' 个从机，共 ' + total + ' 个轮询项'
       + (inf.ignored ? '；其中 ' + inf.ignored + ' 个地址主站轮询了但没收到应答' : '')
@@ -2129,18 +2163,80 @@ async function editPlatformInterval() {
 }
 
 // 2h exportCfg: 弹窗选 json/csv, dispatch 到对应导出函数
+// 2026-11-02: sniff 档导出推断表数据 (不再导 manual 档配置)
 async function exportCfg(pre) {
   if (pre === undefined) pre = cfgPrefix();
-  // im-2: sniff 档无 485 表单, 用 manual 档 prefix ('m') 导出当前手动档配置.
-  //   用户在 manual 档配好 baud/databits/parity/stopbits/interval/从机/寄存器表
-  //   切 sniff 看, 想保存一份备份就用导出. 平台档仍然禁用 (syncTabs 守门).
+  // 2026-11-02: sniff 档导出推断表数据
   if (S.mode === 'sniff') {
-    pre = 'm';
-    toast('sniff 档无表单, 导出当前手动档配置');
+    const fmt = await askExportFormat();
+    if (fmt === 'json') return exportSniffAsJson();
+    if (fmt === 'csv')  return exportSniffAsCsv();
+    return;
   }
   const fmt = await askExportFormat();
   if (fmt === 'json') return exportCfgAsJson(pre);
   if (fmt === 'csv')  return exportCfgAsCsv(pre);
+}
+
+// 2026-11-02: 导出 sniff 推断表数据为 JSON
+function exportSniffAsJson() {
+  const inf = S.infer || {};
+  const regs = toArr(inf.regs);
+  if (regs.length === 0) {
+    toast('推断表为空，无法导出');
+    return;
+  }
+  const data = {
+    version: '1.0.2',
+    exportTime: new Date().toISOString(),
+    mode: 'sniff',
+    total: inf.total || regs.length,
+    slaves: toArr(inf.slaves),
+    regs: regs.map(r => ({
+      addr: r.addr,
+      dtype: r.dtype,
+      fc: r.fc,
+      hits: r.hits,
+      conf: r.conf,
+      value: r.value,
+      name: (S.inferNames && S.inferNames['reg' + r.addr] && S.inferNames['reg' + r.addr].name) || ('reg' + r.addr),
+      id: (S.inferNames && S.inferNames['reg' + r.addr] && S.inferNames['reg' + r.addr].id) || ('reg' + r.addr)
+    }))
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'sniff_export_' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('推断表已导出为 JSON (' + regs.length + ' 条)');
+}
+
+// 2026-11-02: 导出 sniff 推断表数据为 CSV
+function exportSniffAsCsv() {
+  const inf = S.infer || {};
+  const regs = toArr(inf.regs);
+  if (regs.length === 0) {
+    toast('推断表为空，无法导出');
+    return;
+  }
+  const lines = ['# VKBox Sniff 推断表导出', '# 导出时间：' + new Date().toISOString(), '# 共 ' + regs.length + ' 条', '序号，寄存器地址，数量，功能码，出现次数，推断类型，置信度，最新值，参数名称，建议标识符'];
+  regs.forEach((r, i) => {
+    const width = inferWidth(r.dtype);
+    const fc = r.fc != null ? '0x' + r.fc.toString(16).padStart(2, '0').toUpperCase() : '?';
+    const name = (S.inferNames && S.inferNames['reg' + r.addr] && S.inferNames['reg' + r.addr].name) || ('reg' + r.addr);
+    const id = (S.inferNames && S.inferNames['reg' + r.addr] && S.inferNames['reg' + r.addr].id) || ('reg' + r.addr);
+    lines.push([i + 1, r.addr, width, fc, r.hits, r.dtype, r.conf != null ? r.conf : '', r.value != null ? r.value : '', name, id].join(','));
+  });
+  const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'sniff_export_' + new Date().toISOString().replace(/[:.]/g, '-') + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('推断表已导出为 CSV (' + regs.length + ' 条)');
 }
 
 // 2h importCfg: 文件选择框 (filter .json,.csv), 选完按扩展名 dispatch
@@ -2505,6 +2601,22 @@ if (el.snMqInterval) {
     }
   });
 }
+// 2026-11-02: U4 数据上报开关
+if (el.snMqttReportOn) {
+  el.snMqttReportOn.addEventListener('change', async () => {
+    const on = el.snMqttReportOn.checked;
+    status('正在' + (on ? '开启' : '关闭') + '数据上报…', true);
+    try {
+      await sendCmd(Protocol.Enc.setReport(on), 'REPORT', 3000);
+      status('数据上报已' + (on ? '开启' : '关闭'), true);
+      toast('数据上报已' + (on ? '开启' : '关闭'));
+    } catch (e) {
+      status('操作失败：' + e.message, false);
+      toast('操作失败：' + e.message);
+      el.snMqttReportOn.checked = !on;  // 恢复原状态
+    }
+  });
+}
 if (el.btnHomeMqttPassEye) el.btnHomeMqttPassEye.onclick = togglePassEye;
 // Step 2i: 删 btnMqttReset.onclick — 整**个**按**钮**已**从** HTML 移**除**(有**刷**新**了**, 按**钮**冗**余**)
 // 如**果**用**户**需**要**重**置**配**置**, 手**动**改**每**一**项** (有**填**的**就**清**空**) + 走**保**存**即**可**
@@ -2516,6 +2628,13 @@ if (el.btnInferRefresh) el.btnInferRefresh.onclick = doInfer;
 // 12-fix-9: 推断表翻页
 if (el.btnInferPrev) el.btnInferPrev.onclick = () => gotoInferPage((S.inferPage || 1) - 1);
 if (el.btnInferNext) el.btnInferNext.onclick = () => gotoInferPage((S.inferPage || 1) + 1);
+// 2026-11-02: 每页条数切换
+if (el.inferPageSizeSel) {
+  el.inferPageSizeSel.onchange = () => {
+    S.inferPage = 1;  // 切换条数后回到第一页
+    if (S.infer && S.infer.total) gotoInferPage(1);
+  };
+}
 el.btnFrameRefresh.onclick = () => {
   // sniff-3 i: 总开关 (frameSectionOn) 关时手动刷新也不发 R:FRAMES
   if (el.frameSectionOn && !el.frameSectionOn.checked) return;

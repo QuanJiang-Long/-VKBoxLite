@@ -50,6 +50,8 @@
     // 只重连、不动配置：设备侧等价于 iot.kick()（销毁 client 后按 backoff=1 立刻重连）
     mqttReconnect: () => 'W:MQTTRC',
     report:  ()   => 'R:REPORT',
+    // 2026-11-02: U4 数据上报开关。on=true 开启上报, on=false 关闭上报
+    setReport: (on) => 'W:REPORT=' + (on ? '1' : '0'),
 
     // ---- sniff 结果 ----
     frames:  (n)  => 'R:FRAMES' + (n ? '=' + n : ''),   // 最近解译帧

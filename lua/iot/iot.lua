@@ -174,6 +174,8 @@ local function reset_state()
         recv_pending = nil, pub = nil, sub = nil, subs = nil, device_id = nil,
         last_pub = 0, last_err = nil, client_id = nil, user = nil,
         reject_reason = nil,
+        -- 2026-11-02: U4 数据上报开关。默认 true(开启), 由 W:REPORT 命令或 cfgstore 覆盖
+        report_on = true,
         pull = {
             state = "idle", msg = "", result = nil, deadline = 0,
             msg_id = nil, replied = false,
@@ -528,6 +530,8 @@ local function publish()
     -- idle 模式短路: collector.dataCache 可能残留之前切档前的数据, idle 不该发
     -- (跟 should_pub_platform 一样, idle 不上送任何平台数据, 包括 U4)
     if get_mode() == "idle" then return false end
+    -- 2026-11-02: U4 数据上报开关
+    if not S.report_on then return false end
     -- pcall: build_items 里拼上报 body 也是大字符串, 一次分配失败不该掀掉
     -- 整个 task (2026-10, 与 topo_sig 同一个道理)
     -- ⚠️ 12-fix-7: 拼之前先按水位回收一次 —— 现场 41 分钟时 77 个点的
@@ -2706,6 +2710,18 @@ function M.status()
     }
 end
 
+-- 2026-11-02: U4 数据上报开关。前端 W:REPORT=1/0 调用
+function M.set_report_on(on)
+    S.report_on = (on == true)
+    log.info("iot", "report_on=" .. tostring(S.report_on))
+end
+
 reset_state()
+
+-- 2026-11-02: 从 cfgstore 加载上报开关初始值
+local sys_cfg = cfgstore.load_sys()
+if sys_cfg and sys_cfg.report_on ~= nil then
+    S.report_on = (sys_cfg.report_on == true)
+end
 
 return M

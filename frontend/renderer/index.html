@@ -900,12 +900,9 @@ body.mq-manual .auto-only{display:none !important;}
                 <div class="panel">
                     <div class="panel-title">sniff嗅探
                         <div class="spacer"></div>
-                        <!-- sniff-3 f: panel-title 的 [刷新] 删除, [清空] 改绑推断结果
-                             (推断表清空) -->
-                        <!-- 2026-10: [刷新] 恢复到 [清空] 前, 绑 doInfer 重推一轮
-                             (面板标题处就近重推, 不用跑去点右下"推断轮询表") -->
-                        <button class="sm" id="btnInferRefresh">刷新</button>
-                        <button class="sm" id="btnInferClear">清空</button>
+                        <!-- 2026-11-02: 按钮位置调换 —— 推断轮询表/重新识别移到标题处, 刷新/清空移到推断结果行 -->
+                        <button class="sm" id="btnInfer">推断轮询表</button>
+                        <button class="sm" id="btnAutoDetect">重新识别通讯参数</button>
                     </div>
                     <!-- sniff-3 h: 推断结果上方加一条 border-top 分隔线 (跟总线报文那条同款) -->
                     <div style="border-top:1px solid #dde2ea;margin:6px 0 4px;"></div>
@@ -915,10 +912,10 @@ body.mq-manual .auto-only{display:none !important;}
                         推断结果
                         <span class="hint" id="inferHint"></span>
                         <span class="hint" id="detectHint"></span>
-                        <!-- sniff-3 f: 推断轮询表 / 重新识别通讯参数 移到推断结果上方 -->
+                        <!-- 2026-11-02: 刷新/清空移到推断结果行 -->
                         <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
-                            <button class="sm" id="btnInfer">推断轮询表</button>
-                            <button class="sm" id="btnAutoDetect">重新识别通讯参数</button>
+                            <button class="sm" id="btnInferRefresh">刷新</button>
+                            <button class="sm" id="btnInferClear">清空</button>
                         </div>
                     </div>
                     <table class="param-table">
@@ -934,10 +931,16 @@ body.mq-manual .auto-only{display:none !important;}
                     <!-- 12-fix-9: 推断表分页。设备一次最多回 32 行(整表 64 行时
                          应答 8158 字节, 现场堆 95.8% 会 "alloc 8147 failed" →
                          整机卡死), 所以前端按页取、这里给出翻页控件。 -->
+                    <!-- 2026-11-02: 添加每页条数选择器 (20/50) -->
                     <div id="inferPager" style="display:none;align-items:center;gap:8px;margin:6px 0 2px;">
                         <button class="sm" id="btnInferPrev">上一页</button>
                         <span class="hint" id="inferPageInfo"></span>
                         <button class="sm" id="btnInferNext">下一页</button>
+                        <select id="inferPageSize" style="margin-left:8px;font-size:12px;padding:2px 4px;">
+                            <option value="20">20条/页</option>
+                            <option value="32" selected>32条/页</option>
+                            <option value="50">50条/页</option>
+                        </select>
                     </div>
                     <!-- sniff-3 e: 总线报文作为第二个子分段, 上面用分隔线区分 -->
                     <!-- sniff-3 f: 总线报文子分段加 [刷新] [清空] 按钮, 绑总线报文 (frameLog) -->
@@ -974,6 +977,11 @@ body.mq-manual .auto-only{display:none !important;}
                 </div>
                 <div class="panel">
                     <div class="panel-title">MQTT连接
+                        <!-- 2026-11-02: U4 数据上报开关，默认关 -->
+                        <label class="switch" title="开启后设备上报 U4 数据到平台" style="margin-left:12px;">
+                            <input id="snMqttReportOn" type="checkbox"><span class="sl"></span>
+                        </label>
+                        <span class="hint" style="margin-left:4px;">数据上报</span>
                         <div class="spacer"></div>
                         <button class="sm" id="btnSnMqttRefresh">刷新</button>
                     </div>
