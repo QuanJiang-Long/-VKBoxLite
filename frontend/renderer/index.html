@@ -912,16 +912,19 @@ body.mq-manual .auto-only{display:none !important;}
                         推断结果
                         <!-- 2026-11-02: 刷新/清空移到推断结果行 -->
                         <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+                            <label style="font-size:12px;font-weight:normal;display:flex;align-items:center;gap:4px;cursor:pointer;" title="隐藏主站轮询了但没收到应答的地址(总线上不存在的 phantom 地址)">
+                                <input id="inferHideNoRsp" type="checkbox"><span>隐藏无应答</span>
+                            </label>
                             <button class="sm" id="btnInferRefresh">刷新</button>
                             <button class="sm" id="btnInferClear">清空</button>
                         </div>
                     </div>
-                    <!-- 2026-11-02: 提示信息另起一行 -->
+                    <!-- 2026-11-02: 提示信息另起一行，detectHint 在上，inferHint 在下 -->
                     <div style="margin:4px 0;font-size:12px;color:#666;">
-                        <span class="hint" id="inferHint"></span>
+                        <span class="hint" id="detectHint"></span>
                     </div>
                     <div style="margin:2px 0;font-size:12px;color:#666;">
-                        <span class="hint" id="detectHint"></span>
+                        <span class="hint" id="inferHint"></span>
                     </div>
                     <table class="param-table">
                         <thead>
@@ -982,11 +985,10 @@ body.mq-manual .auto-only{display:none !important;}
                 </div>
                 <div class="panel">
                     <div class="panel-title">MQTT连接
-                        <!-- 2026-11-02: U4 数据上报开关，默认关 -->
-                        <label class="switch" title="开启后设备上报 U4 数据到平台" style="margin-left:12px;">
+                        <!-- 2026-11-02: MQTT 总开关，默认关 -->
+                        <label class="switch" title="MQTT 总开关：开启后设备才会连接 MQTT 并上报数据" style="margin-left:12px;">
                             <input id="snMqttReportOn" type="checkbox"><span class="sl"></span>
                         </label>
-                        <span class="hint" style="margin-left:4px;">数据上报</span>
                         <div class="spacer"></div>
                         <button class="sm" id="btnSnMqttRefresh">刷新</button>
                     </div>

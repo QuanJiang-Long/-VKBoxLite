@@ -174,8 +174,8 @@ local function reset_state()
         recv_pending = nil, pub = nil, sub = nil, subs = nil, device_id = nil,
         last_pub = 0, last_err = nil, client_id = nil, user = nil,
         reject_reason = nil,
-        -- 2026-11-02: U4 数据上报开关。默认 true(开启), 由 W:REPORT 命令或 cfgstore 覆盖
-        report_on = true,
+        -- 2026-11-02: MQTT 总开关。默认 false(关闭), 由 W:REPORT 命令或 cfgstore 覆盖
+        report_on = false,
         pull = {
             state = "idle", msg = "", result = nil, deadline = 0,
             msg_id = nil, replied = false,
@@ -2712,10 +2712,26 @@ function M.status()
     }
 end
 
--- 2026-11-02: U4 数据上报开关。前端 W:REPORT=1/0 调用
+-- 2026-11-02: MQTT 总开关。前端 W:REPORT=1/0 调用
+--   关：断开 MQTT 连接并停止上报
+--   开：启动 MQTT 连接并开始上报
 function M.set_report_on(on)
     S.report_on = (on == true)
     log.info("iot", "report_on=" .. tostring(S.report_on))
+    if not S.report_on then
+        -- 关闭：停止 MQTT
+        if S.want_run then
+            log.info("iot", "report_off: stopping MQTT")
+            S.want_run = false
+            destroy_client()
+        end
+    else
+        -- 打开：启动 MQTT（如果还没运行）
+        if not S.want_run then
+            log.info("iot", "report_on: starting MQTT")
+            M.start()
+        end
+    end
 end
 
 reset_state()
