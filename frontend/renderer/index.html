@@ -910,13 +910,18 @@ body.mq-manual .auto-only{display:none !important;}
                     <!-- sniff-3 g: 标题简化, 删 "（从监听到的请求帧反推）" -->
                     <div style="font-weight:bold;margin:6px 0 4px;display:flex;align-items:center;gap:8px;">
                         推断结果
-                        <span class="hint" id="inferHint"></span>
-                        <span class="hint" id="detectHint"></span>
                         <!-- 2026-11-02: 刷新/清空移到推断结果行 -->
                         <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
                             <button class="sm" id="btnInferRefresh">刷新</button>
                             <button class="sm" id="btnInferClear">清空</button>
                         </div>
+                    </div>
+                    <!-- 2026-11-02: 提示信息另起一行 -->
+                    <div style="margin:4px 0;font-size:12px;color:#666;">
+                        <span class="hint" id="inferHint"></span>
+                    </div>
+                    <div style="margin:2px 0;font-size:12px;color:#666;">
+                        <span class="hint" id="detectHint"></span>
                     </div>
                     <table class="param-table">
                         <thead>
@@ -937,8 +942,8 @@ body.mq-manual .auto-only{display:none !important;}
                         <span class="hint" id="inferPageInfo"></span>
                         <button class="sm" id="btnInferNext">下一页</button>
                         <select id="inferPageSize" style="margin-left:8px;font-size:12px;padding:2px 4px;">
-                            <option value="20">20条/页</option>
-                            <option value="32" selected>32条/页</option>
+                            <option value="10">10条/页</option>
+                            <option value="20" selected>20条/页</option>
                             <option value="50">50条/页</option>
                         </select>
                     </div>

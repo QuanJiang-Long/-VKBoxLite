@@ -2688,6 +2688,8 @@ function M.status()
         pub = pubsched.status(),
         last_pub = S.last_pub,
         last_err = S.last_err,
+        -- 2026-11-02: U4 数据上报开关状态
+        report_on = S.report_on,
         reject_reason = S.reject_reason,
         -- 平台主动下发、刚落地的配置。挂在 5s 轮询的 R:STAT 上：
         -- R:PULLCFG 只在用户点「拉取配置」时才查，等不到这里的通知。
