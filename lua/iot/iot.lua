@@ -343,6 +343,8 @@ end
 -- send_hello/claim_ok 的 did 解析)原来各写一遍"判连接 + pcall + tostring(e)",
 -- 抄 7 遍必然改一处漏一处。pub 同时是连接闸门: 未连接就返回 false, "未连接"
 local function pub(topic, body, qos)
+    -- 2026-11-02: MQTT 总开关 —— 关闭时所有发送都停止(hello/拓扑/U1-U6)
+    if not S.report_on then return false, "MQTT 总开关已关闭" end
     if not S.client or not S.connected then return false, "未连接" end
     -- ⚠️ diag-1 (2026-10-30): 捕获 MQTT 原生返回值。
     --   原来 pcall 只判"有没有抛异常", 丢弃了 publish 的返回值 —— 但 MQTT
