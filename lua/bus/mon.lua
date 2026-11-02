@@ -767,6 +767,8 @@ function M.start(c)
     infer_acc = {}
     infer_order = {}
     infer_dirty = true
+    -- 2026-11-02: 32 位合并地址集合也清(旧轮的合并地址不能污染新轮)
+    merged_addrs = {}
     -- 12-fix-9: 新一轮 sniff = 前端的页码也从头开始
     infer_view_off = 0
     infer_view_n = INFER_PAGE_MAX
@@ -979,6 +981,8 @@ function M.stop()
     infer_acc = {}
     infer_order = {}
     infer_dirty = true
+    -- 2026-11-02: 32 位合并地址集合也清(旧轮的合并地址不能污染新轮)
+    merged_addrs = {}
     -- 12-fix-9: 退出 sniff, 前端的页码也复位
     infer_view_off = 0
     infer_view_n = INFER_PAGE_MAX
