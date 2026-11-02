@@ -1942,12 +1942,15 @@ local function send_hello()
             hello_prop_ids = pids
         end
     end
-    -- ⚠️ 优化 (2026-11-02): 如果 hello 不带 nodes 且识别未完成, 延迟发送。
-    --   原来 pub_blocked() 直接返回 false, 导致 hello 不带 nodes 就发出去了。
-    --   现在如果 hello 不带 nodes 且识别未完成, 返回 false, 等下一轮再发。
-    --   这样保证 hello 要么带 nodes(一步到位), 要么等识别完成后再发。
-    if not hello_nodes and pub_blocked() then
-        return false, "识别未完成，等待拓扑构建"
+    -- ⚠️ 优化 (2026-11-02): sniff 档如果 hello 不带 nodes, 延迟发送。
+    --   原因: pub_blocked() 在波特率识别完成后即返回 false, 但 mon.infer().regs
+    --   可能还是空的(寄存器尚未推断出来)。这时发 hello 不带 nodes, 平台还得
+    --   等拓扑才能建档, 失去了 hello-nodes 一步到位的意义。
+    --   sniff 档 hello 必须带 nodes(要么不发, 等下一轮 task_main 再试)。
+    --   platform/pollpull 档不受影响: 它们有平台下发的配置, build_topo 不会空。
+    --   manual 档本来就不带 nodes(上面 if 已排除)。
+    if m == "sniff" and not hello_nodes then
+        return false, "sniff 档等待寄存器推断完成"
     end
     local body_parts = {
         '{"vendor":', MqttUtil.jstr(cfg.PLATFORM_VENDOR),
