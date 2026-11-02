@@ -778,6 +778,8 @@ function M.start(c)
     --    request_detect 也被 cmd.lua 的 R:AUTODETECT 轮询路径调用, 那里
     --    清了就等于每轮从头扫, 候选记忆白做。
     tried = {}
+    -- 2026-11-02: 请求配对表也清(旧轮的在途请求不能混进新轮)
+    pendingReqs, lastReqs = {}, {}
     -- sniff-2 fix: 重新进 sniff 时清 forceStop, 否则上次的 stop 标志会让
     --   auto_detect 立刻 return "stopped" (detect_loop 也会跟着退)
     forceStop = false
