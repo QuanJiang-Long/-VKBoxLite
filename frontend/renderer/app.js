@@ -55,7 +55,7 @@ const S = {
   //   inferNames 跨页累积(每页只带自己那页的名字), 翻回旧页不用重取名字。
   inferNames: {},      // reg<addr> -> {id, name}
   inferPage: 1,        // 当前页(1 起)
-  inferPageSize: 30,   // 每页行数(设备的硬上限也是 32)
+  inferPageSize: 10,   // 每页行数(设备的硬上限也是 32)
   sniffTabActive: false, // sniff 面板当前是否打开。12-fix-6: 打开时让设备
                          // 主动推推断表(RET:INFER_PUSH), 关掉就停推。
   detected: null,      // R:AUTODETECT 识别出的通讯参数（仅本次会话，未写配置）
@@ -537,10 +537,12 @@ function clearDeviceView() {
   if (el.stDev) el.stDev.textContent = '--';
   if (el.stMode) el.stMode.textContent = '--';
   if (el.stMqtt) el.stMqtt.textContent = '--';
-  // 2026-11-02: 重置模式卡片 (去掉 active 高亮)
-  ['mcIdle', 'mcPoll', 'mcPollpull', 'mcSniff'].forEach(id => {
-    const c = $(id);
+  // 2026-11-02: 重置模式卡片 (去掉 active 高亮 + 清空状态文字)
+  ['Idle', 'Poll', 'Pollpull', 'Sniff'].forEach(k => {
+    const c = $('mc' + k);
     if (c) c.classList.remove('active');
+    const stEl = $('ms' + k);
+    if (stEl) stEl.textContent = '';
   });
   // 2026-11-02: 清理 sniff 面板数据
   clearSniffState();
