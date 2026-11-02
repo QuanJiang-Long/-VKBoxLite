@@ -1906,9 +1906,6 @@ end
 -- 返回 true, onboardingMode / false, err
 local function send_hello()
     if not S.client or not S.connected then return false, "未连接" end
-    -- 识别未成功前不上报 (见 pub_blocked): hello 是平台建档的入口, 识别期间
-    -- 串口参数还是默认值, 这时报到等于让平台按错波特率建一次模型
-    if pub_blocked() then return false, "识别未完成" end
     local did = device_id()
     if not did or did == "" then return false, "无 SN" end
     -- hello topic 走固定平台常量(不再可配)。上面已经判过无 SN, 这里
@@ -1938,11 +1935,19 @@ local function send_hello()
     local hello_prop_ids = nil
     if m == "sniff" or m == "platform" or m == "pollpull" then
         -- 只有 sniff/platform 档才带 nodes, manual 档不带
+        -- 直接调用 build_topo, 不检查 pub_blocked (build_topo 内部会处理)
         local parts, pids = build_topo(nil, 20)  -- 最多 20 个 property
         if parts and pids and #pids > 0 then
             hello_nodes = parts
             hello_prop_ids = pids
         end
+    end
+    -- ⚠️ 优化 (2026-11-02): 如果 hello 不带 nodes 且识别未完成, 延迟发送。
+    --   原来 pub_blocked() 直接返回 false, 导致 hello 不带 nodes 就发出去了。
+    --   现在如果 hello 不带 nodes 且识别未完成, 返回 false, 等下一轮再发。
+    --   这样保证 hello 要么带 nodes(一步到位), 要么等识别完成后再发。
+    if not hello_nodes and pub_blocked() then
+        return false, "识别未完成，等待拓扑构建"
     end
     local body_parts = {
         '{"vendor":', MqttUtil.jstr(cfg.PLATFORM_VENDOR),
