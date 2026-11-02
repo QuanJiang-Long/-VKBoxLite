@@ -174,8 +174,6 @@ local function reset_state()
         recv_pending = nil, pub = nil, sub = nil, subs = nil, device_id = nil,
         last_pub = 0, last_err = nil, client_id = nil, user = nil,
         reject_reason = nil,
-        -- 2026-11-02: MQTT 总开关。默认 false(关闭), 由 W:REPORT 命令或 cfgstore 覆盖
-        report_on = false,
         pull = {
             state = "idle", msg = "", result = nil, deadline = 0,
             msg_id = nil, replied = false,
@@ -2266,9 +2264,6 @@ local function task_main()
                 local h1, h2 = heap_info()
                 log.info("iot", "periodic trim+gc, heap total=" .. tostring(h1) .. " used=" .. tostring(h2))
             end
-                    log.warn("iot", string.format("gc safety: lua=%.1fKB -> collected", kb))
-                end
-            end
             if S.recv_pending then
                 local rp = S.recv_pending
                 S.recv_pending = nil
@@ -2594,10 +2589,7 @@ function M.start()
         log.warn("iot", "already started")
         return false
     end
-    -- 2026-11-02: 保存 report_on 状态，reset_state 会重置它为 false
-    local saved_report_on = S.report_on
     reset_state()
-    S.report_on = saved_report_on  -- 恢复开关状态
     S.want_run = true
     if sys then
         -- ⚠️ 12-fix-8 (2026-10-28): 给上报协程套一层 pcall。
@@ -2703,8 +2695,6 @@ function M.status()
         pub = pubsched.status(),
         last_pub = S.last_pub,
         last_err = S.last_err,
-        -- 2026-11-02: U4 数据上报开关状态
-        report_on = S.report_on,
         reject_reason = S.reject_reason,
         -- 平台主动下发、刚落地的配置。挂在 5s 轮询的 R:STAT 上：
         -- R:PULLCFG 只在用户点「拉取配置」时才查，等不到这里的通知。
@@ -2725,28 +2715,6 @@ function M.status()
         --   R:STAT 是人工查看路径, 在这里读一次零常态开销。
         lua_kb = lua_kb(),
     }
-end
-
--- 2026-11-02: MQTT 连接总开关。前端 W:REPORT=1/0 调用
---   关：断开 MQTT 连接
---   开：建立 MQTT 连接
-function M.set_report_on(on)
-    S.report_on = (on == true)
-    log.info("iot", "report_on=" .. tostring(S.report_on))
-    if not S.report_on then
-        -- 关闭：断开 MQTT 连接
-        if S.want_run then
-            log.info("iot", "report_off: disconnecting MQTT")
-            S.want_run = false
-            destroy_client()
-        end
-    else
-        -- 打开：建立 MQTT 连接（如果还没运行）
-        if not S.want_run then
-            log.info("iot", "report_on: connecting MQTT")
-            M.start()
-        end
-    end
 end
 
 reset_state()

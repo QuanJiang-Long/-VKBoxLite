@@ -187,12 +187,6 @@ function M.switch_mode(mode, from_boot)
         --        报给用户自己的 broker, 平台那头看不到设备
         --   set_manual(false) 会断开重连换订阅清单, 必须在识别起来之前做
         if iot then pcall(iot.set_manual, false) end
-        -- 2026-11-02: 进 sniff 时 MQTT 受开关控制 (默认关→断开)
-        if iot and iot.set_report_on then
-            local sys_cfg = cfgstore.load_sys()
-            local report_on = (sys_cfg and sys_cfg.report_on == true) or false
-            iot.set_report_on(report_on)
-        end
         if mon.start() then
             -- 识别必须放后台: switch_mode 是同步的, 而且在开机路径(main.lua 的
             -- boot_mode)上也会被调用。同步等识别会把开机流程堵住, 而识别失败是
@@ -217,10 +211,6 @@ function M.switch_mode(mode, from_boot)
         local pm3 = pollmod(false)
         if pm3 then pm3.stop() end
         stop_sniff()
-        -- 2026-11-02: 退出 sniff 时恢复 MQTT 连接 (不再受开关控制)
-        if iot and iot.set_report_on then
-            iot.set_report_on(true)
-        end
         local cleared = M.reset_user_cfg()
         S.cur = "idle"  -- 34-fix: 记下当前 mode
         -- 第三个返回值是给 W:MODE 拼应答的(见 cmd.lua 的 cleared: 那段),

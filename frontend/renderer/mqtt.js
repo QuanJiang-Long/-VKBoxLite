@@ -391,10 +391,6 @@ function renderSnStatus(s, c, pubTopics) {
   setKv('snStSubed', s.subscribed ? '是' : '否', !s.subscribed);
   setKv('snStKeepSession',
         s.keep_session == null ? '--' : (s.keep_session ? '持久会话' : '离线自动销毁'));
-  // 2026-11-02: 同步 U4 数据上报开关状态
-  if (el.snMqttReportOn) {
-    el.snMqttReportOn.checked = (s.report_on === true);
-  }
 }
 
 // quiet=true 跳过「有未保存更改」确认（保存/上报/重连之后的回读，以及

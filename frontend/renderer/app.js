@@ -169,8 +169,6 @@ const el = new Proxy({
   snMqHost: $('snMqHost'),
   snMqPort: $('snMqPort'),
   snMqInterval: $('snMqInterval'),
-  // 2026-11-02: U4 数据上报开关
-  snMqttReportOn: $('snMqttReportOn'),
   btnSnMqttRefresh: $('btnSnMqttRefresh'),
   // sniff 状态卡片 (字段名跟 manual 档 mMqStXxx 对齐: DevId/Subed/ExtraTopics)
   snStConn: $('snStConn'),
@@ -2611,22 +2609,6 @@ if (el.snMqInterval) {
     } catch (e) {
       status('保存失败：' + e.message, false);
       toast('保存失败：' + e.message);
-    }
-  });
-}
-// 2026-11-02: U4 数据上报开关
-if (el.snMqttReportOn) {
-  el.snMqttReportOn.addEventListener('change', async () => {
-    const on = el.snMqttReportOn.checked;
-    status('正在' + (on ? '开启' : '关闭') + '数据上报…', true);
-    try {
-      await sendCmd(Protocol.Enc.setReport(on), 'REPORT', 3000);
-      status('数据上报已' + (on ? '开启' : '关闭'), true);
-      toast('数据上报已' + (on ? '开启' : '关闭'));
-    } catch (e) {
-      status('操作失败：' + e.message, false);
-      toast('操作失败：' + e.message);
-      el.snMqttReportOn.checked = !on;  // 恢复原状态
     }
   });
 }

@@ -399,22 +399,6 @@ local function reg_cmds()
         M.reply("RET:REPORT=OK")
     end)
 
-    -- 2026-11-02: W:REPORT=1/0 —— U4 数据上报开关
-    M.reg("W:REPORT", function(arg)
-        local v = trim(arg)
-        if v ~= "1" and v ~= "0" then
-            return M.reply("RET:FAIL:REPORT:bad value(要 1 或 0)")
-        end
-        -- 存到 fskv, 设备重启后保持
-        local ok, err = cfgstore.save_sys({ report_on = v == "1" })
-        if not ok then return M.reply("RET:FAIL:REPORT:" .. tostring(err)) end
-        -- 通知 iot 模块更新状态
-        if iot and iot.set_report_on then
-            iot.set_report_on(v == "1")
-        end
-        M.reply("RET:REPORT=" .. (v == "1" and "ON" or "OFF"))
-    end)
-
     M.reg("W:BOOTMODE", function(arg)
         local m = trim(arg)
         local ok, err = cfgstore.save_sys({ boot_mode = m })
