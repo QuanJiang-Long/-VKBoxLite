@@ -197,8 +197,6 @@ const el = new Proxy({
   btnInferPrev: $('btnInferPrev'), btnInferNext: $('btnInferNext'),
   // 2026-11-02: 每页条数选择器
   inferPageSizeSel: $('inferPageSize'),
-  // 2026-11-02: 隐藏无应答地址过滤器
-  inferHideNoRsp: $('inferHideNoRsp'),
   btnAutoDetect: $('btnAutoDetect'), detectHint: $('detectHint'),
   // 33-fix: platform 档两个提示横幅的 DOM 引用
   pMqttHint: $('pMqttHint'), pMqttHintText: $('pMqttHintText'),
@@ -1596,26 +1594,24 @@ function renderInfer() {
   const pages = inf.pages || 1;
   const page = inf.page || S.inferPage || 1;
   const off = (inf.off != null) ? inf.off : (page - 1) * getInferPageSize();
-  // 2026-11-02: 隐藏无应答地址过滤器 —— 总线上实际只有 12 个地址, 但主站
-  //   轮询了 128 个地址范围, 多出的 116 个 no_rsp 是 phantom, 用户不想看到
-  const hideNoRsp = el.inferHideNoRsp && el.inferHideNoRsp.checked;
-  // 过滤时保留原始索引, 这样序号列显示的是全局发现顺序, 不是过滤后的序号
-  const regs = hideNoRsp
-    ? allRegs.map((r, i) => ({ r, origIdx: i })).filter(x => x.r.answered !== false)
-    : allRegs.map((r, i) => ({ r, origIdx: i }));
-  const filteredCount = hideNoRsp ? (allRegs.length - regs.length) : 0;
+  // 2026-11-02: 只显示有应答的地址 (answered=true)。
+  //   主站轮询的地址范围可能很大(如 1091~1200), 但从机只占其中一小部分。
+  //   没应答的地址是 phantom, 用户不需要看到。
+  const regs = allRegs
+    .map((r, i) => ({ r, origIdx: i }))
+    .filter(x => x.r.answered !== false);
+  const filteredCount = allRegs.length - regs.length;
   el.inferHint.textContent = total
-    ? '监听到 ' + toArr(inf.slaves).length + ' 个从机，共 ' + total + ' 个轮询项'
-      + (inf.ignored ? '；其中 ' + inf.ignored + ' 个地址主站轮询了但没收到应答' : '')
+    ? '监听到 ' + toArr(inf.slaves).length + ' 个从机，共 ' + regs.length + ' 个有效地址'
+      + (filteredCount > 0 ? '（已过滤 ' + filteredCount + ' 个无应答）' : '')
       + (pages > 1 ? '（第 ' + page + '/' + pages + ' 页）' : '')
-      + (filteredCount > 0 ? '（已隐藏 ' + filteredCount + ' 个无应答）' : '')
     : '';
   // 12-fix-9: 页码控件
   if (el.inferPager) {
-    el.inferPager.style.display = total ? 'flex' : 'none';
+    el.inferPager.style.display = regs.length ? 'flex' : 'none';
     if (el.inferPageInfo) {
-      el.inferPageInfo.textContent = total
-        ? ('第 ' + page + ' / ' + pages + ' 页  （共 ' + total + ' 项，本页 ' + regs.length + ' 项' + (filteredCount > 0 ? '，已隐藏 ' + filteredCount + ' 个无应答' : '') + '）')
+      el.inferPageInfo.textContent = regs.length
+        ? ('第 ' + page + ' / ' + pages + ' 页  （共 ' + regs.length + ' 项，本页 ' + Math.min(getInferPageSize(), regs.length - off) + ' 项）')
         : '';
     }
     if (el.btnInferPrev) el.btnInferPrev.disabled = (page <= 1);
@@ -2628,12 +2624,6 @@ if (el.inferPageSizeSel) {
   el.inferPageSizeSel.onchange = () => {
     S.inferPage = 1;  // 切换条数后回到第一页
     if (S.infer && S.infer.total) gotoInferPage(1);
-  };
-}
-// 2026-11-02: 隐藏无应答地址过滤器 —— 切换时重新渲染推断表
-if (el.inferHideNoRsp) {
-  el.inferHideNoRsp.onchange = () => {
-    renderInfer();
   };
 }
 el.btnFrameRefresh.onclick = () => {
