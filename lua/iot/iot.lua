@@ -2580,7 +2580,10 @@ function M.start()
         log.warn("iot", "already started")
         return false
     end
+    -- 2026-11-02: 保存 report_on 状态，reset_state 会重置它为 false
+    local saved_report_on = S.report_on
     reset_state()
+    S.report_on = saved_report_on  -- 恢复开关状态
     S.want_run = true
     if sys then
         -- ⚠️ 12-fix-8 (2026-10-28): 给上报协程套一层 pcall。
