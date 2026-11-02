@@ -2246,12 +2246,26 @@ local function task_main()
             --   bus/poll / iot/pullcfg 惰性 require)。
             --   10 秒最多一次, 且不在 UART 热路径上(task_main 每秒一轮),
             --   一次全回收几毫秒。
+            -- 2026-11-02: 定期 trim_cache + 强制 GC, 防碎片化累积。
+            --   现场 297KB/307KB(96.7%)时连 3KB 连续块都分配不出 → VM exit。
+            --   每 30 秒清一次帧缓存 + 强制 GC, 把碎片合并成空闲块。
             if (os.clock() - (S.gc_at or -1e9)) >= 10 then
                 local kb = collectgarbage("count")
                 if kb > 200 then
                     collectgarbage("collect")
                     S.gc_at = os.clock()
                     S.gc_trig = (S.gc_trig or 0) + 1
+                end
+            end
+            -- 2026-11-02: 每 30 秒定期 trim_cache + 强制 GC, 防碎片化累积
+            if (os.clock() - (S.trim_at or -1e9)) >= 30 then
+                pcall(collector.trim_cache)
+                pcall(mon.trim_reqs)
+                collectgarbage("collect")
+                S.trim_at = os.clock()
+                local h1, h2 = heap_info()
+                log.info("iot", "periodic trim+gc, heap total=" .. tostring(h1) .. " used=" .. tostring(h2))
+            end
                     log.warn("iot", string.format("gc safety: lua=%.1fKB -> collected", kb))
                 end
             end
