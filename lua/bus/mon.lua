@@ -97,6 +97,9 @@ local infer_acc = {}
 local infer_order = {}
 local infer_dirty = false
 local infer_watch = false
+-- 2026-11-02: 32 位寄存器合并地址集合。addr+1 被合并到 addr 时，addr+1 进这个集合，
+--   infer 表和 dataCache 都不再单独显示/存储 addr+1
+local merged_addrs = {}
 
 -- 识别进度: 当前正在试的 baud / parity。12-fix-2 起暴露给 R:STAT,
 -- 让前端/现场能看出"设备此刻在试什么", 而不是只看到一个转圈。
@@ -448,23 +451,15 @@ local function push_rsp_value(slave, addr, f)
         if lastMergedDtype and remaining >= 2 then
             -- v5: 强制 32bit 合并, dtype = lastMergedDtype (跟上一段一致)
             local alias0 = collector.alias_of(addr + i)
-            local alias1 = collector.alias_of(addr + i + 1)
             local v = mbus.parse_value(f.data, i, lastMergedDtype, false)
-            local lo16 = 0
-            if v ~= nil and lastMergedDtype ~= "float32" then
-                lo16 = v % 65536
-                if lo16 < 0 then lo16 = lo16 + 65536 end
-            end
             -- 强制合并 conf=100 (跟上一段对齐, status=ok)
+            -- 2026-11-02: 32bit 合并只存 1 个点 (addr), addr+1 进 merged_addrs
             collector.push_data(addr + i, alias0, f.hex, v, nil,
                 lastMergedDtype, 100, "ok")
-            collector.push_data(addr + i + 1, alias1, f.hex, lo16, nil,
-                lastMergedDtype, 100, "ok")
-            -- 12-fix-6: 值回填累加器(累加器是推断表的唯一数据源)
+            -- 12-fix-6: 值回填累加器 (只填 addr, addr+1 不单独建行)
             acc_note_rsp(slave, addr + i, v, lastMergedDtype, 100)
-            acc_note_rsp(slave, addr + i + 1, lo16, lastMergedDtype, 100)
             pushHistory(alias0, lastMergedDtype)
-            pushHistory(alias1, lastMergedDtype)
+            merged_addrs[addr + i + 1] = true
             i = i + 2
         else
             local dtype, v, conf, merged32 = pickDtype(f.data, i, remaining, addr, slave, f)
@@ -477,24 +472,10 @@ local function push_rsp_value(slave, addr, f)
             acc_note_rsp(slave, addr + i, v, dtype, conf)
             pushHistory(alias0, dtype)
             if merged32 then
-                -- 32bit 合并: 2 个 16bit alias 都标同 dtype, 第 2 个 value = 低 16bit
-                local alias1 = collector.alias_of(addr + i + 1)
-                local lo16 = 0
-                if v ~= nil then
-                    -- 32bit value 拆 2 个 16bit: 高 16bit 跟低 16bit
-                    if dtype == "float32" then
-                        -- float32 拆 2 个 uint16 (大端)
-                        lo16 = 0  -- 简化: float32 不再拆 16bit, 第 2 个 alias 留空
-                    else
-                        lo16 = v % 65536
-                        if lo16 < 0 then lo16 = lo16 + 65536 end
-                    end
-                end
-                collector.push_data(addr + i + 1, alias1, f.hex, lo16, nil, dtype, conf, status)
-                acc_note_rsp(slave, addr + i + 1, lo16, dtype, conf)
-                pushHistory(alias1, dtype)
+                -- 2026-11-02: 32bit 合并只存 1 个点 (addr), addr+1 进 merged_addrs
                 -- v5: 锁定 dtype, 后续段强制同 dtype 合并
                 lastMergedDtype = dtype
+                merged_addrs[addr + i + 1] = true
                 i = i + 2
             else
                 -- v5: 16bit 拆打断 lastMergedDtype 锁定, 下一段重新 pickDtype
@@ -659,9 +640,12 @@ function M.infer(force)
     --   活着的行谁都不动。
     local regs, slaves, ignored = {}, {}, 0
     for _, a in ipairs(infer_order) do
-        if not a.answered then ignored = ignored + 1 end
-        slaves[a.slave] = true
-        regs[#regs + 1] = a
+        -- 2026-11-02: 过滤掉被 32 位合并的地址 (addr+1 进 merged_addrs)
+        if not merged_addrs[a.addr] then
+            if not a.answered then ignored = ignored + 1 end
+            slaves[a.slave] = true
+            regs[#regs + 1] = a
+        end
     end
     local sl = {}
     for s in pairs(slaves) do sl[#sl + 1] = s end
@@ -726,6 +710,15 @@ function M.infer_page(off, n)
     if n == 0 then n = INFER_PAGE_MAX end
     if n > INFER_PAGE_MAX then n = INFER_PAGE_MAX end
     local total = #infer_order
+    -- 2026-11-02: 过滤掉被 32 位合并的地址，计算有效总数
+    local valid_order = {}
+    for i = 1, total do
+        local a = infer_order[i]
+        if not merged_addrs[a.addr] then
+            valid_order[#valid_order + 1] = a
+        end
+    end
+    total = #valid_order
     if off > total then off = total end
     local last = off + n
     if last > total then last = total end
@@ -734,12 +727,12 @@ function M.infer_page(off, n)
     -- 整表扫一遍统计 ignored/slaves(这两个是【整张表】的口径, 前端要
     --   显示"共 N 个从机, M 个轮询项, 其中 K 个没应答")—— 只读不分配行
     for i = 1, total do
-        local a = infer_order[i]
+        local a = valid_order[i]
         if not a.answered then ignored = ignored + 1 end
         slaves[a.slave] = true
     end
     for i = off + 1, last do
-        regs[#regs + 1] = infer_order[i]
+        regs[#regs + 1] = valid_order[i]
     end
     local sl = {}
     for s in pairs(slaves) do sl[#sl + 1] = s end
