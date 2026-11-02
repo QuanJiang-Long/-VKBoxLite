@@ -783,7 +783,14 @@ end
 --   only_ids = nil: 构建完整拓扑(首次发送 / property 列表变化时)
 --   only_ids = {id=true}: 只构建这些 property 的拓扑(增量发送)
 --   增量拓扑只有几百字节, 不会 OOM; 完整拓扑 6KB+, 堆碎片时容易失败。
-local function build_topo(only_ids)
+-- ⚠️ incr-topo (2026-10-30): 新增 only_ids 参数 (可选)。
+--   only_ids = nil: 构建完整拓扑 (首次发送 / property 列表变化时)
+--   only_ids = {id=true}: 只构建这些 property 的拓扑 (增量发送)
+--   增量拓扑只有几百字节, 不会 OOM; 完整拓扑 6KB+, 堆碎片时容易失败。
+-- ⚠️ hello-nodes (2026-11-02): 新增 max_props 参数 (可选)。
+--   max_props = nil: 不限制 property 数量
+--   max_props = 20: 最多构建 20 个 property 的拓扑 (用于 hello 带 nodes)
+local function build_topo(only_ids, max_props)
     local mode = get_mode()
     local parts = {}
     local prop_ids = {}  -- ⚠️ topo-ack-filter: 记录拓扑里的属性 ID, 用于 U4 过滤
@@ -822,8 +829,11 @@ local function build_topo(only_ids)
             --   内存优化里。见 lua/README.md「物模型 dataType」。
             -- ⚠️ incr-topo (2026-10-30): 增量过滤 —— only_ids 不为 nil 时,
             --   只包含在 only_ids 集合里的 property, 跳过其他的。
+            -- ⚠️ hello-nodes (2026-11-02): max_props 限制 —— 达到上限后跳过。
             if only_ids and not only_ids[id] then
                 -- 增量模式, 这个 property 不是新增的, 跳过
+            elseif max_props and #prop_ids >= max_props then
+                -- hello-nodes 模式, 已达到上限, 跳过
             else
                 g.addrs[#g.addrs + 1] = r.addr
                 g.props[#g.props + 1] = topo.prop(id, nm, "uint16", r.slave, r.addr, 1)
@@ -845,6 +855,8 @@ local function build_topo(only_ids)
                 -- ⚠️ incr-topo (2026-10-30): 增量过滤
                 if only_ids and not only_ids[id] then
                     -- 增量模式, 跳过(但保留原位置, 不覆盖)
+                elseif max_props and #prop_ids >= max_props then
+                    -- hello-nodes 模式, 已达到上限, 跳过
                 else
                     g.props[hit] = prop
                     prop_ids[hit] = id  -- topo-ack-filter: 覆盖旧的 ID
@@ -853,6 +865,8 @@ local function build_topo(only_ids)
                 -- ⚠️ incr-topo (2026-10-30): 增量过滤
                 if only_ids and not only_ids[id] then
                     -- 增量模式, 跳过
+                elseif max_props and #prop_ids >= max_props then
+                    -- hello-nodes 模式, 已达到上限, 跳过
                 else
                     g.addrs[#g.addrs + 1] = r.addr
                     g.props[#g.props + 1] = prop
@@ -1916,10 +1930,38 @@ local function send_hello()
     -- gateway_imei，空串和缺字段是两回事）。不一致会被拒 hello
     local dv = MqttUtil.imei(mobile)
     if dv == "" then dv = "unknown" end
-    local body = string.format(
-        '{"vendor":%s,"model":%s,"fwVersion":%s,"deviceId":%s,"topicFormat":"v3","onboardingMode":%s}',
-        MqttUtil.jstr(cfg.PLATFORM_VENDOR), MqttUtil.jstr(cfg.PLATFORM_MODEL), MqttUtil.jstr(_G.VERSION or "0.0.0"),
-        MqttUtil.jstr(dv), MqttUtil.jstr(onboard))
+    -- ⚠️ hello-nodes (2026-11-02): hello 带 nodes(最多 20 个 property)。
+    --   平台侧收到 hello + nodes 后直接建档, 减少一次拓扑上报。
+    --   限制 20 个是为了控制 payload 大小(约 2KB), 避免 OOM。
+    --   剩余 property 走拓扑增量上报(已有逻辑)。
+    local hello_nodes = nil
+    local hello_prop_ids = nil
+    if m == "sniff" or m == "platform" or m == "pollpull" then
+        -- 只有 sniff/platform 档才带 nodes, manual 档不带
+        local parts, pids = build_topo(nil, 20)  -- 最多 20 个 property
+        if parts and pids and #pids > 0 then
+            hello_nodes = parts
+            hello_prop_ids = pids
+        end
+    end
+    local body_parts = {
+        '{"vendor":', MqttUtil.jstr(cfg.PLATFORM_VENDOR),
+        ',"model":', MqttUtil.jstr(cfg.PLATFORM_MODEL),
+        ',"fwVersion":', MqttUtil.jstr(_G.VERSION or "0.0.0"),
+        ',"deviceId":', MqttUtil.jstr(dv),
+        ',"topicFormat":', MqttUtil.jstr("v3"),
+        ',"onboardingMode":', MqttUtil.jstr(onboard),
+    }
+    -- 如果有 nodes, 加进 hello payload
+    if hello_nodes then
+        body_parts[#body_parts + 1] = ',"nodes":['
+        for i = 1, #hello_nodes do
+            body_parts[#body_parts + 1] = hello_nodes[i]
+        end
+        body_parts[#body_parts + 1] = ']'
+    end
+    body_parts[#body_parts + 1] = '}'
+    local body = table.concat(body_parts)
     log.info("iot", string.format("pullcfg hello topic=%s sn=%s imei=%s mode=%s body=%s",
         topic, did, MqttUtil.imei(mobile), onboard, body))
     -- 发送失败不能记 hello_at: 那是"本连接最后一次 hello 成功发送"的时间,
@@ -1929,6 +1971,13 @@ local function send_hello()
     -- 记【本连接内最后一次 hello 成功发送】的时间: task_main 靠它算 pollpull 档
     -- 的 30min 重发。reset_state 里置 0 表示这个连接还没发过, 计时不起跑
     S.hello_at = os.time()
+    -- ⚠️ hello-nodes (2026-11-02): 记录 hello 里已发送的 property, 后续走拓扑增量
+    if hello_prop_ids then
+        S.topo_sent_props = S.topo_sent_props or {}
+        for _, id in ipairs(hello_prop_ids) do
+            S.topo_sent_props[id] = true
+        end
+    end
     return true, onboard
 end
 
