@@ -343,8 +343,6 @@ end
 -- send_hello/claim_ok 的 did 解析)原来各写一遍"判连接 + pcall + tostring(e)",
 -- 抄 7 遍必然改一处漏一处。pub 同时是连接闸门: 未连接就返回 false, "未连接"
 local function pub(topic, body, qos)
-    -- 2026-11-02: MQTT 总开关 —— 关闭时所有发送都停止(hello/拓扑/U1-U6)
-    if not S.report_on then return false, "MQTT 总开关已关闭" end
     if not S.client or not S.connected then return false, "未连接" end
     -- ⚠️ diag-1 (2026-10-30): 捕获 MQTT 原生返回值。
     --   原来 pcall 只判"有没有抛异常", 丢弃了 publish 的返回值 —— 但 MQTT
@@ -532,8 +530,6 @@ local function publish()
     -- idle 模式短路: collector.dataCache 可能残留之前切档前的数据, idle 不该发
     -- (跟 should_pub_platform 一样, idle 不上送任何平台数据, 包括 U4)
     if get_mode() == "idle" then return false end
-    -- 2026-11-02: U4 数据上报开关
-    if not S.report_on then return false end
     -- pcall: build_items 里拼上报 body 也是大字符串, 一次分配失败不该掀掉
     -- 整个 task (2026-10, 与 topo_sig 同一个道理)
     -- ⚠️ 12-fix-7: 拼之前先按水位回收一次 —— 现场 41 分钟时 77 个点的
@@ -2714,23 +2710,23 @@ function M.status()
     }
 end
 
--- 2026-11-02: MQTT 总开关。前端 W:REPORT=1/0 调用
---   关：断开 MQTT 连接并停止上报
---   开：启动 MQTT 连接并开始上报
+-- 2026-11-02: MQTT 连接总开关。前端 W:REPORT=1/0 调用
+--   关：断开 MQTT 连接
+--   开：建立 MQTT 连接
 function M.set_report_on(on)
     S.report_on = (on == true)
     log.info("iot", "report_on=" .. tostring(S.report_on))
     if not S.report_on then
-        -- 关闭：停止 MQTT
+        -- 关闭：断开 MQTT 连接
         if S.want_run then
-            log.info("iot", "report_off: stopping MQTT")
+            log.info("iot", "report_off: disconnecting MQTT")
             S.want_run = false
             destroy_client()
         end
     else
-        -- 打开：启动 MQTT（如果还没运行）
+        -- 打开：建立 MQTT 连接（如果还没运行）
         if not S.want_run then
-            log.info("iot", "report_on: starting MQTT")
+            log.info("iot", "report_on: connecting MQTT")
             M.start()
         end
     end
