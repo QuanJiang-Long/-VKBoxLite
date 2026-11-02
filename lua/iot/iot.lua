@@ -737,6 +737,13 @@ end
 --   砍不到 platform 头上。
 local MAX_PROPS = 64
 
+-- ⚠️ topo-batch (2026-11-02): 拓扑分批发送, 每批最多 TOPO_BATCH_SIZE 个 property。
+--   原因: 82 个 property 的全量拓扑约 6KB, 在 300KB 堆上分配容易触发 OOM。
+--   分批后每批约 1.5-2KB, 内存压力大幅降低。
+--   hello 也复用这个常量(hello 带 nodes 最多 20 个 property)。
+--   批次间隔 2 秒(下面 sys.wait 里写死), 避免触发平台限流。
+local TOPO_BATCH_SIZE = 20
+
 -- 一条 property 的 id/name 怎么定(平台靠 id 把数据对上号)。
 --   pid/pname: 别名表指定的 id/name (2026-10), 优先
 --   name:     用户配的真名, 但 "r123" 这种默认名不算
@@ -790,7 +797,11 @@ end
 -- ⚠️ hello-nodes (2026-11-02): 新增 max_props 参数 (可选)。
 --   max_props = nil: 不限制 property 数量
 --   max_props = 20: 最多构建 20 个 property 的拓扑 (用于 hello 带 nodes)
-local function build_topo(only_ids, max_props)
+-- ⚠️ topo-batch (2026-11-02): 增加 skip_ids 参数 —— 分批发送时跳过前几批已包含的 property。
+--   only_ids: 只包含这些 property (增量模式)
+--   max_props: 最多包含多少个 property (hello-nodes 限制)
+--   skip_ids: 跳过这些 property (分批模式, 跳过前几批已发的)
+local function build_topo(only_ids, max_props, skip_ids)
     local mode = get_mode()
     local parts = {}
     local prop_ids = {}  -- ⚠️ topo-ack-filter: 记录拓扑里的属性 ID, 用于 U4 过滤
@@ -830,8 +841,11 @@ local function build_topo(only_ids, max_props)
             -- ⚠️ incr-topo (2026-10-30): 增量过滤 —— only_ids 不为 nil 时,
             --   只包含在 only_ids 集合里的 property, 跳过其他的。
             -- ⚠️ hello-nodes (2026-11-02): max_props 限制 —— 达到上限后跳过。
+            -- ⚠️ topo-batch (2026-11-02): skip_ids 过滤 —— 分批发送时跳过前几批已包含的。
             if only_ids and not only_ids[id] then
                 -- 增量模式, 这个 property 不是新增的, 跳过
+            elseif skip_ids and skip_ids[id] then
+                -- 分批模式, 这个 property 前几批发过了, 跳过
             elseif max_props and #prop_ids >= max_props then
                 -- hello-nodes 模式, 已达到上限, 跳过
             else
@@ -853,8 +867,11 @@ local function build_topo(only_ids, max_props)
             end
             if hit > 0 then
                 -- ⚠️ incr-topo (2026-10-30): 增量过滤
+                -- ⚠️ topo-batch (2026-11-02): skip_ids 过滤
                 if only_ids and not only_ids[id] then
                     -- 增量模式, 跳过(但保留原位置, 不覆盖)
+                elseif skip_ids and skip_ids[id] then
+                    -- 分批模式, 跳过(但保留原位置, 不覆盖)
                 elseif max_props and #prop_ids >= max_props then
                     -- hello-nodes 模式, 已达到上限, 跳过
                 else
@@ -863,8 +880,11 @@ local function build_topo(only_ids, max_props)
                 end
             else
                 -- ⚠️ incr-topo (2026-10-30): 增量过滤
+                -- ⚠️ topo-batch (2026-11-02): skip_ids 过滤
                 if only_ids and not only_ids[id] then
                     -- 增量模式, 跳过
+                elseif skip_ids and skip_ids[id] then
+                    -- 分批模式, 跳过
                 elseif max_props and #prop_ids >= max_props then
                     -- hello-nodes 模式, 已达到上限, 跳过
                 else
@@ -905,8 +925,11 @@ local function build_topo(only_ids, max_props)
         if #props >= MAX_PROPS then break end
         local id, nm = prop_id_name(r)
         -- ⚠️ incr-topo (2026-10-30): 增量过滤
+        -- ⚠️ topo-batch (2026-11-02): skip_ids 过滤
         if only_ids and not only_ids[id] then
             -- 增量模式, 跳过
+        elseif skip_ids and skip_ids[id] then
+            -- 分批模式, 跳过
         else
             props[#props + 1] = topo.prop(id, nm, r.dtype or "uint16", c.slave, r.addr, r.count or 1)
             prop_ids[#prop_ids + 1] = id  -- topo-ack-filter: 记录属性 ID
@@ -1936,7 +1959,7 @@ local function send_hello()
     if m == "sniff" or m == "platform" or m == "pollpull" then
         -- 只有 sniff/platform 档才带 nodes, manual 档不带
         -- 直接调用 build_topo, 不检查 pub_blocked (build_topo 内部会处理)
-        local parts, pids = build_topo(nil, 20)  -- 最多 20 个 property
+        local parts, pids = build_topo(nil, TOPO_BATCH_SIZE)  -- 最多 TOPO_BATCH_SIZE 个 property
         if parts and pids and #pids > 0 then
             hello_nodes = parts
             hello_prop_ids = pids
@@ -2401,49 +2424,74 @@ local function task_main()
                             has_new = true
                         end
                         if has_new then
-                            local incr_parts, incr_pids
-                            if S.topo_sent_props then
-                                local ok2, s2, n2, p2 = pcall(topo_sig, new_props)
+                            -- ⚠️ topo-batch (2026-11-02): 分批发送拓扑。
+                            --   把 new_props 按 TOPO_BATCH_SIZE 切分, 每批单独构建+发送。
+                            --   批次间隔 2 秒, 避免触发平台限流 + 给堆回收的时间。
+                            local new_list = {}
+                            for id in pairs(new_props) do new_list[#new_list + 1] = id end
+                            table.sort(new_list)  -- 排序保证分批顺序稳定
+                            local total_new = #new_list
+                            local batch_start = 1
+                            local batch_num = 0
+                            local all_batches_ok = true
+                            while batch_start <= total_new do
+                                batch_num = batch_num + 1
+                                local batch_end = math.min(batch_start + TOPO_BATCH_SIZE - 1, total_new)
+                                local batch_ids = {}
+                                for i = batch_start, batch_end do
+                                    batch_ids[new_list[i]] = true
+                                end
+                                -- 构建本批拓扑(只包含 batch_ids 里的 property)
+                                local batch_parts, batch_pids
+                                local ok2, s2, n2, p2 = pcall(topo_sig, batch_ids)
                                 if ok2 then
-                                    incr_parts = n2
-                                    incr_pids = p2
-                                    sig = s2
+                                    batch_parts = n2
+                                    batch_pids = p2
                                 else
-                                    log.warn("iot", "incr topo_sig failed: " .. tostring(s2))
+                                    log.warn("iot", "batch " .. batch_num .. " topo_sig failed: " .. tostring(s2))
+                                    all_batches_ok = false
+                                    break
                                 end
-                            else
-                                incr_parts = nodes_json
-                                incr_pids = prop_ids
+                                if batch_parts then
+                                    local pok, sent, e = pcall(send_topo, batch_parts)
+                                    if pok and sent then
+                                        S.topo_sent_props = S.topo_sent_props or {}
+                                        for _, id in ipairs(batch_pids) do
+                                            S.topo_sent_props[id] = true
+                                        end
+                                        -- U4 过滤: 每批成功后更新 ack, 让该批的属性可以上报数据
+                                        S.topo_ack_props = S.topo_ack_props or {}
+                                        for _, id in ipairs(batch_pids) do
+                                            S.topo_ack_props[id] = true
+                                        end
+                                        log.info("iot", "topology posted (batch " .. batch_num
+                                            .. "): parts=" .. #batch_parts
+                                            .. " bytes=" .. topo.len(batch_parts)
+                                            .. " props=" .. #batch_pids
+                                            .. "/" .. total_new)
+                                    else
+                                        S.topo_fail_at = os.clock()
+                                        S.topo_fail_n = (S.topo_fail_n or 0) + 1
+                                        all_batches_ok = false
+                                        log.info("iot", "topology batch " .. batch_num .. " failed: "
+                                            .. tostring(e or sent))
+                                        break  -- 本批失败, 停止后续批次
+                                    end
+                                end
+                                batch_start = batch_end + 1
+                                -- 批次间隔 2 秒(还有下一批才等)
+                                if batch_start <= total_new and sys then
+                                    sys.wait(2000)
+                                end
                             end
-                            if incr_parts then
-                                local pok, sent, e = pcall(send_topo, incr_parts)
-                                if pok and sent then
-                                    S.topo_sig = sig
-                                    S.topo_sent_at = os.clock()
-                                    S.topo_fail_at = nil
-                                    S.topo_fail_n = 0
-                                    S.topo_sent_sig = sig
-                                    S.topo_sent_props = S.topo_sent_props or {}
-                                    for _, id in ipairs(incr_pids or prop_ids) do
-                                        S.topo_sent_props[id] = true
-                                    end
-                                    if prop_ids then
-                                        local ack = {}
-                                        for _, id in ipairs(prop_ids) do ack[id] = true end
-                                        S.topo_ack_props = ack
-                                    end
-                                    pubsched.sent("topo")
-                                    local incr_tag = (incr_pids and #incr_pids < #prop_ids) and "incr" or "full"
-                                    log.info("iot", "topology posted (" .. incr_tag .. "): parts=" .. #incr_parts
-                                        .. " bytes=" .. topo.len(incr_parts) .. " sig=" .. sig
-                                        .. " new_props=" .. (incr_pids and #incr_pids or 0))
-                                else
-                                    S.topo_sig = sig
-                                    S.topo_fail_at = os.clock()
-                                    S.topo_fail_n = (S.topo_fail_n or 0) + 1
-                                    log.info("iot", "topology skip (fail_n=" .. S.topo_fail_n
-                                        .. "): " .. tostring(e or sent))
-                                end
+                            -- 全部批次成功后更新签名和时间戳
+                            if all_batches_ok then
+                                S.topo_sig = sig
+                                S.topo_sent_at = os.clock()
+                                S.topo_fail_at = nil
+                                S.topo_fail_n = 0
+                                S.topo_sent_sig = sig
+                                pubsched.sent("topo")
                             end
                         else
                             sig = nil
