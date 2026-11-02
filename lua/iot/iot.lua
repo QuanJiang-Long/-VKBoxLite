@@ -2005,8 +2005,13 @@ local function send_hello()
     -- ⚠️ hello-nodes (2026-11-02): 记录 hello 里已发送的 property, 后续走拓扑增量
     if hello_prop_ids then
         S.topo_sent_props = S.topo_sent_props or {}
+        -- ⚠️ topo-batch-fix (2026-11-02): hello 带的 property 也要写进 ack,
+        --   否则 U4 过滤只认拓扑发过的, hello 那 20 个属性的数据永远发不出去。
+        --   特别是嗅探属性 <= 20 个时, 拓扑不会触发, 全靠 hello 建档 + ack。
+        S.topo_ack_props = S.topo_ack_props or {}
         for _, id in ipairs(hello_prop_ids) do
             S.topo_sent_props[id] = true
+            S.topo_ack_props[id] = true
         end
     end
     return true, onboard
