@@ -58,7 +58,9 @@ end
 -- ⚠️ 12-fix-7 (2026-10-28): U4 降级分包的每包点数。
 --   整包(77 个点 ≈ 6KB)拼不出来时(碎片化), 按这个数拆成 ~2KB 的小包,
 --   同一个 topic 分几条发。2KB 在碎片池里比 6KB 好找得多。
-local U4_CHUNK_PTS = 25
+-- 2026-11-03: 64 点/包, 整包上限 128 点(超过直接拆)
+local U4_CHUNK_PTS = 64
+local U4_WHOLE_MAX = 128
 
 -- ⚠️ 12-fix-7: 大块分配前的水位线。超过它就先回收一次再拼大字符串。
 --   现场实测: 水位 222KB 时 6KB(甚至 1.2KB)的连续块就申请不到了;
@@ -436,9 +438,11 @@ local function build_items()
     -- ⚠️ topo-ack-filter (2026-10-30): 拓扑未成功上报前, 不发 U4 数据。
     --   S.topo_ack_props 为 nil 表示还没成功发过拓扑, 平台侧没有物模型,
     --   发数据过去平台也认不出。等拓扑成功上报后, S.topo_ack_props 才会被设置。
-    local ack = S.topo_ack_props
-    if not ack then
-        -- 拓扑还没成功上报过, 不发 U4 (返回空 items)
+    --   2026-11-03: 仅 sniff 模式受此闸门控制。platform 模式从平台拉配置,
+    --   平台已知属性, 不需要等拓扑上报。
+    local ack = sniff_mode and S.topo_ack_props or nil
+    if sniff_mode and not ack then
+        -- sniff 模式: 拓扑还没成功上报过, 不发 U4 (返回空 items)
         return {}
     end
     for k, d in pairs(collector.get_all_latest()) do
@@ -454,7 +458,8 @@ local function build_items()
                 -- ⚠️ topo-ack-filter: 只发拓扑里已成功上报的属性。
                 --   新发现的属性(不在 ack 里)暂时不发, 等拓扑更新后再发。
                 --   避免平台收到物模型里没有的属性数据, 导致数据被丢弃或报错。
-                if ack[pid] then
+                --   2026-11-03: 仅 sniff 模式受此过滤, platform/manual 的 ack=nil 直接放行
+                if not ack or ack[pid] then
                     if not by_slave[slave] then
                         by_slave[slave] = {}
                         order[#order + 1] = slave
@@ -473,18 +478,8 @@ local function build_items()
     local items = {}
     for n, slave in ipairs(order) do
         local pts = by_slave[slave]
-        -- ⚠️ 12-fix-7 (2026-10-28): 整包拼不出来时【降级分包】。
-        --   现场(41 分钟): lua=222KB/300KB, table.concat 一次要 ~6KB 连续块
-        --   -> "not enough memory for buffer allocation" -> U4 停发;
-        --   同期拓扑那条只要 1.2KB 也失败 —— 说明不是"包太大", 是池子碎了。
-        --   先试整包(正常路径一个字节不变, 平台行为不变), 失败才按块拆,
-        --   同一个 topic 分几条发。总发不出去和只发一半, 当然是后者好。
-        local ok, body = pcall(function()
-            return "[" .. table.concat(pts, ",") .. "]"
-        end)
-        if ok then
-            items[#items + 1] = { idx = n, slave = slave, body = body }
-        else
+        -- 2026-11-03: 超过 128 个点直接拆分(不试整包), 避免大包分配失败
+        if #pts > U4_WHOLE_MAX then
             local chunks = 0
             for _, part in ipairs(split_points(pts, U4_CHUNK_PTS)) do
                 local cok, cbody = pcall(function()
@@ -495,9 +490,34 @@ local function build_items()
                     chunks = chunks + 1
                 end
             end
-            S.build_fail = (S.build_fail or 0) + 1
-            log.warn("iot", "u4 body alloc failed, split " .. #pts .. " points into "
-                .. chunks .. " chunks")
+            log.info("iot", "u4 split " .. #pts .. " points into " .. chunks .. " chunks (>128)")
+        else
+            -- ⚠️ 12-fix-7 (2026-10-28): 整包拼不出来时【降级分包】。
+            --   现场(41 分钟): lua=222KB/300KB, table.concat 一次要 ~6KB 连续块
+            --   -> "not enough memory for buffer allocation" -> U4 停发;
+            --   同期拓扑那条只要 1.2KB 也失败 —— 说明不是"包太大", 是池子碎了。
+            --   先试整包(正常路径一个字节不变, 平台行为不变), 失败才按块拆,
+            --   同一个 topic 分几条发。总发不出去和只发一半, 当然是后者好。
+            local ok, body = pcall(function()
+                return "[" .. table.concat(pts, ",") .. "]"
+            end)
+            if ok then
+                items[#items + 1] = { idx = n, slave = slave, body = body }
+            else
+                local chunks = 0
+                for _, part in ipairs(split_points(pts, U4_CHUNK_PTS)) do
+                    local cok, cbody = pcall(function()
+                        return "[" .. table.concat(part, ",") .. "]"
+                    end)
+                    if cok then
+                        items[#items + 1] = { idx = n, slave = slave, body = cbody }
+                        chunks = chunks + 1
+                    end
+                end
+                S.build_fail = (S.build_fail or 0) + 1
+                log.warn("iot", "u4 body alloc failed, split " .. #pts .. " points into "
+                    .. chunks .. " chunks")
+            end
         end
     end
     return items
@@ -989,7 +1009,7 @@ end
 -- 无源的字段(imei/iccid/longitude/latitude)按注释留空或整项不发, 不编假值
 -- 19-fix: deviceName 字段按 mode 分流:
 --   manual/platform 模式: 留空字符串 (用户决策 2026-10-16)
---   sniff 模式: 不动, 仍用 "VKBOX-" .. did
+--   sniff 模式: 不动, 仍用 "VKBOXLite-" .. did
 local function send_meta()
     local did = cur_did()
     if not did then return false, "无 SN" end
@@ -1013,7 +1033,7 @@ local function send_meta()
     if mode == "manual" or mode == "platform" then
         p[#p + 1] = string.format('"deviceName":%s', MqttUtil.jstr(""))
     else
-        p[#p + 1] = string.format('"deviceName":%s', MqttUtil.jstr("VKBOX-" .. did))
+        p[#p + 1] = string.format('"deviceName":%s', MqttUtil.jstr("VKBOXLite-" .. did))
     end
     p[#p + 1] = string.format('"serialNumber":%s', MqttUtil.jstr(did))
     if csq then p[#p + 1] = string.format('"csq":%d', csq) end
@@ -1203,6 +1223,8 @@ local function send_gw_res()
             { id = "ram_percent", value = ram },
             { id = "uptime_sec", value = math.floor(os.clock()) },
             { id = "cpu_percent", value = cpu },
+            { id = "IMEI", value = MqttUtil.imei(mobile) },
+            { id = "ICCID", value = tostring(MqttUtil.mcall(mobile, "iccid") or "") },
         }, ts), 1)
     if not ok then return false end
     -- 占用比是"上一个区间"的值, 发完就归零重新攒。不清的话 busy 一直涨而
@@ -1956,22 +1978,20 @@ local function send_hello()
     --   剩余 property 走拓扑增量上报(已有逻辑)。
     local hello_nodes = nil
     local hello_prop_ids = nil
-    if m == "sniff" or m == "platform" or m == "pollpull" then
-        -- 只有 sniff/platform 档才带 nodes, manual 档不带
-        -- 直接调用 build_topo, 不检查 pub_blocked (build_topo 内部会处理)
+    if m == "sniff" then
+        -- 只有 sniff 档才带 nodes, platform/manual 档不带
+        -- platform 档从平台拉配置, 平台已知属性, 不需要 hello 带 nodes 建档
         local parts, pids = build_topo(nil, TOPO_BATCH_SIZE)  -- 最多 TOPO_BATCH_SIZE 个 property
         if parts and pids and #pids > 0 then
             hello_nodes = parts
             hello_prop_ids = pids
         end
     end
-    -- ⚠️ 优化 (2026-11-02): sniff 档如果 hello 不带 nodes, 延迟发送。
-    --   原因: pub_blocked() 在波特率识别完成后即返回 false, 但 mon.infer().regs
+    -- sniff 档如果 hello 不带 nodes, 延迟发送。
+    -- 原因: pub_blocked() 在波特率识别完成后即返回 false, 但 mon.infer().regs
     --   可能还是空的(寄存器尚未推断出来)。这时发 hello 不带 nodes, 平台还得
     --   等拓扑才能建档, 失去了 hello-nodes 一步到位的意义。
     --   sniff 档 hello 必须带 nodes(要么不发, 等下一轮 task_main 再试)。
-    --   platform/pollpull 档不受影响: 它们有平台下发的配置, build_topo 不会空。
-    --   manual 档本来就不带 nodes(上面 if 已排除)。
     if m == "sniff" and not hello_nodes then
         return false, "sniff 档等待寄存器推断完成"
     end
@@ -2320,9 +2340,12 @@ local function task_main()
                     end
                 end
             end
-            -- U1/U3/U5/U6/U7 + U2 拓扑 受 pub_platform gate 管: idle/manual 全不发
+            -- U3 网关资源上报: manual 也发(与 U2 meta 同闸门, idle 不发)
+            if pub_meta and (os.time() - (S.res_at or 0)) >= c.interval_s then
+                send_gw_res()
+            end
+            -- U1/U5/U6/U7 + U2 拓扑 受 pub_platform gate 管: idle/manual 全不发
             if pub_platform then
-                if (os.time() - (S.res_at or 0)) >= c.interval_s then send_gw_res() end
                 -- ⚠️ hello-order-fix (2026-11-02): hello 必须在拓扑之前发送。
                 --   平台侧需要 hello 来建档，拓扑是建档后的补充。
                 --   原来拓扑在 hello 之前发送，导致平台收到拓扑时还没建档。
