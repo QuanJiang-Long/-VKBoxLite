@@ -58,9 +58,9 @@ end
 -- ⚠️ 12-fix-7 (2026-10-28): U4 降级分包的每包点数。
 --   整包(77 个点 ≈ 6KB)拼不出来时(碎片化), 按这个数拆成 ~2KB 的小包,
 --   同一个 topic 分几条发。2KB 在碎片池里比 6KB 好找得多。
--- 2026-11-03: 64 点/包, 整包上限 128 点(超过直接拆)
-local U4_CHUNK_PTS = 64
-local U4_WHOLE_MAX = 128
+-- 2026-11-03: 32 点/包, 整包上限 64 点(超过直接拆)
+local U4_CHUNK_PTS = 32
+local U4_WHOLE_MAX = 64
 
 -- ⚠️ 12-fix-7: 大块分配前的水位线。超过它就先回收一次再拼大字符串。
 --   现场实测: 水位 222KB 时 6KB(甚至 1.2KB)的连续块就申请不到了;
@@ -478,7 +478,7 @@ local function build_items()
     local items = {}
     for n, slave in ipairs(order) do
         local pts = by_slave[slave]
-        -- 2026-11-03: 超过 128 个点直接拆分(不试整包), 避免大包分配失败
+        -- 2026-11-03: 超过 64 个点直接拆分(不试整包), 避免大包分配失败
         if #pts > U4_WHOLE_MAX then
             local chunks = 0
             for _, part in ipairs(split_points(pts, U4_CHUNK_PTS)) do
@@ -490,7 +490,7 @@ local function build_items()
                     chunks = chunks + 1
                 end
             end
-            log.info("iot", "u4 split " .. #pts .. " points into " .. chunks .. " chunks (>128)")
+            log.info("iot", "u4 split " .. #pts .. " points into " .. chunks .. " chunks (>64)")
         else
             -- ⚠️ 12-fix-7 (2026-10-28): 整包拼不出来时【降级分包】。
             --   现场(41 分钟): lua=222KB/300KB, table.concat 一次要 ~6KB 连续块
