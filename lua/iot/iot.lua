@@ -2443,11 +2443,16 @@ local function task_main()
                     for id in pairs(cur_pids) do pid_list[#pid_list + 1] = id end
                     table.sort(pid_list)
                     local prop_sig = table.concat(pid_list, ",")
+                    -- 2026-11-03: 诊断日志 - 追踪拓扑重建逻辑
+                    log.info("iot", "topo check: cur=" .. #pid_list .. " cached_sig=" .. tostring(S.topo_prop_sig and "yes" or "no") .. " sent_sig=" .. tostring(S.topo_sent_sig and "yes" or "no"))
                     local need_rebuild = true
                     if prop_sig == S.topo_prop_sig and S.topo_sent_sig then
                         sig = S.topo_sent_sig
                         prop_ids = S.topo_prop_ids
                         need_rebuild = false
+                        log.info("iot", "topo skip: sig unchanged (cur=" .. #pid_list .. ")")
+                    else
+                        log.info("iot", "topo rebuild: sig changed (cur=" .. #pid_list .. ")")
                     end
                     if need_rebuild then
                         local ok, s, n, pids = pcall(topo_sig)
@@ -2458,6 +2463,7 @@ local function task_main()
                             S.topo_at = os.clock()
                             S.topo_prop_sig = prop_sig
                             S.topo_prop_ids = prop_ids
+                            log.info("iot", "topo rebuilt: props=" .. #pids .. " sig=" .. tostring(s))
                         else
                             S.build_fail = (S.build_fail or 0) + 1
                             log.warn("iot", "topo_sig failed, skip this round: " .. tostring(s))
