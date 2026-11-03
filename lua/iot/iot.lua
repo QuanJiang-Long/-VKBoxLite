@@ -58,8 +58,8 @@ end
 -- ⚠️ 12-fix-7 (2026-10-28): U4 降级分包的每包点数。
 --   整包(77 个点 ≈ 6KB)拼不出来时(碎片化), 按这个数拆成 ~2KB 的小包,
 --   同一个 topic 分几条发。2KB 在碎片池里比 6KB 好找得多。
--- 2026-11-03: 32 点/包, 整包上限 64 点(超过直接拆)
-local U4_CHUNK_PTS = 32
+-- 2026-11-03: 16 点/包 (~1KB 连续块), 整包上限 64 点(超过直接拆)
+local U4_CHUNK_PTS = 16
 local U4_WHOLE_MAX = 64
 
 -- ⚠️ 12-fix-7: 大块分配前的水位线。超过它就先回收一次再拼大字符串。
@@ -413,8 +413,13 @@ M._test_split_points = split_points
 --   —— 一份轮询配置只有一个 slave(cfg.normalize_poll), 直接取那份的
 -- 少了 -{n} 这个后缀, 平台无法把数据归属到子设备, 上报等于白发
 local function build_items()
-    -- 2026-11-03: 构建前检查水位，碎片化严重时先回收，避免 U4 分配失败 (bfail)
-    reclaim_if_high()
+    -- 2026-11-03: 构建前强制 trim + 双次 GC，确保有足够连续块 (~1KB)
+    --   方案 A(阈值 160KB)无效：bfail 仍在 215.6KB 触发，GC 无法整理碎片
+    --   改为每次 U4 构建前都清理，虽然增加 CPU 开销但能显著减少 bfail
+    pcall(collector.trim_cache)
+    pcall(mon.trim_reqs)
+    collectgarbage("collect")
+    collectgarbage("collect")
     -- ⚠️ 12-fix-3: 先取一次配置, 下面 alias_map(c) 复用它, 别再各自去
     --   active_cfg() —— 那等于把整份配置反序列化两遍。
     local c = active_cfg()
