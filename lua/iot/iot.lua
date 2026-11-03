@@ -2269,12 +2269,12 @@ local function task_main()
             -- 2026-11-02: 定期 trim_cache + 强制 GC, 防碎片化累积。
             --   现场 297KB/307KB(96.7%)时连 3KB 连续块都分配不出 → VM exit。
             --   每 30 秒清一次帧缓存 + 强制 GC, 把碎片合并成空闲块。
-            -- 2026-11-03: 阈值 200 → 180KB。
-            --   现场 census 显示设备在 219-222KB 运行，200KB 阈值已持续超标，
-            --   但 gc 触发后效果有限（碎片化）。180KB 提前触发，留出更多余量。
+            -- 2026-11-03: 阈值 200 → 180 → 160KB。
+            --   180KB 阈值下 bfail 仍=27 次/27 分钟，设备在 215KB 时开始分配失败。
+            --   160KB 提前 55KB 触发 GC，给 U4 分配留出更多余量。
             if (os.clock() - (S.gc_at or -1e9)) >= 10 then
                 local kb = collectgarbage("count")
-                if kb > 180 then
+                if kb > 160 then
                     collectgarbage("collect")
                     S.gc_at = os.clock()
                     S.gc_trig = (S.gc_trig or 0) + 1
