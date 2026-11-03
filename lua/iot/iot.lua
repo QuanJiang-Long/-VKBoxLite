@@ -992,6 +992,11 @@ local function topo_sig(only_ids)
     --   现场(41 分钟): 拓扑这条只要 1.2KB 连续块都申请不到
     --   ("not enough memory for buffer allocation") —— 池子被 churn 切碎了。
     --   完整回收能把碎片并回大块(要现场验证, 所以加了日志)。
+    -- 2026-11-03: 构建前强制 trim + 双次 GC，确保有足够连续块 (~4KB)
+    pcall(collector.trim_cache)
+    pcall(mon.trim_reqs)
+    collectgarbage("collect")
+    collectgarbage("collect")
     reclaim_if_high()
     local parts, prop_ids = build_topo(only_ids)
     if not parts then return nil end
@@ -2540,6 +2545,8 @@ local function task_main()
                                         break  -- 本批失败, 停止后续批次
                                     end
                                 end
+                                -- 2026-11-03: 每批发送后 GC，回收临时 JSON 字符串 (~2-4KB)
+                                collectgarbage("collect")
                                 batch_start = batch_end + 1
                                 -- 批次间隔 2 秒(还有下一批才等)
                                 if batch_start <= total_new and sys then
