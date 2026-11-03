@@ -413,6 +413,8 @@ M._test_split_points = split_points
 --   —— 一份轮询配置只有一个 slave(cfg.normalize_poll), 直接取那份的
 -- 少了 -{n} 这个后缀, 平台无法把数据归属到子设备, 上报等于白发
 local function build_items()
+    -- 2026-11-03: 构建前检查水位，碎片化严重时先回收，避免 U4 分配失败 (bfail)
+    reclaim_if_high()
     -- ⚠️ 12-fix-3: 先取一次配置, 下面 alias_map(c) 复用它, 别再各自去
     --   active_cfg() —— 那等于把整份配置反序列化两遍。
     local c = active_cfg()
@@ -2267,18 +2269,24 @@ local function task_main()
             -- 2026-11-02: 定期 trim_cache + 强制 GC, 防碎片化累积。
             --   现场 297KB/307KB(96.7%)时连 3KB 连续块都分配不出 → VM exit。
             --   每 30 秒清一次帧缓存 + 强制 GC, 把碎片合并成空闲块。
+            -- 2026-11-03: 阈值 200 → 180KB。
+            --   现场 census 显示设备在 219-222KB 运行，200KB 阈值已持续超标，
+            --   但 gc 触发后效果有限（碎片化）。180KB 提前触发，留出更多余量。
             if (os.clock() - (S.gc_at or -1e9)) >= 10 then
                 local kb = collectgarbage("count")
-                if kb > 200 then
+                if kb > 180 then
                     collectgarbage("collect")
                     S.gc_at = os.clock()
                     S.gc_trig = (S.gc_trig or 0) + 1
                 end
             end
-            -- 2026-11-02: 每 30 秒定期 trim_cache + 强制 GC, 防碎片化累积
-            if (os.clock() - (S.trim_at or -1e9)) >= 30 then
+            -- 2026-11-03: 每 15 秒定期 trim_cache + 双次强制 GC, 防碎片化累积。
+            --   原 30 秒间隔太长，碎片在 30 秒内已累积到影响分配（bfail=26/22 分钟）。
+            --   15 秒减少碎片累积窗口，双次 GC 提高回收率（第一次标记，第二次释放）。
+            if (os.clock() - (S.trim_at or -1e9)) >= 15 then
                 pcall(collector.trim_cache)
                 pcall(mon.trim_reqs)
+                collectgarbage("collect")
                 collectgarbage("collect")
                 S.trim_at = os.clock()
                 local h1, h2 = heap_info()
