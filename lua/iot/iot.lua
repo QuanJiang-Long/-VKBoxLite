@@ -2719,10 +2719,4 @@ end
 
 reset_state()
 
--- 2026-11-02: 从 cfgstore 加载上报开关初始值
-local sys_cfg = cfgstore.load_sys()
-if sys_cfg and sys_cfg.report_on ~= nil then
-    S.report_on = (sys_cfg.report_on == true)
-end
-
 return M
