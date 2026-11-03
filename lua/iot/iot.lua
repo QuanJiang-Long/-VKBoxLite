@@ -590,6 +590,10 @@ local function publish()
             log.warn("iot", string.format("publish fail sub %d (slave %d): %s",
                 it.idx, it.slave, reason))
         end
+        -- 2026-11-03: 每发完一包主动 GC，回收临时 JSON 字符串 (~1KB)
+        --   单从机分包后 3-6 个包连续发送，每包 ~1KB 临时字符串，
+        --   不立即回收会累积到下次 GC 周期 (15 秒)，加剧碎片化
+        collectgarbage("collect")
     end
     if any then
         -- 12-fix-4: 脏标记交给 pubsched 统一管(这里只留个镜像给 R:STAT 看)
