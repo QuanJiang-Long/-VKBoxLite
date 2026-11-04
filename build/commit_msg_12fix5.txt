@@ -1,0 +1,45 @@
+fix(sniff): 修收帧路径 OOM 崩溃 —— churn 降 9 倍 + 帧表复用 + 解帧只解一遍
+
+现场又崩两次(11:47/11:51 两轮), 崩溃点从上报路径挪到收帧路径:
+  E/mem used 282488/307192, alloc 3471 失败(还剩 24KB 却切不出 3.4KB 连续块)
+  E/user.coroutine.resume not enough memory
+    mbus.lua:218 parse_value <- mon.lua:244 <- mon.lua:273 pick_dtype
+    <- mon.lua:324 <- mon.lua:375 <- mon.lua:436
+两次都紧跟着前端「总线报文」面板(R:FRAMES=30)。是碎片化, 不是总量不够。
+
+根因一: 我们的代码本身占 276.5KB —— 堆才 300KB
+- tests/lua/test_heapsize.lua(新): 仿真器里逐个编译 lua/ 的模块量常驻
+  iot/iot 73.1KB / mon 33.1KB / cmd 22.6KB / poll 21.6KB / mbus 16.2KB ...
+- 设备 idle 档 collectgarbage("count") = 190KB, 留给运行期只有 ~110KB
+- 去注释对体积毫无帮助(burn 275.75 vs 仓库 273.46KB): 注释不进编译产物
+- 该测试把 320KB 钉成红线, 代码再涨就红
+
+根因二: churn ~110KB/秒, 碎片化就是这么来的
+- tests/lua/test_churn.lua(新): 量法有坑 —— Lua 5.3 的 collectgarbage("stop")
+  只关紧急回收, 增量 GC 照跑, 只能靠"N 次分配量低于 GC 启动阈值"来量
+- 改前 -> 改后:
+  pick_dtype  632B -> 29.5B  候选表字面量写在函数体里, 每次调用重建 8 张表
+  push_data   192B -> 16B    每次新建 7 字段表 -> 老 key 原地改字段
+  decode_frame 450B -> 178B  帧表复用 + vhex 从 hex 切 + 闭包提到模块级
+  同一帧解两次 -> 只解一遍  next_frame 解完扔掉, process_frame 又解一遍
+  调试 ring 176 次/秒 -> 0   全项目没有读者 -> 改成 W:RING=1 显式打开
+  R:STAT 3471B -> ~1800B    iot 状态被编码两遍(iot 段 + mqtt 段一模一样)
+  R:FRAMES ~9KB -> ~3KB     帧表里的 raw(二进制)/data 丢掉
+- 现场换算: 48 帧/秒 x 1.7 槽位/帧, churn ~110KB/秒 -> ~12KB/秒
+
+顺带修: census 那一行一直是瞎的
+- 原来打 collectgarbage("count")/1024, 可 LuatOS 这个接口返回的就是 KB
+  -> 每行都打成 "lua=0.2KB", 现场看着像堆才用 0.2KB, 白白误导两轮排查
+- 现在 census 与 R:STAT 同一口径, 并加 fps=/push=/gc= 三个新字段
+- 堆水位保险丝: task_main 里水位 >240KB 就 collect 一次, 最多 10 秒一次
+  (不在 UART 热路径上; 收完垃圾那块地方能复用, 碎片不再扩大)
+
+验证: 仿真器 8 个用例全过(churn/heap 红线/帧表复用在内), 语法自检 lua + build\lua_burn
+      20 文件 0 失败, prep_burn 后瘦身版 174.8KB(余量 81.2KB)
+新增测试: tests/lua/test_churn.lua      分配量红线
+         tests/lua/test_heapsize.lua   代码体积红线(320KB)
+         tests/lua/test_framereuse.lua 帧表复用无字段残留(60 帧 A/B 对照)
+
+还欠着的账: 276KB 代码 vs 300KB 堆, 代码体积一分没少, 下一步候选
+  bus/poll.lua(21.6KB) / bus/mon.lua(33.1KB) 改按需 require
+  iot/iot.lua(73.1KB) 拆常载/按需两半; cfg.lua / lbsLoc2.lua 不常驻
