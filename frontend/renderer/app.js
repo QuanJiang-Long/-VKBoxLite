@@ -1972,10 +1972,9 @@ function exportCfgAsJson(pre) {
   const c = collectCfg(pre);
   if (!c.ok) { toast('当前表单配置无效，无法导出：' + c.err); return; }
   const data = {
-    // im-5 6a: version 从 window.__APP_VERSION__ 读 (index.html 注入, 跟 package.json 同步)
-    //   没读到时 (老环境/异常) fallback 'unknown', 不让导不出去
     tool: 'VKBox配置工具', version: (window.__APP_VERSION__ || 'unknown'),
     exported: new Date().toISOString(),
+    mode: S.mode || 'manual',
     serial: c.cfg,
     registers: collectRegs(pre),
     mqtt: {
@@ -1989,24 +1988,11 @@ function exportCfgAsJson(pre) {
       keep_session: E(pre, 'mqKeepSession').value === '1',
       auto: { pass: (S.mqtt && S.mqtt.auto_pass) || '' },
       manual_on: S.mqManual
-    },
-    // im-4: MQTT 运行态快照 (设备 R:STAT mqtt 段, 没拉到时 null)
-    //   字段: connected / want_run / subscribed / client_id / user /
-    //         device_id / sn / sub / pub_topics / keep_session 等
-    mqtt_status: (S.mqtt && S.mqtt.stat) || null,
-    // im-6: 设备运行态 (R:STAT 4 段里的 mode + data + guard, 不含 mqtt 段)
-    //   - mode:  { mode, busy, poll, mon } 当前 485 模式 + 占用状态
-    //   - data:  { pushed, frames, raw, points, ring } Modbus 采集数据状态
-    //   - guard: { uptime, feed, stall, wdt_to } 看门狗状态
-    device_status: S.stat ? {
-      mode:  S.stat.mode  || null,
-      data:  S.stat.data  || null,
-      guard: S.stat.guard || null
-    } : null
+    }
   };
   const json = JSON.stringify(data, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
-  downloadBlob(blob, 'vkbox_config_' + new Date().toISOString().slice(0, 10) + '.json');
+  downloadBlob(blob, 'VKBoxLite-' + (S.mode || 'manual') + '-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '.json');
   toast('配置已导出为 JSON');
 }
 function exportCfgAsCsv(pre) {
@@ -2033,11 +2019,11 @@ function exportCfgAsCsv(pre) {
     mqtt: m
   });
   // 头部注释: 手动档额外字段
-  const headerNote = '# manual_on=' + S.mqManual + ', keep_session=' + m.keep_session + '\n';
+  const headerNote = '# mode=' + (S.mode || 'manual') + ', manual_on=' + S.mqManual + ', keep_session=' + m.keep_session + '\n';
   // 2h fix: 加 UTF-8 BOM (\uFEFF), Excel 看到 BOM 自动用 UTF-8 解码, 中文不乱码
   // type 也加 charset=utf-8, 让其他工具 (LibreOffice/VSCode) 也能正确识别
   const blob = new Blob(['\uFEFF' + headerNote + csv], { type: 'text/csv;charset=utf-8' });
-  downloadBlob(blob, 'vkbox_config_' + new Date().toISOString().slice(0, 10) + '.csv');
+  downloadBlob(blob, 'VKBoxLite-' + (S.mode || 'manual') + '-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '.csv');
   toast('配置已导出为 CSV');
 }
 function downloadBlob(blob, name) {
@@ -2196,9 +2182,17 @@ function exportSniffAsJson() {
     return;
   }
   const data = {
-    version: '1.0.2',
-    exportTime: new Date().toISOString(),
+    tool: 'VKBox 配置工具', version: (window.__APP_VERSION__ || 'unknown'),
+    exported: new Date().toISOString(),
     mode: 'sniff',
+    serial: {
+      baud: inf.baud || 9600,
+      databits: inf.databits || 8,
+      parity: inf.parity != null ? inf.parity : 0,
+      stopbits: inf.stopbits || 1,
+      slave: inf.slave || 1,
+      server: el.fUrl.value.trim()
+    },
     total: inf.total || regs.length,
     slaves: toArr(inf.slaves),
     regs: regs.map(r => ({
@@ -2209,14 +2203,15 @@ function exportSniffAsJson() {
       conf: r.conf,
       value: r.value,
       name: (S.inferNames && S.inferNames['reg' + r.addr] && S.inferNames['reg' + r.addr].name) || ('reg' + r.addr),
-      id: (S.inferNames && S.inferNames['reg' + r.addr] && S.inferNames['reg' + r.addr].id) || ('reg' + r.addr)
+      id: (S.inferNames && S.inferNames['reg' + r.addr] && S.inferNames['reg' + r.addr].id) || ('reg' + r.addr),
+      inferred: true
     }))
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'sniff_export_' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+  a.download = 'VKBoxLite-sniff-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '.json';
   a.click();
   URL.revokeObjectURL(url);
   toast('推断表已导出为 JSON (' + regs.length + ' 条)');
@@ -2230,7 +2225,7 @@ function exportSniffAsCsv() {
     toast('推断表为空，无法导出');
     return;
   }
-  const lines = ['# VKBox Sniff 推断表导出', '# 导出时间：' + new Date().toISOString(), '# 共 ' + regs.length + ' 条', '序号，寄存器地址，数量，功能码，出现次数，推断类型，置信度，最新值，参数名称，建议标识符'];
+  const lines = ['# VKBox Sniff 推断表导出', '# mode=sniff', '# 导出时间：' + new Date().toISOString(), '# 共 ' + regs.length + ' 条', '序号，寄存器地址，数量，功能码，出现次数，推断类型，置信度，最新值，参数名称，建议标识符'];
   regs.forEach((r, i) => {
     const width = inferWidth(r.dtype);
     const fc = r.fc != null ? '0x' + r.fc.toString(16).padStart(2, '0').toUpperCase() : '?';
@@ -2242,7 +2237,7 @@ function exportSniffAsCsv() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'sniff_export_' + new Date().toISOString().replace(/[:.]/g, '-') + '.csv';
+  a.download = 'VKBoxLite-sniff-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '.csv';
   a.click();
   URL.revokeObjectURL(url);
   toast('推断表已导出为 CSV (' + regs.length + ' 条)');
@@ -2266,7 +2261,7 @@ async function importCfg(pre) {
     const f = inp.files && inp.files[0];
     if (!f) return;
     const rd = new FileReader();
-    rd.onload = () => {
+    rd.onload = async () => {
       const text = rd.result;
       let data, fmt;
       try {
@@ -2308,6 +2303,12 @@ async function importCfg(pre) {
             if (!compatible) {
               throw new Error('版本不兼容 (导入 v' + data.version + ', 当前 v' + cur + ')');
             }
+          }
+        }
+        // 校验 mode 字段（新增）
+        if (fmt === 'JSON' && data.mode != null && data.mode !== S.mode) {
+          if (!await askConfirm('导入文件的档位 (' + data.mode + ') 与当前档位 (' + S.mode + ') 不一致，是否继续导入？')) {
+            return;
           }
         }
         const cnt = applyParsedData(pre, data);
