@@ -248,6 +248,8 @@ function M.switch_mode(mode, from_boot)
         if iot then pcall(iot.set_manual, false) end
         -- 2026-11: 有持久化参数时直接传给 mon.start, 跳过 auto_detect
         if mon.start(start_params) then
+            -- 启动自动保存定时器 (B+C 策略) - 两种路径都要启动
+            if mon.start_auto_save then mon.start_auto_save() end
             if start_params then
                 -- 有持久化配置: 直接开始收帧, 不跑识别
                 -- sniff 也向平台报到。失败不回滚: 旁听才是 sniff 的主职
@@ -258,8 +260,6 @@ function M.switch_mode(mode, from_boot)
                     pcall(mon.load_infer, c and c.regs or {})
                 end
                 S.cur = "sniff"
-                -- 启动自动保存定时器 (B+C 策略)
-                if mon.start_auto_save then mon.start_auto_save() end
                 return true, "OK sniff started (from persist)"
             else
                 -- 无持久化配置: 走现有识别流程
