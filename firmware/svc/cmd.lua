@@ -479,8 +479,12 @@ local function reg_cmds()
         if not ok then return M.reply("RET:FAIL:SALIAS:" .. tostring(err)) end
         -- 2026-11: 同步更新内存推断表行, 自动保存时能拿到最新 name/id
         local addr = tonumber(key:match("^reg(%d+)$"))
+        log.info("cmd", "W:SALIAS key=" .. key .. " addr=" .. tostring(addr) .. " name=" .. s(t.name) .. " id=" .. s(t.id))
         if addr and mon.update_row_name then
-            pcall(mon.update_row_name, addr, s(t.name), s(t.id))
+            local updated = mon.update_row_name(addr, s(t.name), s(t.id))
+            log.info("cmd", "W:SALIAS update_row_name result=" .. tostring(updated))
+        else
+            log.warn("cmd", "W:SALIAS skip update_row_name: addr=" .. tostring(addr) .. " mon.update_row_name=" .. tostring(mon.update_row_name))
         end
         M.reply("RET:SALIAS=OK")
     end)
