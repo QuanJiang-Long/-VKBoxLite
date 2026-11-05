@@ -234,14 +234,6 @@ function M.switch_mode(mode, from_boot)
                     stopbits = c.stopbits,
                     parity = c.parity,
                 }
-                -- 2026-11: 设置 detect_result, 让前端显示"已识别：19200 / 8 数据位..."
-                _G.mon_detect_result = {
-                    baud = c.baud,
-                    databits = c.databits or 8,
-                    stopbits = c.stopbits or 1,
-                    parity = c.parity or 0,
-                    fallback = false,
-                }
                 log.info("ctrl", "sniff: loaded ds_infer, skip detect, baud=" .. tostring(c.baud))
             end
         end
@@ -266,11 +258,22 @@ function M.switch_mode(mode, from_boot)
             if mon.start_auto_save then mon.start_auto_save() end
             if start_params then
                 -- 有持久化配置: 直接开始收帧, 不跑识别
+                -- 2026-11: mon.start() 会清 _G.mon_detect_result, 这里要重新设置
+                --   否则前端不显示"已识别：19200 / 8 数据位..."
+                local c = cfgstore.load_infer()
+                if c then
+                    _G.mon_detect_result = {
+                        baud = c.baud,
+                        databits = c.databits or 8,
+                        stopbits = c.stopbits or 1,
+                        parity = c.parity or 0,
+                        fallback = false,
+                    }
+                end
                 -- sniff 也向平台报到。失败不回滚: 旁听才是 sniff 的主职
                 if iot then pcall(iot.pull_start) end
                 -- 2026-11: 加载推断表到 mon 累加器 (让 build_topo 立即可用)
                 if cfgstore and mon.load_infer then
-                    local c = cfgstore.load_infer()
                     pcall(mon.load_infer, c and c.regs or {})
                 end
                 S.cur = "sniff"
