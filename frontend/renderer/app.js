@@ -1029,6 +1029,33 @@ async function applyMode(mode) {
       }
     }
   }
+  // 2026-11: manual → platform/sniff 切档提示: 清空手动配置 (ds_poll)
+  // ⚠️ 不在这里发 W:CLRPOLL: 改到 W:MODE 成功后再清, 避免时序问题
+  let clearPollAfterSwitch = false;
+  if ((isPlatform(mode) || mode === 'sniff') && isManual(S.mode)) {
+    const msg = '当前显示的是手动配置 (ds_poll)。切换到「' + (MODE_LABEL[mode] || mode) +
+      '」后, 切回 manual 档时是否清空这份配置?\n\n' +
+      '• 勾选: 切档同时清空 ds_poll, 切回 manual 档时寄存器表为空\n' +
+      '• 取消勾选: 保留 ds_poll, 切回 manual 档时直接用旧配置';
+    const r = await askConfirmCheck(msg, '切换运行模式',
+      { label: '清空手动配置 (ds_poll)', checked: true });
+    if (!r.ok) return;
+    clearPollAfterSwitch = r.checked;
+  }
+  // 2026-11: sniff → manual/platform 切档提示: 清空推断表 (ds_infer)
+  // ⚠️ 不在这里发 W:CLRINFER: stop_sniff() 会在 W:MODE 时保存推断表,
+  //   提前清会被保存覆盖。改到 W:MODE 成功后再清。
+  let clearInferAfterSwitch = false;
+  if ((isManual(mode) || isPlatform(mode)) && S.mode === 'sniff') {
+    const msg = '当前在 sniff 档, 推断表已持久化 (ds_infer)。切换到「' + (MODE_LABEL[mode] || mode) +
+      '」后, 切回 sniff 档时是否清空推断表?\n\n' +
+      '• 勾选: 切档同时清空 ds_infer, 切回 sniff 档时重新识别\n' +
+      '• 取消勾选: 保留 ds_infer, 切回 sniff 档时直接加载旧推断表';
+    const r = await askConfirmCheck(msg, '切换运行模式',
+      { label: '清空推断表 (ds_infer)', checked: true });
+    if (!r.ok) return;
+    clearInferAfterSwitch = r.checked;
+  }
   // 25-fix: 切到 platform 前预检 MQTT 连接状态 (弹窗拦截). 33-fix: 撤掉
   //   弹窗, 让用户自由进. 进入后 platform 面板顶部用 pMqttHint 横条提示
   //   MQTT 未连接, 「知道了」可点掉 (本会话内). 切走再回来还会再弹.
@@ -1049,12 +1076,27 @@ async function applyMode(mode) {
     const r = await sendCmd(Protocol.Enc.setMode(mode), 'MODE', 8000);
     await readMode();            // 设备已确认，读回真实状态
     S.modePending = null;        // 确认成功，清除待应用标记
+    // 2026-11: W:MODE 成功后再清槽 (避免 stop_sniff 保存覆盖清除)
+    if (clearPollAfterSwitch) {
+      try { await sendCmd(Protocol.Enc.clrPoll(), 'CLRPOLL', 5000); } catch (e) { toast('清空 ds_poll 失败: ' + e.message); }
+    }
+    if (clearInferAfterSwitch) {
+      try { await sendCmd(Protocol.Enc.clrInfer(), 'CLRINFER', 5000); } catch (e) { toast('清空 ds_infer 失败: ' + e.message); }
+    }
     renderMode();
     await readHome();
     // sniff 模式: W:MODE 只是"起了业务并开始后台识别", 不是识别完成。
     // 真正的到位要等 pollDetect 拿到参数 —— 那之前总线上看到的还是
     // 错参数的乱码, 所以这里必须说清"还在识别", 别让用户以为已经在听了
     if (mode === 'sniff') {
+      // 2026-11: 进 sniff 前清推断表缓存, 避免显示上一轮/上一台设备的旧数据
+      S.infer = null;
+      S.inferNames = {};
+      S.inferPage = 1;
+      S.detected = null;
+      autoInferDone = '';
+      if (el.inferBody) el.inferBody.innerHTML = '';
+      if (el.detectHint) { el.detectHint.className = 'hint'; el.detectHint.textContent = '正在识别通讯参数…'; }
       status('已进入旁听，正在识别通讯参数（完成后自动开始旁听）…', true);
       // sniff 卡的 MQTT 连接/状态信息同步刷一次 (R:MQTT): 别让用户切进来
       // 看到的是上一次会话的残影, 后来有人点「刷新」才更新
@@ -1843,6 +1885,12 @@ function renderDetecting(st) {
 //---------------------------------------------------------------------
 // 列名(中文, 用户 Excel 看到的) -> 内部 key (跟 JSON 字段对齐, 走同样导入流程)
 const CSV_COLS = {
+  meta: [
+    ['工具', 'tool'],
+    ['版本', 'version'],
+    ['导出时间', 'exported'],
+    ['档位', 'mode']
+  ],
   serial: [
     ['波特率', 'baud'],
     ['数据位', 'databits'],
@@ -1851,7 +1899,6 @@ const CSV_COLS = {
     ['从机地址', 'slave'],
     ['轮询间隔ms', 'interval_ms'],
     ['响应超时ms', 'timeout_ms'],
-    // im-2: 加 server 列 (配置服务器url, 来自首页 fUrl 只读显示)
     ['服务器地址', 'server']
   ],
   registers: [
@@ -1870,7 +1917,10 @@ const CSV_COLS = {
     ['ClientID', 'client_id'],
     ['发布Topic', 'pub_topic'],
     ['订阅Topic', 'sub_topic'],
-    ['上报周期秒', 'interval_s']
+    ['上报周期秒', 'interval_s'],
+    ['会话保持', 'keep_session'],
+    ['自动档密码', 'auto_pass'],
+    ['手动档', 'manual_on']
   ]
 };
 function csvEscape(s) {
@@ -1901,11 +1951,14 @@ function parseCsvLine(line) {
   return cells;
 }
 function toCsv(data) {
-  const lines = [
-    '# VKBox 配置导出',
-    '# 导出时间: ' + new Date().toISOString(),
-    ''
-  ];
+  const lines = [];
+  if (data.meta) {
+    lines.push('[meta]');
+    const metaCols = CSV_COLS.meta;
+    lines.push(metaCols.map(c => csvEscape(c[0])).join(','));
+    lines.push(metaCols.map(c => csvEscape(data.meta[c[1]])).join(','));
+    lines.push('');
+  }
   lines.push('[serial]');
   const sCols = CSV_COLS.serial;
   lines.push(sCols.map(c => csvEscape(c[0])).join(','));
@@ -1926,11 +1979,43 @@ function toCsv(data) {
   lines.push(mCols.map(c => csvEscape(m[c[1]])).join(','));
   return lines.join('\n');
 }
+// sniff CSV 解析 (特殊格式, 无 [serial] 段, 只有寄存器数据)
+function parseSniffCsv(text) {
+  const lines = text.split(/\r?\n/);
+  const result = { serial: {}, registers: [], mqtt: {} };
+  let headerParsed = false;
+  for (let line of lines) {
+    line = line.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (!headerParsed) {
+      // 第一行非注释行是表头, 跳过
+      headerParsed = true;
+      continue;
+    }
+    // 数据行: 序号,寄存器地址,数量,功能码,出现次数,推断类型,置信度,最新值,参数名称,建议标识符
+    const cells = parseCsvLine(line);
+    if (cells.length >= 9) {
+      result.registers.push({
+        addr: cells[1],
+        count: cells[2],
+        fc: cells[3],
+        hits: cells[4],
+        dtype: cells[5],
+        conf: cells[6],
+        value: cells[7],
+        name: cells[8],
+        id: cells[9] || ''
+      });
+    }
+  }
+  return result;
+}
+
 function parseCsv(text) {
   const lines = text.split(/\r?\n/);
   let section = null;
   let headers = null;
-  const result = { serial: {}, registers: [], mqtt: {} };
+  const result = { meta: {}, serial: {}, registers: [], mqtt: {} };
   for (let line of lines) {
     line = line.trim();
     if (!line || line.startsWith('#')) continue;
@@ -1942,7 +2027,10 @@ function parseCsv(text) {
     if (!section) continue;
     const cells = parseCsvLine(line);
     if (!headers) { headers = cells; continue; }
-    if (section === 'serial') {
+    if (section === 'meta') {
+      const cols = CSV_COLS.meta;
+      for (let i = 0; i < cols.length; i++) result.meta[cols[i][1]] = cells[i] || '';
+    } else if (section === 'serial') {
       const cols = CSV_COLS.serial;
       for (let i = 0; i < cols.length; i++) result.serial[cols[i][1]] = cells[i] || '';
     } else if (section === 'registers') {
@@ -1999,7 +2087,13 @@ function exportCfgAsCsv(pre) {
   if (pre === undefined) pre = cfgPrefix();
   const c = collectCfg(pre);
   if (!c.ok) { toast('当前表单配置无效，无法导出：' + c.err); return; }
-  // 抽 11 MQTT 字段 (跟 JSON 一样, 内部用 JSON 字段名)
+  const exported = new Date().toISOString();
+  const meta = {
+    tool: 'VKBox 配置工具',
+    version: window.__APP_VERSION__ || 'unknown',
+    exported: exported,
+    mode: S.mode || 'manual'
+  };
   const m = {
     host: E(pre, 'mqHost').value.trim(),
     port: parseInt(E(pre, 'mqPort').value, 10) || 1883,
@@ -2010,20 +2104,19 @@ function exportCfgAsCsv(pre) {
     pub_topic: E(pre, 'mqPub').value.trim(),
     sub_topic: E(pre, 'mqSub').value.trim(),
     interval_s: parseInt(E(pre, 'mqInterval').value, 10) || 0,
-    keep_session: E(pre, 'mqKeepSession').value === '1'
+    keep_session: E(pre, 'mqKeepSession').value === '1',
+    auto_pass: (S.mqtt && S.mqtt.auto_pass) || '',
+    manual_on: S.mqManual
   };
-  // CSV 不存 keep_session / auto.pass / manual_on, 注释里说明
   const csv = toCsv({
+    meta: meta,
     serial: c.cfg,
     registers: collectRegs(pre),
     mqtt: m
   });
-  // 头部注释: 手动档额外字段
-  const headerNote = '# mode=' + (S.mode || 'manual') + ', manual_on=' + S.mqManual + ', keep_session=' + m.keep_session + '\n';
-  // 2h fix: 加 UTF-8 BOM (\uFEFF), Excel 看到 BOM 自动用 UTF-8 解码, 中文不乱码
-  // type 也加 charset=utf-8, 让其他工具 (LibreOffice/VSCode) 也能正确识别
-  const blob = new Blob(['\uFEFF' + headerNote + csv], { type: 'text/csv;charset=utf-8' });
-  downloadBlob(blob, 'VKBoxLite-' + (S.mode || 'manual') + '-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '.csv');
+  const header = '# VKBox 配置导出\n# 导出时间: ' + exported + '\n';
+  const blob = new Blob(['\uFEFF' + header + csv], { type: 'text/csv;charset=utf-8' });
+  downloadBlob(blob, 'VKBoxLite-' + (S.mode || 'manual') + '-' + exported.slice(0,10).replace(/-/g,'') + '.csv');
   toast('配置已导出为 CSV');
 }
 function downloadBlob(blob, name) {
@@ -2034,9 +2127,13 @@ function downloadBlob(blob, name) {
   URL.revokeObjectURL(a.href);
 }
 
+// CSV 导入时所有值都是字符串, 需要转布尔/数值
+function csvToBool(v) { return v === true || v === 'true' || v === '1'; }
+function csvToInt(v, fallback) { const n = parseInt(v, 10); return isNaN(n) ? fallback : n; }
+
 // 内部统一: 把 {serial, registers, mqtt} 数据填到当前 tab
 // export 走 exportCfgAsJson/Csv, import 走 applyParsedData
-function applyParsedData(pre, d) {
+function applyParsedData(pre, d, importMqtt) {
   const c = d.serial || d.cfg || {};
   if (c.baud) E(pre, 'selBaud').value = String(c.baud);
   if (c.databits) setRadio('databits', String(c.databits), pre);
@@ -2049,21 +2146,28 @@ function applyParsedData(pre, d) {
   const regs = d.registers || d.regs || [];
   S.regs = toArr(regs);
   renderRegTable(pre);
-  if (d.mqtt) {
-    E(pre, 'mqHost').value = d.mqtt.host || '';
-    E(pre, 'mqPort').value = d.mqtt.port || 1883;
-    E(pre, 'mqSsl').checked = !!d.mqtt.ssl;
-    E(pre, 'mqUser').value = d.mqtt.user || '';
-    E(pre, 'mqPass').value = d.mqtt.pass || '';
-    E(pre, 'mqClientId').value = d.mqtt.client_id || '';
-    // 发布/订阅 topic：手动档专属，导入时一并带进来
-    E(pre, 'mqPub').value = d.mqtt.pub_topic || '';
-    E(pre, 'mqSub').value = d.mqtt.sub_topic || '';
-    E(pre, 'mqInterval').value = d.mqtt.interval_s != null ? d.mqtt.interval_s : 120;
-    E(pre, 'mqKeepSession').value = d.mqtt.keep_session ? '1' : '0';
-    // 自动档凭证密码回首页那个框；档次按钮按导入的 manual_on 切
-    if (el.hMqPass && d.mqtt.auto) el.hMqPass.value = d.mqtt.auto.pass || '';
-    setManualMode(!!d.mqtt.manual_on, { refill: true });
+  if (importMqtt && d.mqtt) {
+    const m = d.mqtt;
+    console.log('[applyParsedData] MQTT data received:', m);
+    // 检查 MQTT 数据是否有效
+    const hasMqttData = m.host || m.port || m.user || m.pass || m.client_id || m.pub_topic || m.sub_topic;
+    console.log('[applyParsedData] hasMqttData:', hasMqttData);
+    if (hasMqttData) {
+      E(pre, 'mqHost').value = m.host || '';
+      E(pre, 'mqPort').value = csvToInt(m.port, 1883);
+      E(pre, 'mqSsl').checked = csvToBool(m.ssl);
+      E(pre, 'mqUser').value = m.user || '';
+      E(pre, 'mqPass').value = m.pass || '';
+      E(pre, 'mqClientId').value = m.client_id || '';
+      E(pre, 'mqPub').value = m.pub_topic || '';
+      E(pre, 'mqSub').value = m.sub_topic || '';
+      E(pre, 'mqInterval').value = csvToInt(m.interval_s, 120);
+      E(pre, 'mqKeepSession').value = csvToBool(m.keep_session) ? '1' : '0';
+      const autoPass = (m.auto && m.auto.pass) || m.auto_pass || '';
+      if (el.hMqPass) el.hMqPass.value = autoPass;
+      setManualMode(csvToBool(m.manual_on), { refill: true });
+      toast('MQTT 配置已导入');
+    }
   }
   return regs.length;
 }
@@ -2225,7 +2329,7 @@ function exportSniffAsCsv() {
     toast('推断表为空，无法导出');
     return;
   }
-  const lines = ['# VKBox Sniff 推断表导出', '# mode=sniff', '# 导出时间：' + new Date().toISOString(), '# 共 ' + regs.length + ' 条', '序号，寄存器地址，数量，功能码，出现次数，推断类型，置信度，最新值，参数名称，建议标识符'];
+  const lines = ['# VKBox Sniff 推断表导出', '# mode=sniff', '# 导出时间：' + new Date().toISOString(), '# 共 ' + regs.length + ' 条', '序号,寄存器地址,数量,功能码,出现次数,推断类型,置信度,最新值,参数名称,建议标识符'];
   regs.forEach((r, i) => {
     const width = inferWidth(r.dtype);
     const fc = r.fc != null ? '0x' + r.fc.toString(16).padStart(2, '0').toUpperCase() : '?';
@@ -2243,13 +2347,29 @@ function exportSniffAsCsv() {
   toast('推断表已导出为 CSV (' + regs.length + ' 条)');
 }
 
+// sniff regs → 标准 registers (导入时转换，导出格式不变)
+function convertSniffRegs(regs) {
+  const DTYPE_COUNT = {
+    'uint16': 1, 'int16': 1,
+    'uint32': 2, 'int32': 2, 'float': 2,
+    'uint64': 4, 'int64': 4, 'double': 4
+  };
+  return regs.map(r => ({
+    addr: r.addr,
+    dtype: r.dtype || 'uint16',
+    count: DTYPE_COUNT[r.dtype] || 1,
+    name: r.name || ('reg' + r.addr),
+    alias: r.id || ''
+  }));
+}
+
 // 2h importCfg: 文件选择框 (filter .json,.csv), 选完按扩展名 dispatch
-// 平台档已被 syncTabs 禁用 btnImport, 此处不需再检查 isPlatform
-// im-2: sniff 档也禁用导入, sniff 档无表单可填, 导入会丢数据
+// 只允许 manual 档导入，其他档按钮已禁用
 async function importCfg(pre) {
   if (pre === undefined) pre = cfgPrefix();
-  if (S.mode === 'sniff') {
-    toast('sniff 档无表单可导入, 请切到手动档再导入');
+  // 只允许 manual 档导入
+  if (S.mode !== 'manual') {
+    toast('只有手动档可以导入配置，请先切到手动档');
     return;
   }
   // 先问再弹文件选择框：顺序反了的话用户选完文件才被告知会丢改动，白选一趟
@@ -2281,39 +2401,65 @@ async function importCfg(pre) {
           } else if (t.indexOf('[serial]') >= 0) {
             data = parseCsv(text);
             fmt = 'CSV';
+          } else if (t.indexOf('# mode=sniff') >= 0) {
+            // sniff CSV 格式 (特殊格式, 无 [serial] 段)
+            data = parseSniffCsv(text);
+            fmt = 'CSV';
+            data.mode = 'sniff';  // 标记为 sniff 模式
           } else {
             throw new Error('无法识别格式');
           }
         }
-        // im-5 6b: JSON 导入时做版本校验 (major version 不同拒绝, minor/patch 兼容)
-        //   - 没 version 字段 (老格式): 接受, 兼容
-        //   - major 相同 (1.0.0 / 1.0.1): 接受; 1.x 与 2.x 互导也放行(版本重置, 导出格式一致)
-        //   - 别的 major (3.x+): 拒绝 + 提示
-        //   - CSV 不校验 (CSV 没 version 字段)
-        if (fmt === 'JSON') {
+        // 版本校验：不兼容时提示确认而非直接拒绝
+        const impVer = data.version || (data.meta && data.meta.version);
+        if (impVer != null) {
           const cur = (window.__APP_VERSION__ || 'unknown');
-          if (data.version != null) {
-            const curMajor = String(cur).split('.')[0];
-            const impMajor = String(data.version).split('.')[0];
-            // 1.0.0 是【版本重置】(从 2.x 回到 1.0), 导出格式跟 2.x 完全一样,
-            // 所以 1.x 与 2.x 的配置互导都该放行; 别的 major(3.x+) 才算不兼容
-            const compatible = (curMajor === impMajor)
-              || (curMajor === '1' && impMajor === '2')
-              || (curMajor === '2' && impMajor === '1');
-            if (!compatible) {
-              throw new Error('版本不兼容 (导入 v' + data.version + ', 当前 v' + cur + ')');
-            }
-          }
-        }
-        // 校验 mode 字段（新增）
-        if (fmt === 'JSON' && data.mode != null && data.mode !== S.mode) {
-          if (!await askConfirm('导入文件的档位 (' + data.mode + ') 与当前档位 (' + S.mode + ') 不一致，是否继续导入？')) {
+          const curMajor = String(cur).split('.')[0];
+          const impMajor = String(impVer).split('.')[0];
+          const compatible = (curMajor === impMajor)
+            || (curMajor === '1' && impMajor === '2')
+            || (curMajor === '2' && impMajor === '1');
+          if (!compatible && !await askConfirm('导入文件版本 (v' + impVer + ') 与当前版本 (v' + cur + ') 不一致，可能不兼容。是否继续？')) {
             return;
           }
         }
-        const cnt = applyParsedData(pre, data);
+        // 档位来源提示
+        const impMode = data.mode || (data.meta && data.meta.mode);
+        console.log('[importCfg] 解析结果:', { fmt, data, impMode });
+        console.log('[importCfg] data.meta:', data.meta);
+        console.log('[importCfg] data.mqtt:', data.mqtt);
+        if (impMode != null && impMode !== 'manual') {
+          const msg = impMode === 'sniff'
+            ? '导入的配置来自 sniff 档，寄存器表将按手动档格式导入，是否继续？'
+            : '导入的配置来自 ' + impMode + ' 档，是否继续？';
+          if (!await askConfirm(msg)) return;
+        }
+        // sniff 格式转换 (JSON 用 data.regs, CSV 用 data.registers 但可能含 sniff 额外字段)
+        if (impMode === 'sniff') {
+          if (data.regs && !data.registers) {
+            // JSON 格式 sniff 导出
+            data.registers = convertSniffRegs(data.regs);
+          } else if (data.registers && data.registers.length > 0 && data.registers[0].fc !== undefined) {
+            // CSV 格式 sniff 导出 (registers 数组含 sniff 额外字段 fc/hits/conf/value/inferred)
+            data.registers = convertSniffRegs(data.registers);
+          }
+        }
+        // manual 档才导入 MQTT 配置，platform/sniff 档只导入串口和寄存器
+        const importMqtt = (impMode === 'manual' || impMode == null);
+        const cnt = applyParsedData(pre, data, importMqtt);
         toast('配置已导入 (' + fmt + ')：' + cnt + ' 个寄存器');
+        // 点位表为空时不保存，提示用户
+        if (cnt === 0) {
+          toast('点位表为空，未保存到设备');
+          return;
+        }
         snapClean(pre);                // 导入的内容成为新基线
+        // 自动保存到设备 (串口配置 + MQTT 配置)
+        await saveCfg();
+        // 只有 manual 档导入时才保存 MQTT 配置
+        if (importMqtt && data.mqtt && (data.mqtt.host || data.mqtt.port || data.mqtt.user || data.mqtt.pass)) {
+          await saveMqtt();
+        }
       } catch (e) {
         toast('导入失败：不是合法的配置文件 (' + e.message + ')');
       }
@@ -2618,7 +2764,21 @@ if (el.btnHomeMqttPassEye) el.btnHomeMqttPassEye.onclick = togglePassEye;
 // 报文页 (sniff-3 f: 重新分配按钮绑定)
 //   btnFrameRefresh/btnFrameClear 在总线报文子分段, 绑 frameLog
 //   btnInferRefresh/btnInferClear 在 sniff嗅探 panel-title (刷新=重推一轮, 清空=推断表还原)
-if (el.btnInferRefresh) el.btnInferRefresh.onclick = doInfer;
+// 2026-11: 刷新同时更新识别状态, 否则"从站未观测到"要切 tab 才变
+if (el.btnInferRefresh) el.btnInferRefresh.onclick = async () => {
+  await doInfer();
+  // 刷新识别状态 (R:AUTODETECT 非阻塞, 只读当前结果)
+  try {
+    const r = await sendCmd('R:AUTODETECT', 'AUTODETECT', 3000);
+    const d = r.data;
+    if (d && d.baud != null) {
+      S.detected = { baud: d.baud, databits: d.databits, parity: d.parity, stopbits: d.stopbits };
+      renderDetected();
+    }
+  } catch (e) {
+    // 识别中或无结果, 忽略
+  }
+};
 // 12-fix-9: 推断表翻页
 if (el.btnInferPrev) el.btnInferPrev.onclick = () => gotoInferPage((S.inferPage || 1) - 1);
 if (el.btnInferNext) el.btnInferNext.onclick = () => gotoInferPage((S.inferPage || 1) + 1);
@@ -2737,7 +2897,13 @@ function activateTab(tabId) {
   //   时不读 ds_poll, 点表信息一直是空的。手动档是本地配 (ds_poll),
   //   一样需要 activateTab 时读一次填表单
   if ((tabId === 'tabManual' || tabId === 'tabPlatform') && S.open) {
-    if (isManual(S.mode) || isPlatform(S.mode)) readCfgSilent();
+    if (isManual(S.mode) || isPlatform(S.mode)) {
+      const tabKey = tabId === 'tabManual' ? 'm' : 'p';
+      if (!S['cfgRead_' + tabKey]) {
+        S['cfgRead_' + tabKey] = true;
+        readCfgSilent();
+      }
+    }
   }
   // Step 2n: 切 tab 时重取 mqSnap 基线。理由: mqSnap 走 E(pre, 'mqXxx'),
   // 不同档位取不同 input, 切档时新旧基线如果不重取会误报 dirty
@@ -2747,7 +2913,42 @@ function activateTab(tabId) {
 
 const tabItems = document.querySelectorAll('.tab-header .tab-item');
 tabItems.forEach(item => {
-  item.onclick = function () {
+  item.onclick = async function () {
+    // 切换标签页前检查是否有未保存的更改
+    const currentTab = document.querySelector('.tab-header .tab-item.active');
+    if (currentTab) {
+      const currentTabId = currentTab.getAttribute('data-tab');
+      const targetTabId = this.getAttribute('data-tab');
+      console.log('[tabSwitch] 当前标签:', currentTabId, '目标标签:', targetTabId, 'cfgDirty:', S.cfgDirty, 'mqDirty:', S.mqDirty);
+      // 485 配置脏检查 (manual/platform 标签页)
+      if ((currentTabId === 'tabManual' || currentTabId === 'tabPlatform') && S.cfgDirty) {
+        const ok = await askConfirm(
+          '485 配置有未保存的更改，是否先保存？',
+          '有未保存的更改');
+        if (ok) {
+          // 用户选择保存，执行保存操作
+          await saveCfg();
+        } else {
+          // 用户选择取消，清除脏状态（放弃修改）
+          S.cfgSnap = cfgSnap();
+          refreshCfgDirty();
+        }
+      }
+      // MQTT 配置脏检查 (manual/platform 标签页的 MQTT 子面板)
+      if ((currentTabId === 'tabManual' || currentTabId === 'tabPlatform') && S.mqDirty) {
+        const ok = await askConfirm(
+          'MQTT 配置有未保存的更改，是否先保存？',
+          '有未保存的更改');
+        if (ok) {
+          // 用户选择保存，执行保存操作
+          await saveMqtt();
+        } else {
+          // 用户选择取消，清除脏状态（放弃修改）
+          S.mqSnap = mqSnap();
+          refreshMqDirty();
+        }
+      }
+    }
     activateTab(this.getAttribute('data-tab'));
   };
 });
@@ -2758,10 +2959,43 @@ tabItems.forEach(item => {
 // 切到 manual/platform tab 时会拿错 pane。改成在当前 .tab-pane 作用域内找
 const serialTabs = document.querySelectorAll('.serial-tab');
 serialTabs.forEach(tab => {
-  tab.onclick = () => {
+  tab.onclick = async () => {
     // 当前 .serial-tab 在哪个 .tab-pane 下面 — click 时离它最近的那个
     const tabPane = tab.closest('.tab-pane');
     if (!tabPane) return;
+    const targetKey = tab.getAttribute('data-serial'); // s1 / s2
+    // 获取当前激活的子标签
+    const currentSerialTab = tabPane.querySelector('.serial-tab.active');
+    const currentKey = currentSerialTab ? currentSerialTab.getAttribute('data-serial') : 's1';
+    console.log('[serialTabSwitch] 当前子标签:', currentKey, '目标子标签:', targetKey, 'cfgDirty:', S.cfgDirty, 'mqDirty:', S.mqDirty);
+    // 从 485 总线 (s1) 切换到 MQTT 配置 (s2) 时，检查 485 配置脏状态
+    if (currentKey === 's1' && targetKey === 's2' && S.cfgDirty) {
+      const ok = await askConfirm(
+        '485 配置有未保存的更改，是否先保存？',
+        '有未保存的更改');
+      if (ok) {
+        // 用户选择保存，执行保存操作
+        await saveCfg();
+      } else {
+        // 用户选择取消，清除脏状态（放弃修改）
+        S.cfgSnap = cfgSnap();
+        refreshCfgDirty();
+      }
+    }
+    // 从 MQTT 配置 (s2) 切换到 485 总线 (s1) 时，检查 MQTT 配置脏状态
+    if (currentKey === 's2' && targetKey === 's1' && S.mqDirty) {
+      const ok = await askConfirm(
+        'MQTT 配置有未保存的更改，是否先保存？',
+        '有未保存的更改');
+      if (ok) {
+        // 用户选择保存，执行保存操作
+        await saveMqtt();
+      } else {
+        // 用户选择取消，清除脏状态（放弃修改）
+        S.mqSnap = mqSnap();
+        refreshMqDirty();
+      }
+    }
     const tabId = tabPane.id;                    // tabManual / tabPlatform / tabPoll
     const prefix = tabId === 'tabManual' ? 'm-' :
                    tabId === 'tabPlatform' ? 'p-' : '';
@@ -2794,7 +3028,14 @@ setManualMode(S.mqManual);
 //    浏览器预览模式下所有指令都等不到应答（必然超时）。
 if (window.serial) {
   window.serial.onLine(onSerialLine);
-  window.serial.onClosed(() => { stopAutoRefresh(); setPortState(false, ''); status('串口已断开', false); });
+  window.serial.onClosed(() => {
+    stopAutoRefresh();
+    setPortState(false, '');
+    // 2026-11: 串口断开时清空 cfgRead 标记, 重连后会自动重新读取配置
+    S.cfgRead_m = false;
+    S.cfgRead_p = false;
+    status('串口已断开', false);
+  });
   window.serial.onError(m => { status('串口错误：' + m, false); });
 } else {
   // mock：模拟设备应答，便于浏览器里联调界面
