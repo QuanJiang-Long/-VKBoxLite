@@ -1085,6 +1085,13 @@ async function applyMode(mode) {
     }
     renderMode();
     await readHome();
+    // 2026-11: 切档后清寄存器表缓存，避免显示旧模式的配置
+    // manual/platform 互切时，S.regs 还留着上一份，要等 readCfg 填
+    S.regs = [];
+    ['m', 'p'].forEach(pre => {
+      const tbody = E(pre, 'paramTbody');
+      if (tbody) tbody.innerHTML = '';
+    });
     // sniff 模式: W:MODE 只是"起了业务并开始后台识别", 不是识别完成。
     // 真正的到位要等 pollDetect 拿到参数 —— 那之前总线上看到的还是
     // 错参数的乱码, 所以这里必须说清"还在识别", 别让用户以为已经在听了
