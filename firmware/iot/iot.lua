@@ -2631,6 +2631,31 @@ local function task_main()
                 S.topo_fail_at = nil
             end
             end  -- if pub_platform end
+
+            -- 2026-11: sniff + 手动 MQTT 也要发拓扑。
+            --   should_pub_topo() 已返回 true (sniff 模式), 但拓扑发送在
+            --   if pub_platform 块内，手动 MQTT 时 pub_platform=false 进不去。
+            --   这里补一个独立块：sniff 模式 + 手动 MQTT 时发拓扑，让
+            --   S.topo_ack_props 被设置，U4 数据才能发出去。
+            if should_pub_topo() and mqttcfg.load().manual_on then
+                if pubsched.due("topo", cfg.TOPO_REBUILD_MS / 1000) then
+                    local sig, parts, pids = topo_sig()
+                    if sig and sig ~= S.topo_sig then
+                        local pok, sent, e = pcall(send_topo, parts)
+                        if pok and sent then
+                            S.topo_ack_props = S.topo_ack_props or {}
+                            for _, id in ipairs(pids) do
+                                S.topo_ack_props[id] = true
+                            end
+                            S.topo_sent_at = os.clock()
+                            log.info("iot", "topo posted (manual mqtt): props=" .. #pids)
+                        else
+                            S.topo_fail_at = os.clock()
+                            S.topo_fail_n = (S.topo_fail_n or 0) + 1
+                        end
+                    end
+                end
+            end
             -- 12-fix-4: 每 30 秒一行结构普查(见 census() 上面的说明)
             if (os.clock() - (S.census_at or -1e9)) >= 30 then
                 S.census_at = os.clock()
