@@ -234,6 +234,14 @@ function M.switch_mode(mode, from_boot)
                     stopbits = c.stopbits,
                     parity = c.parity,
                 }
+                -- 2026-11: 设置 detect_result, 让前端显示"已识别：19200 / 8 数据位..."
+                _G.mon_detect_result = {
+                    baud = c.baud,
+                    databits = c.databits or 8,
+                    stopbits = c.stopbits or 1,
+                    parity = c.parity or 0,
+                    fallback = false,
+                }
                 log.info("ctrl", "sniff: loaded ds_infer, skip detect, baud=" .. tostring(c.baud))
             end
         end
