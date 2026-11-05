@@ -949,6 +949,12 @@ function M.restart_detect()
     if not running then return false, "not running" end
     collector.clear_all()
     tried = {}   -- 12-fix-2: 用户主动重来 = 从头扫, 候选记忆清零
+    -- 2026-11: 清推断表 (旧行的 name/id 是上一轮的, 不能带到新一轮)
+    infer_acc = {}
+    infer_order = {}
+    infer_dirty = true
+    merged_addrs = {}
+    _G.mon_detect_result = nil
     return M.request_detect()
 end
 
