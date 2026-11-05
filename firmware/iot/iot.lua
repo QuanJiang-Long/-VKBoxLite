@@ -314,16 +314,25 @@ function M.attach_names(inf)
     local names = {}
     for _, a in ipairs(inf.regs) do
         local k = "reg" .. tostring(a.addr or "")
-        local sa = smap[k]
         local id, name
-        if sa then
-            local sid = sa.id or ""
-            local snm = sa.name or ""
-            id = (sid ~= "") and sid or k
-            name = (snm ~= "") and snm or id
+        -- 2026-11: 优先用推断表行里的 name/id (持久化到 ds_infer 的)
+        local rowName = a.name or ""
+        local rowId = a.id or ""
+        if rowName ~= "" or rowId ~= "" then
+            id = (rowId ~= "") and rowId or k
+            name = (rowName ~= "") and rowName or id
         else
-            id = k
-            name = amap[k] or k   -- 没配 alias 时 = 本身, 与 U4 上报完全一致
+            -- fallback: 从 ds_alias 读
+            local sa = smap[k]
+            if sa then
+                local sid = sa.id or ""
+                local snm = sa.name or ""
+                id = (sid ~= "") and sid or k
+                name = (snm ~= "") and snm or id
+            else
+                id = k
+                name = amap[k] or k   -- 没配 alias 时 = 本身, 与 U4 上报完全一致
+            end
         end
         -- 只有跟默认值不一样才登记 —— 默认值前端自己就能补(reg<addr>)
         if id ~= k or name ~= k then
@@ -873,6 +882,8 @@ local function build_topo(only_ids, max_props, skip_ids)
     for i = 1, #parts do parts[i] = nil end
     for i = 1, #prop_ids do prop_ids[i] = nil end
     if mode == "sniff" then
+        -- 2026-11: sniff 持久化后, 推断表行里自带 name/id, 不再查 alias_map
+        -- 优先用行里的 name/id, 没有则回退到 alias_map (兼容旧数据)
         local smap = cfgstore.alias_map()
         -- 分组: slave → { addrs = {}, props = {} }
         local groups, gorder = {}, {}
@@ -888,15 +899,20 @@ local function build_topo(only_ids, max_props, skip_ids)
         -- ① 旁听推断出来的行(直接引用, 不复制)
         for _, r in ipairs((mon.infer() or {}).regs or {}) do
             local g = group_of(r.slave)
-            -- 别名表命中: id/name 用用户起的; 没命中还是 reg<addr>
-            local sa = smap["reg" .. tostring(r.addr or "")]
+            -- 2026-11: 优先用行里的 name/id (持久化加载的), 否则查别名表, 最后回退 reg<addr>
             local id, nm
-            if sa then
-                id = (sa.id ~= "" and sa.id) or ("reg" .. tostring(r.addr or ""))
-                nm = (sa.name ~= "" and sa.name) or id
+            if r.id and r.id ~= "" then
+                id = r.id
+                nm = (r.name and r.name ~= "") and r.name or id
             else
-                id = "reg" .. tostring(r.addr or "")
-                nm = id
+                local sa = smap["reg" .. tostring(r.addr or "")]
+                if sa then
+                    id = (sa.id ~= "" and sa.id) or ("reg" .. tostring(r.addr or ""))
+                    nm = (sa.name ~= "" and sa.name) or id
+                else
+                    id = "reg" .. tostring(r.addr or "")
+                    nm = id
+                end
             end
             -- ⚠️ dtype 口径保持原样(12-fix-11 不动它): 原来这里读的是
             --   r.dtype_summary —— 12-fix-6 把推断表改成累加器之后, 行里

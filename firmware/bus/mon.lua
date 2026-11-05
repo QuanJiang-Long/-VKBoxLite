@@ -1122,18 +1122,14 @@ end
 
 -- 2026-11: 更新单行 name/id (W:SALIAS 调用, 同步到内存推断表)
 function M.update_row_name(addr, name, id)
-    log.info("mon", "update_row_name called: addr=" .. tostring(addr) .. " name=" .. tostring(name) .. " id=" .. tostring(id))
-    for i, a in ipairs(infer_order) do
-        log.info("mon", "  checking row " .. i .. ": addr=" .. tostring(a.addr) .. " (type=" .. type(a.addr) .. ") vs target=" .. tostring(addr) .. " (type=" .. type(addr) .. ")")
+    for _, a in ipairs(infer_order) do
         if a.addr == addr then
             a.name = name or ""
             a.id = id or ""
             infer_dirty = true
-            log.info("mon", "  updated row " .. i)
             return true
         end
     end
-    log.warn("mon", "update_row_name: addr=" .. tostring(addr) .. " not found in infer_order (rows=" .. #infer_order .. ")")
     return false
 end
 
