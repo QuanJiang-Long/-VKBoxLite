@@ -364,6 +364,30 @@ local function reg_cmds()
     end)
 
 
+
+
+    M.reg("W:CLRINFER", function()
+        if not cfgstore then return M.reply("RET:FAIL:CLRINFER:cfgstore 不可用") end
+        local ok, err, wrote = cfgstore.clear_infer()
+        if not ok then return M.reply("RET:FAIL:CLRINFER:" .. tostring(err)) end
+        log.info("cmd", string.format("W:CLRINFER cleared=%s", tostring(wrote)))
+        if wrote then return M.reply("RET:CLRINFER=OK;cleared:sniff 推断表")
+        else return M.reply("RET:CLRINFER=OK;cleared:") end
+    end)
+
+
+
+
+    M.reg("W:CLRPOLL", function()
+        if not cfgstore then return M.reply("RET:FAIL:CLRPOLL:cfgstore 不可用") end
+        local ok, err, wrote = cfgstore.clear_poll()
+        if not ok then return M.reply("RET:FAIL:CLRPOLL:" .. tostring(err)) end
+        log.info("cmd", string.format("W:CLRPOLL cleared=%s", tostring(wrote)))
+        if wrote then return M.reply("RET:CLRPOLL=OK;cleared:manual 配置")
+        else return M.reply("RET:CLRPOLL=OK;cleared:") end
+    end)
+
+
     M.reg("R:MQTT", function()
         local e = mqtt_cfg.effective(device_id_str())
         reply_json("RET:MQTT=", jencode({
@@ -399,11 +423,42 @@ local function reg_cmds()
         M.reply("RET:REPORT=OK")
     end)
 
+
+
+
+
+
     M.reg("W:BOOTMODE", function(arg)
-        local m = trim(arg)
+        local m = trim(arg):lower()
         local ok, err = cfgstore.save_sys({ boot_mode = m })
         if not ok then return M.reply("RET:FAIL:BOOTMODE:" .. tostring(err)) end
-        M.reply("RET:BOOTMODE=OK")
+
+        local cleared = {}
+        if m == MODE_MANUAL then
+
+            local ok1, _, w1 = cfgstore.clear_pull()
+            if ok1 and w1 then cleared[#cleared + 1] = "platform" end
+            local ok2, _, w2 = cfgstore.clear_infer()
+            if ok2 and w2 then cleared[#cleared + 1] = "sniff" end
+        elseif m == MODE_PLATFORM then
+
+            local ok1, _, w1 = cfgstore.clear_poll()
+            if ok1 and w1 then cleared[#cleared + 1] = "manual" end
+            local ok2, _, w2 = cfgstore.clear_infer()
+            if ok2 and w2 then cleared[#cleared + 1] = "sniff" end
+        elseif m == MODE_SNIFF then
+
+            local ok1, _, w1 = cfgstore.clear_poll()
+            if ok1 and w1 then cleared[#cleared + 1] = "manual" end
+            local ok2, _, w2 = cfgstore.clear_pull()
+            if ok2 and w2 then cleared[#cleared + 1] = "platform" end
+        end
+
+        if #cleared > 0 then
+            M.reply("RET:BOOTMODE=OK;cleared:" .. table.concat(cleared, "+"))
+        else
+            M.reply("RET:BOOTMODE=OK")
+        end
     end)
 
 
@@ -422,6 +477,11 @@ local function reg_cmds()
         end
         local ok, err = cfgstore.set_alias(key, s(t.id), s(t.name))
         if not ok then return M.reply("RET:FAIL:SALIAS:" .. tostring(err)) end
+
+        local addr = tonumber(key:match("^reg(%d+)$"))
+        if addr and mon.update_row_name then
+            pcall(mon.update_row_name, addr, s(t.name), s(t.id), s(t.dtype))
+        end
         M.reply("RET:SALIAS=OK")
     end)
 
@@ -501,6 +561,7 @@ local function reg_cmds()
 
 
 
+
     M.reg("R:AUTODETECT", function(arg)
         if arg == "restart" then
             if not mon.is_running() then
@@ -509,6 +570,8 @@ local function reg_cmds()
 
 
             if cfgstore and cfgstore.clear_alias then pcall(cfgstore.clear_alias) end
+
+            if cfgstore and cfgstore.clear_infer then pcall(cfgstore.clear_infer) end
             local ok, err = mon.restart_detect()
             if not ok then
                 return M.reply("RET:FAIL:AUTODETECT:" .. tostring(err))

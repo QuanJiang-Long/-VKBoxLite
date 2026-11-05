@@ -67,10 +67,51 @@ end
 
 
 
+
+
 local function stop_sniff()
     if not mon.is_running() then return end
+
+    local save_data = nil
+    if cfgstore and mon.infer then
+        local infer_data = mon.infer(true)  -- force=true 取最新值
+        local detect_result = mon.detect_result()
+        if infer_data and infer_data.regs and #infer_data.regs > 0 and detect_result then
+            save_data = {
+                baud = detect_result.baud,
+                databits = detect_result.databits or 8,
+                stopbits = detect_result.stopbits or 1,
+                parity = detect_result.parity or 0,
+                slave = 1,
+                regs = {},
+            }
+            for _, r in ipairs(infer_data.regs) do
+                save_data.regs[#save_data.regs + 1] = {
+                    addr = r.addr,
+                    count = r.count or 1,
+                    fc = r.fc or 3,
+                    dtype = r.dtype or "uint16",
+                    name = r.name or "",
+                    id = r.id or "",
+                }
+            end
+        end
+    end
+
+    if mon.stop_auto_save then mon.stop_auto_save() end
     mon.stop()
     if cfgstore and cfgstore.clear_alias then pcall(cfgstore.clear_alias) end
+
+    if save_data and sys then
+        sys.taskInit(function()
+            local ok, err = cfgstore.save_infer(save_data)
+            if ok then
+                log.info("ctrl", "sniff: async saved infer table, regs=" .. #save_data.regs)
+            else
+                log.warn("ctrl", "sniff: async save ds_infer failed: " .. tostring(err))
+            end
+        end)
+    end
 end
 
 function M.switch_mode(mode, from_boot)
@@ -131,6 +172,12 @@ function M.switch_mode(mode, from_boot)
         end
         if have_cfg then
 
+            local cfg = (slot == SLOT_PULL) and cfgstore.load_pull() or cfgstore.load_poll()
+            if cfg and pm then
+                local n, err = cfgstore.normalize_poll(cfg)
+                if n then pm.apply_cfg(n) end
+            end
+
             if not (pm and pm.start(slot)) then return false, "FAIL poll start" end
         else
             log.info("ctrl", string.format(
@@ -176,6 +223,24 @@ function M.switch_mode(mode, from_boot)
 
 
 
+        local infer_cfg = cfgstore and cfgstore.has_infer_cfg and cfgstore.has_infer_cfg()
+        local start_params = nil
+        if infer_cfg then
+            local c = cfgstore.load_infer()
+            if c and c.regs and #c.regs > 0 then
+                start_params = {
+                    baud = c.baud,
+                    databits = c.databits,
+                    stopbits = c.stopbits,
+                    parity = c.parity,
+                }
+                log.info("ctrl", "sniff: loaded ds_infer, skip detect, baud=" .. tostring(c.baud))
+            end
+        end
+
+
+
+
         if cfgstore and cfgstore.clear_alias then pcall(cfgstore.clear_alias) end
 
 
@@ -187,17 +252,39 @@ function M.switch_mode(mode, from_boot)
 
 
         if iot then pcall(iot.set_manual, false) end
-        if mon.start() then
+
+        if mon.start(start_params) then
+
+            if mon.start_auto_save then mon.start_auto_save() end
+            if start_params then
 
 
 
-            mon.request_detect()
+                local c = cfgstore.load_infer()
+                if c then
+                    _G.mon_detect_result = {
+                        baud = c.baud,
+                        databits = c.databits or 8,
+                        stopbits = c.stopbits or 1,
+                        parity = c.parity or 0,
+                        fallback = false,
+                    }
+                end
 
+                if iot then pcall(iot.pull_start) end
 
+                if cfgstore and mon.load_infer then
+                    pcall(mon.load_infer, c and c.regs or {})
+                end
+                S.cur = "sniff"
+                return true, "OK sniff started (from persist)"
+            else
 
-            if iot then pcall(iot.pull_start) end
-            S.cur = "sniff"  -- 34-fix: 记下当前 mode
-            return true, "OK sniff started, detecting"
+                mon.request_detect()
+                if iot then pcall(iot.pull_start) end
+                S.cur = "sniff"
+                return true, "OK sniff started, detecting"
+            end
         end
         return false, "FAIL sniff start"
 
@@ -211,6 +298,7 @@ function M.switch_mode(mode, from_boot)
         local pm3 = pollmod(false)
         if pm3 then pm3.stop() end
         stop_sniff()
+
         local cleared = M.reset_user_cfg()
         S.cur = "idle"  -- 34-fix: 记下当前 mode
 

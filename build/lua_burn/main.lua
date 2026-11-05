@@ -122,7 +122,10 @@ if ctrl then
         local ok, msg = ctrl.switch_mode(boot, true)
         log.info("main", "  boot_mode=" .. boot .. " -> " .. tostring(msg))
     else
-        log.info("main", "  boot_mode=" .. tostring(boot) .. " (485 idle, 等前端命令 W:MODE=manual|platform|sniff|stop)")
+
+
+        local ok, msg = ctrl.switch_mode("idle", true)
+        log.info("main", "  boot_mode=" .. tostring(boot) .. " -> " .. tostring(msg))
     end
 end
 

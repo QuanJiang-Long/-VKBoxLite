@@ -314,16 +314,25 @@ function M.attach_names(inf)
     local names = {}
     for _, a in ipairs(inf.regs) do
         local k = "reg" .. tostring(a.addr or "")
-        local sa = smap[k]
         local id, name
-        if sa then
-            local sid = sa.id or ""
-            local snm = sa.name or ""
-            id = (sid ~= "") and sid or k
-            name = (snm ~= "") and snm or id
+
+        local rowName = a.name or ""
+        local rowId = a.id or ""
+        if rowName ~= "" or rowId ~= "" then
+            id = (rowId ~= "") and rowId or k
+            name = (rowName ~= "") and rowName or id
         else
-            id = k
-            name = amap[k] or k   -- 没配 alias 时 = 本身, 与 U4 上报完全一致
+
+            local sa = smap[k]
+            if sa then
+                local sid = sa.id or ""
+                local snm = sa.name or ""
+                id = (sid ~= "") and sid or k
+                name = (snm ~= "") and snm or id
+            else
+                id = k
+                name = amap[k] or k   -- 没配 alias 时 = 本身, 与 U4 上报完全一致
+            end
         end
 
         if id ~= k or name ~= k then
@@ -482,7 +491,9 @@ local function build_items()
         end
     end
     table.sort(order)
-    local items = {}
+
+    local items = SHARED_BUF.u4_items
+    for i = 1, #items do items[i] = nil end
     for n, slave in ipairs(order) do
         local pts = by_slave[slave]
 
@@ -779,6 +790,36 @@ local TOPO_BATCH_SIZE = 20
 
 
 
+local TOPO_BUF_SIZE = 128  -- 最大属性数（与 MAX_INFER_ROWS 对齐）
+local U4_BUF_SIZE = 64     -- U4 分包上限
+local SLAVE_BUF_SIZE = 4   -- 最多 4 个从机
+
+local SHARED_BUF = {
+
+    topo_parts = {},      -- 128 槽（property 片段）
+    topo_prop_ids = {},   -- 128 槽（属性 ID）
+
+
+    u4_items = {},        -- 64 槽（U4 分包）
+    u4_by_slave = {},     -- 4 槽（从机分组）
+}
+
+
+for i = 1, TOPO_BUF_SIZE do
+    SHARED_BUF.topo_parts[i] = nil
+    SHARED_BUF.topo_prop_ids[i] = nil
+end
+for i = 1, U4_BUF_SIZE do
+    SHARED_BUF.u4_items[i] = nil
+end
+for i = 1, SLAVE_BUF_SIZE do
+    SHARED_BUF.u4_by_slave[i] = nil
+end
+
+
+
+
+
 
 
 local function prop_id_name(r)
@@ -834,9 +875,15 @@ end
 
 local function build_topo(only_ids, max_props, skip_ids)
     local mode = get_mode()
-    local parts = {}
-    local prop_ids = {}  -- ⚠️ topo-ack-filter: 记录拓扑里的属性 ID, 用于 U4 过滤
+
+    local parts = SHARED_BUF.topo_parts
+    local prop_ids = SHARED_BUF.topo_prop_ids
+
+    for i = 1, #parts do parts[i] = nil end
+    for i = 1, #prop_ids do prop_ids[i] = nil end
     if mode == "sniff" then
+
+
         local smap = cfgstore.alias_map()
 
         local groups, gorder = {}, {}
@@ -853,14 +900,19 @@ local function build_topo(only_ids, max_props, skip_ids)
         for _, r in ipairs((mon.infer() or {}).regs or {}) do
             local g = group_of(r.slave)
 
-            local sa = smap["reg" .. tostring(r.addr or "")]
             local id, nm
-            if sa then
-                id = (sa.id ~= "" and sa.id) or ("reg" .. tostring(r.addr or ""))
-                nm = (sa.name ~= "" and sa.name) or id
+            if r.id and r.id ~= "" then
+                id = r.id
+                nm = (r.name and r.name ~= "") and r.name or id
             else
-                id = "reg" .. tostring(r.addr or "")
-                nm = id
+                local sa = smap["reg" .. tostring(r.addr or "")]
+                if sa then
+                    id = (sa.id ~= "" and sa.id) or ("reg" .. tostring(r.addr or ""))
+                    nm = (sa.name ~= "" and sa.name) or id
+                else
+                    id = "reg" .. tostring(r.addr or "")
+                    nm = id
+                end
             end
 
 
@@ -2460,110 +2512,113 @@ local function task_main()
                         log.info("iot", "topo rebuild: sig changed (cur=" .. #pid_list .. ")")
                     end
                     if need_rebuild then
-                        local ok, s, n, pids = pcall(topo_sig)
-                        if ok then
-                            sig = s
-                            nodes_json = n
-                            prop_ids = pids
-                            S.topo_at = os.clock()
-                            S.topo_prop_sig = prop_sig
-                            S.topo_prop_ids = prop_ids
-                            log.info("iot", "topo rebuilt: props=" .. #pids .. " sig=" .. tostring(s))
-                        else
-                            S.build_fail = (S.build_fail or 0) + 1
-                            log.warn("iot", "topo_sig failed, skip this round: " .. tostring(s))
-                        end
-                    end
-                    if sig and prop_ids then
+
+
+
                         local new_props = {}
                         local has_new = false
                         if S.topo_sent_props then
-                            for _, id in ipairs(prop_ids) do
+                            for _, id in ipairs(pid_list) do
                                 if not S.topo_sent_props[id] then
                                     new_props[id] = true
                                     has_new = true
                                 end
                             end
                         else
-                            for _, id in ipairs(prop_ids) do
+
+                            for _, id in ipairs(pid_list) do
                                 new_props[id] = true
                             end
                             has_new = true
                         end
                         if has_new then
+                            local ok, s, n, pids = pcall(topo_sig, new_props)
+                            if ok then
+                                sig = s
+                                nodes_json = n
+                                prop_ids = pids
+                                S.topo_at = os.clock()
+                                S.topo_prop_sig = prop_sig
+                                S.topo_prop_ids = prop_ids
+                                log.info("iot", "topo rebuilt: props=" .. #pids .. " sig=" .. tostring(s))
 
 
 
-                            local new_list = {}
-                            for id in pairs(new_props) do new_list[#new_list + 1] = id end
-                            table.sort(new_list)  -- 排序保证分批顺序稳定
-                            local total_new = #new_list
-                            local batch_start = 1
-                            local batch_num = 0
-                            local all_batches_ok = true
-                            while batch_start <= total_new do
-                                batch_num = batch_num + 1
-                                local batch_end = math.min(batch_start + TOPO_BATCH_SIZE - 1, total_new)
-                                local batch_ids = {}
-                                for i = batch_start, batch_end do
-                                    batch_ids[new_list[i]] = true
-                                end
+                                local new_list = {}
+                                for id in pairs(new_props) do new_list[#new_list + 1] = id end
+                                table.sort(new_list)  -- 排序保证分批顺序稳定
+                                local total_new = #new_list
+                                local batch_start = 1
+                                local batch_num = 0
+                                local all_batches_ok = true
+                                while batch_start <= total_new do
+                                    batch_num = batch_num + 1
+                                    local batch_end = math.min(batch_start + TOPO_BATCH_SIZE - 1, total_new)
+                                    local batch_ids = {}
+                                    for i = batch_start, batch_end do
+                                        batch_ids[new_list[i]] = true
+                                    end
 
-                                local batch_parts, batch_pids
-                                local ok2, s2, n2, p2 = pcall(topo_sig, batch_ids)
-                                if ok2 then
-                                    batch_parts = n2
-                                    batch_pids = p2
-                                else
-                                    log.warn("iot", "batch " .. batch_num .. " topo_sig failed: " .. tostring(s2))
-                                    all_batches_ok = false
-                                    break
-                                end
-                                if batch_parts then
-                                    local pok, sent, e = pcall(send_topo, batch_parts)
-                                    if pok and sent then
-                                        S.topo_sent_props = S.topo_sent_props or {}
-                                        for _, id in ipairs(batch_pids) do
-                                            S.topo_sent_props[id] = true
-                                        end
-
-                                        S.topo_ack_props = S.topo_ack_props or {}
-                                        for _, id in ipairs(batch_pids) do
-                                            S.topo_ack_props[id] = true
-                                        end
-                                        log.info("iot", "topology posted (batch " .. batch_num
-                                            .. "): parts=" .. #batch_parts
-                                            .. " bytes=" .. topo.len(batch_parts)
-                                            .. " props=" .. #batch_pids
-                                            .. "/" .. total_new)
+                                    local batch_parts, batch_pids
+                                    local ok2, s2, n2, p2 = pcall(topo_sig, batch_ids)
+                                    if ok2 then
+                                        batch_parts = n2
+                                        batch_pids = p2
                                     else
-                                        S.topo_fail_at = os.clock()
-                                        S.topo_fail_n = (S.topo_fail_n or 0) + 1
+                                        log.warn("iot", "batch " .. batch_num .. " topo_sig failed: " .. tostring(s2))
                                         all_batches_ok = false
-                                        log.info("iot", "topology batch " .. batch_num .. " failed: "
-                                            .. tostring(e or sent))
-                                        break  -- 本批失败, 停止后续批次
+                                        break
+                                    end
+                                    if batch_parts then
+                                        local pok, sent, e = pcall(send_topo, batch_parts)
+                                        if pok and sent then
+                                            S.topo_sent_props = S.topo_sent_props or {}
+                                            for _, id in ipairs(batch_pids) do
+                                                S.topo_sent_props[id] = true
+                                            end
+
+                                            S.topo_ack_props = S.topo_ack_props or {}
+                                            for _, id in ipairs(batch_pids) do
+                                                S.topo_ack_props[id] = true
+                                            end
+                                            log.info("iot", "topology posted (batch " .. batch_num
+                                                .. "): parts=" .. #batch_parts
+                                                .. " bytes=" .. topo.len(batch_parts)
+                                                .. " props=" .. #batch_pids
+                                                .. "/" .. total_new)
+                                        else
+                                            S.topo_fail_at = os.clock()
+                                            S.topo_fail_n = (S.topo_fail_n or 0) + 1
+                                            all_batches_ok = false
+                                            log.info("iot", "topology batch " .. batch_num .. " failed: "
+                                                .. tostring(e or sent))
+                                            break  -- 本批失败，停止后续批次
+                                        end
+                                    end
+
+                                    collectgarbage("collect")
+                                    batch_start = batch_end + 1
+
+                                    if batch_start <= total_new and sys then
+                                        sys.wait(2000)
                                     end
                                 end
 
-                                collectgarbage("collect")
-                                batch_start = batch_end + 1
-
-                                if batch_start <= total_new and sys then
-                                    sys.wait(2000)
+                                if all_batches_ok then
+                                    S.topo_sig = sig
+                                    S.topo_sent_at = os.clock()
+                                    S.topo_fail_at = nil
+                                    S.topo_fail_n = 0
+                                    S.topo_sent_sig = sig
+                                    pubsched.sent("topo")
                                 end
-                            end
-
-                            if all_batches_ok then
-                                S.topo_sig = sig
-                                S.topo_sent_at = os.clock()
-                                S.topo_fail_at = nil
-                                S.topo_fail_n = 0
-                                S.topo_sent_sig = sig
-                                pubsched.sent("topo")
+                            else
+                                S.build_fail = (S.build_fail or 0) + 1
+                                log.warn("iot", "topo_sig failed, skip this round: " .. tostring(s))
                             end
                         else
-                            sig = nil
+
+                            need_rebuild = false
                         end
                     end
                 end

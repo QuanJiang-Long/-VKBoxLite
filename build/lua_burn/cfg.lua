@@ -16,7 +16,10 @@ local K_POLL, K_SYS = "ds_poll", "ds_sys"
 
 
 
+
 local K_PULL = "ds_pull"
+local K_INFER = "ds_infer"
+
 
 
 
@@ -120,6 +123,16 @@ M.default_poll = {
 }
 
 M.default_sys = { boot_mode = MODE_IDLE }
+
+
+M.default_infer = {
+    baud = cfg.BAUD,
+    databits = cfg.DATABITS,
+    stopbits = cfg.STOPBITS,
+    parity = cfg.PARITY,
+    slave = cfg.SLAVE_ADDR,
+    regs = {},
+}
 
 
 
@@ -270,6 +283,50 @@ function M.normalize_poll(c)
     return out
 end
 
+
+
+local function normalize_infer_reg(r)
+    if type(r) ~= "table" then return nil end
+    local addr = num(r.addr, nil)
+    if not addr or addr < 0 or addr > 65535 then return nil end
+    local count = num(r.count, 1)
+    if count < 1 or count > 125 then count = 1 end
+    local fc = num(r.fc, 3)
+    if fc ~= 3 and fc ~= 4 then fc = 3 end
+    return {
+        addr = math.floor(addr),
+        count = math.floor(count),
+        fc = math.floor(fc),
+        dtype = str(r.dtype, "uint16"),
+        name = str(r.name, ""),
+        id = str(r.id, ""),
+    }
+end
+
+function M.normalize_infer(c)
+    c = c or {}
+    local out = normalize_common(c, M.default_infer)
+    out.slave = math.floor(num(c.slave, M.default_infer.slave))
+    if out.slave < 1 or out.slave > 247 then return nil, "bad slave" end
+    out.regs = {}
+    local seen = {}
+    local regs = c.regs
+    if type(regs) == "table" then
+        for _, r in ipairs(regs) do
+            local nr = normalize_infer_reg(r)
+            if nr then
+                local key = nr.addr
+                if not seen[key] then
+                    seen[key] = true
+                    out.regs[#out.regs + 1] = nr
+                    if #out.regs >= MAX_ALIAS then break end
+                end
+            end
+        end
+    end
+    return out
+end
+
 function M.normalize_sys(c)
     c = c or {}
     local mode = str(c.boot_mode, MODE_IDLE):lower():gsub("^%s+", ""):gsub("%s+$", "")
@@ -289,6 +346,7 @@ local SECTIONS = {
     pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll },
     sys = { key = K_SYS, norm = M.normalize_sys, default = M.default_sys },
     alias = { key = K_ALIAS, norm = M.normalize_alias, default = M.default_alias },
+    infer = { key = K_INFER, norm = M.normalize_infer, default = M.default_infer },
 }
 
 for name, sec in pairs(SECTIONS) do
@@ -344,6 +402,19 @@ function M.has_pull_cfg()
 end
 
 
+function M.has_infer_cfg()
+    if M.infer_src() ~= "fskv" then return false end
+    local c = M.load_infer()
+    return c and #(c.regs or {}) > 0
+end
+
+
+function M.infer_src()
+    if not fskv then return "default" end
+    local v = fskv.get(K_INFER)
+    if v == nil or v == "" then return "default" end
+    return "fskv"
+end
 
 
 
@@ -360,7 +431,13 @@ end
 
 
 
-local RESET_SLOTS = { { "manual 配置", K_POLL }, { "platform 配置", K_PULL } }
+
+
+local RESET_SLOTS = {
+    { "manual 配置", K_POLL },
+    { "platform 配置", K_PULL },
+    { "sniff 推断表", K_INFER },  -- 2026-11: 切 idle 时一起清
+}
 
 function M.reset_user()
     local cleared = {}
@@ -393,6 +470,36 @@ function M.clear_pull()
     fskv.set(K_PULL, "")
     json_cache[K_PULL] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
     cfg_ver = cfg_ver + 1     -- 12-fix-9: 版本号也要涨(别名映射缓存靠它失效)
+    if fskv.save then pcall(fskv.save) end
+    return true, nil, true
+end
+
+
+
+
+function M.clear_infer()
+    if not fskv then return false, "fskv 不可用", false end
+    local ok, v = pcall(fskv.get, K_INFER)
+    if not ok then return false, "读 ds_infer 失败: " .. tostring(v), false end
+    if v == nil or v == "" then return true, nil, false end
+    fskv.set(K_INFER, "")
+    json_cache[K_INFER] = nil
+    cfg_ver = cfg_ver + 1
+    if fskv.save then pcall(fskv.save) end
+    return true, nil, true
+end
+
+
+
+
+function M.clear_poll()
+    if not fskv then return false, "fskv 不可用", false end
+    local ok, v = pcall(fskv.get, K_POLL)
+    if not ok then return false, "读 ds_poll 失败: " .. tostring(v), false end
+    if v == nil or v == "" then return true, nil, false end
+    fskv.set(K_POLL, "")
+    json_cache[K_POLL] = nil
+    cfg_ver = cfg_ver + 1
     if fskv.save then pcall(fskv.save) end
     return true, nil, true
 end

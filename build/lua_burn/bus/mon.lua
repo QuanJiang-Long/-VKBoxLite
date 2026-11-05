@@ -124,13 +124,6 @@ local function key(slave, qty) return tostring(slave) .. ":" .. tostring(qty) en
 
 
 
-
-
-
-
-
-
-
 local function acc_row(slave, addr, fc)
     local sl = infer_acc[slave]
     if not sl then sl = {}; infer_acc[slave] = sl end
@@ -143,9 +136,11 @@ local function acc_row(slave, addr, fc)
         stat.infer_clamped = stat.infer_clamped + 1
         return nil
     end
+
     a = { slave = slave, addr = addr, fc = fc,
           hits = 0, answered = false,
-          dtype = "uint16", conf = 0, value = nil }
+          dtype = "uint16", conf = 0, value = nil,
+          name = "", id = "reg" .. tostring(addr) }
     sl[addr] = a
     infer_order[#infer_order + 1] = a
     infer_dirty = true
@@ -954,6 +949,12 @@ function M.restart_detect()
     if not running then return false, "not running" end
     collector.clear_all()
     tried = {}   -- 12-fix-2: 用户主动重来 = 从头扫, 候选记忆清零
+
+    infer_acc = {}
+    infer_order = {}
+    infer_dirty = true
+    merged_addrs = {}
+    _G.mon_detect_result = nil
     return M.request_detect()
 end
 
@@ -1089,6 +1090,119 @@ function M.recent_frames(n)
     local out = {}
     for i = math.max(1, #fs - (n or 10) + 1), #fs do out[#out + 1] = fs[i] end
     return out
+end
+
+
+
+function M.load_infer(regs)
+    if type(regs) ~= "table" then return end
+
+    infer_acc = {}
+    infer_order = {}
+    infer_dirty = true
+    merged_addrs = {}
+
+    for _, r in ipairs(regs) do
+        if type(r) == "table" and r.addr then
+            local slave = 1  -- sniff 持久化不支持多从机, 默认 1
+            local a = acc_row(slave, r.addr, r.fc)
+            if a then
+                a.dtype = r.dtype or "uint16"
+                a.name = r.name or ""
+                a.id = r.id or ""
+                a.conf = 100  -- 持久化的是已确认的数据
+                a.answered = true
+                a.hits = 1
+
+                local count = r.count or 1
+                if count >= 2 then
+                    for j = 1, count - 1 do
+                        merged_addrs[r.addr + j] = true
+                    end
+                end
+            end
+        end
+    end
+    log.info("mon", "loaded infer table from persist, rows=" .. #infer_order)
+end
+
+
+function M.update_row_name(addr, name, id, dtype)
+    for _, a in ipairs(infer_order) do
+        if a.addr == addr then
+            a.name = name or ""
+            a.id = id or ""
+            if dtype and dtype ~= "" then a.dtype = dtype end
+            infer_dirty = true
+            return true
+        end
+    end
+    return false
+end
+
+
+local auto_save_timer = nil
+local AUTO_SAVE_INTERVAL_MS = 30000  -- 30 秒
+
+
+local function do_save_infer()
+    if not running or #infer_order == 0 then return end
+    local cfgstore = require "cfg"
+    if not cfgstore then return end
+    local detect_result = _G.mon_detect_result
+    if not detect_result then return end
+
+    local save_data = {
+        baud = detect_result.baud,
+        databits = detect_result.databits or 8,
+        stopbits = detect_result.stopbits or 1,
+        parity = detect_result.parity or 0,
+        slave = 1,
+        regs = {},
+    }
+    for _, r in ipairs(infer_order) do
+        if not merged_addrs[r.addr] then
+            save_data.regs[#save_data.regs + 1] = {
+                addr = r.addr,
+                count = 1,  -- 32 位合并的在 merged_addrs 里, 这里只存主地址
+                fc = r.fc or 3,
+                dtype = r.dtype or "uint16",
+                name = r.name or "",
+                id = r.id or "",
+            }
+        end
+    end
+    if #save_data.regs > 0 then
+        local ok, err = cfgstore.save_infer(save_data)
+        if ok then
+            log.info("mon", "auto-saved infer table, regs=" .. #save_data.regs)
+        else
+            log.warn("mon", "auto-save ds_infer failed: " .. tostring(err))
+        end
+    end
+end
+
+
+function M.start_auto_save()
+    if auto_save_timer then return end
+    local sys = require "sys"
+    if not sys then return end
+    auto_save_timer = sys.taskInit(function()
+        while running do
+            sys.wait(AUTO_SAVE_INTERVAL_MS)
+            if running then
+                pcall(do_save_infer)
+            end
+        end
+    end)
+    log.info("mon", "auto-save timer started")
+end
+
+
+function M.stop_auto_save()
+    auto_save_timer = nil
+
+    log.info("mon", "auto-save timer stopped")
 end
 
 return M

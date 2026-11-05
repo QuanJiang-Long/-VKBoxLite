@@ -70,6 +70,28 @@ function addRegRow(pre, addr, type, name, alias, count) {
     const delBtn = tr.querySelector('.btn-del');
     if (delBtn) delBtn.style.display = 'none';
   }
+  // 2026-11: 标识符实时唯一性验证
+  const nameInput = tr.querySelector('.c-name');
+  if (nameInput) {
+    nameInput.oninput = function() {
+      const val = this.value.trim();
+      if (!val) {
+        this.style.borderColor = '';
+        this.title = '';
+        return;
+      }
+      const allNames = Array.from(tbody.querySelectorAll('.c-name'))
+        .filter(inp => inp !== this)
+        .map(inp => inp.value.trim());
+      if (allNames.includes(val)) {
+        this.style.borderColor = '#e74c3c';
+        this.title = '标识符 "' + val + '" 已被其他行使用';
+      } else {
+        this.style.borderColor = '';
+        this.title = '';
+      }
+    };
+  }
   refreshCfgDirty(pre);                // 增行是 DOM 操作，不触发 input 事件，得手动标脏
 }
 
