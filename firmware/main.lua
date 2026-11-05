@@ -122,7 +122,10 @@ if ctrl then
         local ok, msg = ctrl.switch_mode(boot, true)
         log.info("main", "  boot_mode=" .. boot .. " -> " .. tostring(msg))
     else
-        log.info("main", "  boot_mode=" .. tostring(boot) .. " (485 idle, 等前端命令 W:MODE=manual|platform|sniff|stop)")
+        -- 2026-11: idle 也要调 switch_mode, 否则 reset_user_cfg() 不执行,
+        --   旧配置残留, 切 manual 时会用旧配置起轮询
+        local ok, msg = ctrl.switch_mode("idle", true)
+        log.info("main", "  boot_mode=" .. tostring(boot) .. " -> " .. tostring(msg))
     end
 end
 
