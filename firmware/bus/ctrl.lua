@@ -64,13 +64,54 @@ local function switch_delay()
     end)
 end
 
--- 离开 sniff 统一入口: 停监听 + 抹掉这一轮的名字 (A 方案, 2026-10)
+-- 离开 sniff 统一入口: 先停监听 + 抹掉名字, 再异步保存推断表 (A 方案, 2026-10)
+--   2026-11: 退出 sniff 时先持久化, 下次进来可直接加载跳过识别
+--   2026-11: 保存改为异步(后台协程), 避免阻塞 W:MODE 应答导致前端超时
 --   名字只对当前这一轮有效: 退出 sniff 就抹干净, 下次进来是干净的表
 --   (clear_alias 空表不写 fskv, 所以"进 sniff 兜底再清一次"不费 flash)
 local function stop_sniff()
     if not mon.is_running() then return end
+    -- 2026-11: 先收集推断表数据(同步, 在 mon.stop 前)
+    local save_data = nil
+    if cfgstore and mon.infer then
+        local infer_data = mon.infer(true)  -- force=true 取最新值
+        local detect_result = mon.detect_result()
+        if infer_data and infer_data.regs and #infer_data.regs > 0 and detect_result then
+            save_data = {
+                baud = detect_result.baud,
+                databits = detect_result.databits or 8,
+                stopbits = detect_result.stopbits or 1,
+                parity = detect_result.parity or 0,
+                slave = 1,
+                regs = {},
+            }
+            for _, r in ipairs(infer_data.regs) do
+                save_data.regs[#save_data.regs + 1] = {
+                    addr = r.addr,
+                    count = r.count or 1,
+                    fc = r.fc or 3,
+                    dtype = r.dtype or "uint16",
+                    name = r.name or "",
+                    id = r.id or "",
+                }
+            end
+        end
+    end
+    -- 2026-11: 停止自动保存定时器 + 停监听(同步)
+    if mon.stop_auto_save then mon.stop_auto_save() end
     mon.stop()
     if cfgstore and cfgstore.clear_alias then pcall(cfgstore.clear_alias) end
+    -- 后台写 flash: 不阻塞 W:MODE 应答
+    if save_data and sys then
+        sys.taskInit(function()
+            local ok, err = cfgstore.save_infer(save_data)
+            if ok then
+                log.info("ctrl", "sniff: async saved infer table, regs=" .. #save_data.regs)
+            else
+                log.warn("ctrl", "sniff: async save ds_infer failed: " .. tostring(err))
+            end
+        end)
+    end
 end
 
 function M.switch_mode(mode, from_boot)
@@ -173,9 +214,27 @@ function M.switch_mode(mode, from_boot)
             switch_delay()
         end
         if mon.is_running() then stop_sniff() end
+        -- 2026-11: sniff 持久化 - 检查 ds_infer 是否有数据
+        --   有 → 加载通讯参数, 跳过识别, 直接收帧
+        --   无 → 走现有 auto_detect 流程
+        local infer_cfg = cfgstore and cfgstore.has_infer_cfg and cfgstore.has_infer_cfg()
+        local start_params = nil
+        if infer_cfg then
+            local c = cfgstore.load_infer()
+            if c and c.regs and #c.regs > 0 then
+                start_params = {
+                    baud = c.baud,
+                    databits = c.databits,
+                    stopbits = c.stopbits,
+                    parity = c.parity,
+                }
+                log.info("ctrl", "sniff: loaded ds_infer, skip detect, baud=" .. tostring(c.baud))
+            end
+        end
         -- A 方案 (2026-10): 进 sniff = 新一轮。正常路径上"退出已清", 这里
         --   这次是兜底(设备断电重启后开机直进 sniff, 走的是 start 不是
         --   stop, 上次的名字还留在 fskv)。clear_alias 空表不写 fskv, 不费 flash
+        -- ⚠️ 2026-11: ds_infer 持久化后, 别名表待废弃, 但暂时保留兼容
         if cfgstore and cfgstore.clear_alias then pcall(cfgstore.clear_alias) end
         -- ⚠️ sniff 也要复位 manual_on (2026-10 修): 之前只有 manual/platform
         --   分支调 set_manual, 从 manual 切到 sniff 时 manual_on 仍是 true ——
@@ -187,17 +246,28 @@ function M.switch_mode(mode, from_boot)
         --        报给用户自己的 broker, 平台那头看不到设备
         --   set_manual(false) 会断开重连换订阅清单, 必须在识别起来之前做
         if iot then pcall(iot.set_manual, false) end
-        if mon.start() then
-            -- 识别必须放后台: switch_mode 是同步的, 而且在开机路径(main.lua 的
-            -- boot_mode)上也会被调用。同步等识别会把开机流程堵住, 而识别失败是
-            -- 重试到成功为止的, 静默总线上开机就永远回不来
-            mon.request_detect()
-            -- sniff 也向平台报到。以前这里不碰 iot, 设备进旁听后平台完全
-            -- 看不到它上线。失败不回滚: 旁听才是 sniff 的主职, 平台那头
-            -- 连不上不该让用户连旁听都用不了
-            if iot then pcall(iot.pull_start) end
-            S.cur = "sniff"  -- 34-fix: 记下当前 mode
-            return true, "OK sniff started, detecting"
+        -- 2026-11: 有持久化参数时直接传给 mon.start, 跳过 auto_detect
+        if mon.start(start_params) then
+            if start_params then
+                -- 有持久化配置: 直接开始收帧, 不跑识别
+                -- sniff 也向平台报到。失败不回滚: 旁听才是 sniff 的主职
+                if iot then pcall(iot.pull_start) end
+                -- 2026-11: 加载推断表到 mon 累加器 (让 build_topo 立即可用)
+                if cfgstore and mon.load_infer then
+                    local c = cfgstore.load_infer()
+                    pcall(mon.load_infer, c and c.regs or {})
+                end
+                S.cur = "sniff"
+                -- 启动自动保存定时器 (B+C 策略)
+                if mon.start_auto_save then mon.start_auto_save() end
+                return true, "OK sniff started (from persist)"
+            else
+                -- 无持久化配置: 走现有识别流程
+                mon.request_detect()
+                if iot then pcall(iot.pull_start) end
+                S.cur = "sniff"
+                return true, "OK sniff started, detecting"
+            end
         end
         return false, "FAIL sniff start"
 
