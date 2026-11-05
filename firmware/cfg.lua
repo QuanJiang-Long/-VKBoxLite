@@ -15,12 +15,15 @@ local MODE_MANUAL, MODE_PLATFORM, MODE_IDLE, MODE_SNIFF = "manual", "platform", 
 local K_POLL, K_SYS = "ds_poll", "ds_sys"
 -- ds_pull: 平台拉取的独立槽, 复用 normalize_poll/default_poll, 不新增校验。
 -- 必须分开: 原本共用一槽, 拉一次平台配置就覆盖手配的寄存器表(见 lua/README.md 配置来源隔离)。
--- 没有 sniff 槽: auto_detect 结果只存本次会话(mon.bootCfg), 不落 fskv, 从结构上堵住误存
+-- ds_infer: sniff 推断表持久化槽 (2026-11)。存通讯参数 + 推断出的寄存器表。
+--   进 sniff 时加载, 跳过识别直接收帧; 退出 sniff 先写 flash 再弹窗问是否清除。
 local K_PULL = "ds_pull"
+local K_INFER = "ds_infer"
 -- ds_alias: sniff 侧别名表 (2026-10)。存【用户给 reg<addr> 起的名字】(id+name),
 -- 不是识别出来的串口参数(那些只存本次会话)。决定 sniff 档 U2 拓扑属性与
 -- U4 数据项的 id/name, 让平台物模型显示人看得懂的名字。
 -- 不复用 ds_poll: 那是手配寄存器表, 会被平台下发覆盖/切 idle 复位清掉
+-- ⚠️ 待废弃: ds_infer 持久化后, 推断表行里自带 name/id, 不再需要单独别名表
 local K_ALIAS = "ds_alias"
 
 local function num(v, d)
@@ -120,6 +123,16 @@ M.default_poll = {
 }
 
 M.default_sys = { boot_mode = MODE_IDLE }
+
+-- sniff 推断表持久化默认值 (2026-11)
+M.default_infer = {
+    baud = cfg.BAUD,
+    databits = cfg.DATABITS,
+    stopbits = cfg.STOPBITS,
+    parity = cfg.PARITY,
+    slave = cfg.SLAVE_ADDR,
+    regs = {},
+}
 
 -- 别名表上限: 推断出来的寄存器地址不会太多, 128 条足够覆盖现场, 也能挡住
 -- 异常输入把 fskv 撑爆
@@ -270,6 +283,50 @@ function M.normalize_poll(c)
     return out
 end
 
+-- sniff 推断表归一化 (2026-11)。结构:
+-- { baud, databits, stopbits, parity, slave, regs: [{addr, count, fc, dtype, name, id}] }
+local function normalize_infer_reg(r)
+    if type(r) ~= "table" then return nil end
+    local addr = num(r.addr, nil)
+    if not addr or addr < 0 or addr > 65535 then return nil end
+    local count = num(r.count, 1)
+    if count < 1 or count > 125 then count = 1 end
+    local fc = num(r.fc, 3)
+    if fc ~= 3 and fc ~= 4 then fc = 3 end
+    return {
+        addr = math.floor(addr),
+        count = math.floor(count),
+        fc = math.floor(fc),
+        dtype = str(r.dtype, "uint16"),
+        name = str(r.name, ""),
+        id = str(r.id, ""),
+    }
+end
+
+function M.normalize_infer(c)
+    c = c or {}
+    local out = normalize_common(c, M.default_infer)
+    out.slave = math.floor(num(c.slave, M.default_infer.slave))
+    if out.slave < 1 or out.slave > 247 then return nil, "bad slave" end
+    out.regs = {}
+    local seen = {}
+    local regs = c.regs
+    if type(regs) == "table" then
+        for _, r in ipairs(regs) do
+            local nr = normalize_infer_reg(r)
+            if nr then
+                local key = nr.addr
+                if not seen[key] then
+                    seen[key] = true
+                    out.regs[#out.regs + 1] = nr
+                    if #out.regs >= MAX_ALIAS then break end
+                end
+            end
+        end
+    end
+    return out
+end
+
 function M.normalize_sys(c)
     c = c or {}
     local mode = str(c.boot_mode, MODE_IDLE):lower():gsub("^%s+", ""):gsub("%s+$", "")
@@ -289,6 +346,7 @@ local SECTIONS = {
     pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll },
     sys = { key = K_SYS, norm = M.normalize_sys, default = M.default_sys },
     alias = { key = K_ALIAS, norm = M.normalize_alias, default = M.default_alias },
+    infer = { key = K_INFER, norm = M.normalize_infer, default = M.default_infer },
 }
 
 for name, sec in pairs(SECTIONS) do
@@ -343,6 +401,21 @@ function M.has_pull_cfg()
     return c and #(c.regs or {}) > 0
 end
 
+-- sniff 推断表是否有持久化配置 (2026-11)
+function M.has_infer_cfg()
+    if M.infer_src() ~= "fskv" then return false end
+    local c = M.load_infer()
+    return c and #(c.regs or {}) > 0
+end
+
+-- ds_infer 是否写过
+function M.infer_src()
+    if not fskv then return "default" end
+    local v = fskv.get(K_INFER)
+    if v == nil or v == "" then return "default" end
+    return "fskv"
+end
+
 -- 切回 idle 时的 485 复位: 擦掉用户改过的痕迹, 回到"从没存过配置"的状态。
 -- 返回真正清掉的槽名(没写过的槽不出现), 由调用方拼进 W:MODE 应答给前端看。
 --
@@ -360,7 +433,11 @@ end
 -- 记录 A: 改友好名, 切 idle 时 W:MODE 应答 cleared 给用户看的字面。
 -- 显示名 (前) 是给用户看的; 键名 (后 K_POLL/K_PULL) 是 cfgstore 内部槽名, 保留
 -- "poll"/"pull" (项目内部 API, 删了工作量大, 收益小 — 跟记录 3 Q2 决策)。
-local RESET_SLOTS = { { "manual 配置", K_POLL }, { "platform 配置", K_PULL } }
+local RESET_SLOTS = {
+    { "manual 配置", K_POLL },
+    { "platform 配置", K_PULL },
+    { "sniff 推断表", K_INFER },  -- 2026-11: 切 idle 时一起清
+}
 
 function M.reset_user()
     local cleared = {}
@@ -393,6 +470,36 @@ function M.clear_pull()
     fskv.set(K_PULL, "")
     json_cache[K_PULL] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
     cfg_ver = cfg_ver + 1     -- 12-fix-9: 版本号也要涨(别名映射缓存靠它失效)
+    if fskv.save then pcall(fskv.save) end
+    return true, nil, true
+end
+
+-- 2026-11: 只清 ds_infer (不动 ds_poll / ds_pull / mqtt 凭证).
+--   场景: 前端从 sniff 切 manual/platform 时弹窗, 默认勾选 "清空推断表",
+--   确认后发 W:CLRINFER 调这个. 返回 (ok, err, wrote)
+function M.clear_infer()
+    if not fskv then return false, "fskv 不可用", false end
+    local ok, v = pcall(fskv.get, K_INFER)
+    if not ok then return false, "读 ds_infer 失败: " .. tostring(v), false end
+    if v == nil or v == "" then return true, nil, false end
+    fskv.set(K_INFER, "")
+    json_cache[K_INFER] = nil
+    cfg_ver = cfg_ver + 1
+    if fskv.save then pcall(fskv.save) end
+    return true, nil, true
+end
+
+-- 2026-11: 只清 ds_poll (不动 ds_pull / ds_infer / mqtt 凭证).
+--   场景: W:BOOTMODE 设成 platform/sniff 时联动清除 manual 配置.
+--   返回 (ok, err, wrote)
+function M.clear_poll()
+    if not fskv then return false, "fskv 不可用", false end
+    local ok, v = pcall(fskv.get, K_POLL)
+    if not ok then return false, "读 ds_poll 失败: " .. tostring(v), false end
+    if v == nil or v == "" then return true, nil, false end
+    fskv.set(K_POLL, "")
+    json_cache[K_POLL] = nil
+    cfg_ver = cfg_ver + 1
     if fskv.save then pcall(fskv.save) end
     return true, nil, true
 end

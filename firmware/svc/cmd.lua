@@ -466,7 +466,7 @@ local function reg_cmds()
         reply_json("RET:SALIAS=", jencode(cfgstore.load_alias()))
     end)
 
-    -- W:SALIAS={key,id,name}: 单条 upsert, id/name 都空 = 删这条
+    -- W:SALIAS={key,id,name,dtype}: 单条 upsert, id/name 都空 = 删这条
     M.reg("W:SALIAS", function(arg)
         local t = jdecode(arg)
         if not t then return M.reply("RET:FAIL:SALIAS:bad json") end
@@ -477,10 +477,10 @@ local function reg_cmds()
         end
         local ok, err = cfgstore.set_alias(key, s(t.id), s(t.name))
         if not ok then return M.reply("RET:FAIL:SALIAS:" .. tostring(err)) end
-        -- 2026-11: 同步更新内存推断表行, 自动保存时能拿到最新 name/id
+        -- 2026-11: 同步更新内存推断表行, 自动保存时能拿到最新 name/id/dtype
         local addr = tonumber(key:match("^reg(%d+)$"))
         if addr and mon.update_row_name then
-            pcall(mon.update_row_name, addr, s(t.name), s(t.id))
+            pcall(mon.update_row_name, addr, s(t.name), s(t.id), s(t.dtype))
         end
         M.reply("RET:SALIAS=OK")
     end)

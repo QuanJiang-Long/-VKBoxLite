@@ -1434,6 +1434,8 @@ function askEditRegName(row) {
     const key = 'reg' + row.addr;
     const curId = row.id || key;
     const curName = row.name || '';
+    const curDtype = row.dtype || 'uint16';
+    const ALL_TYPES = ['uint16','int16','uint32','int32','float32','uint64','int64','float64'];
     const modal = document.createElement('div');
     modal.className = 'modal modal-open';
     modal.innerHTML = `
@@ -1452,8 +1454,15 @@ function askEditRegName(row) {
           <input id="edId" type="text" maxlength="64" placeholder="例：CT1" value="${esc(curId)}"
                  style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #dde2ea;border-radius:4px;font-size:13px;">
         </div>
+        <div style="margin-bottom:10px;">
+          <div style="font-size:12px;color:#666;margin-bottom:3px;">数据类型</div>
+          <select id="edDtype" style="width:100%;box-sizing:border-box;padding:7px 8px;border:1px solid #dde2ea;border-radius:4px;font-size:13px;">
+            ${ALL_TYPES.map(t => '<option' + (t === curDtype ? ' selected' : '') + '>' + t + '</option>').join('')}
+          </select>
+        </div>
         <div id="edPreview" style="font-family:Menlo,Consolas,monospace;font-size:12px;color:#0a7d2c;
              background:#f4f6f9;border:1px solid #e6eaf0;border-radius:4px;padding:8px;margin-bottom:12px;"></div>
+        <div id="edErr" style="display:none;margin:0 0 12px 0;color:#c0392b;font-size:12px;"></div>
         <div style="display:flex;gap:8px;align-items:center;">
           <button id="edSave" class="primary" style="flex:1;padding:9px;">保存</button>
           <button id="edReset" style="padding:9px 12px;">恢复默认</button>
@@ -1467,7 +1476,9 @@ function askEditRegName(row) {
     document.body.appendChild(modal);
     const nameEl = modal.querySelector('#edName');
     const idEl = modal.querySelector('#edId');
+    const dtypeEl = modal.querySelector('#edDtype');
     const prevEl = modal.querySelector('#edPreview');
+    const errEl = modal.querySelector('#edErr');
     const preview = () => {
       const id = idEl.value.trim() || key;
       const nm = nameEl.value.trim() || id;
@@ -1477,12 +1488,27 @@ function askEditRegName(row) {
     nameEl.addEventListener('input', preview);
     idEl.addEventListener('input', preview);
     const close = v => { document.body.removeChild(modal); resolve(v); };
-    modal.querySelector('#edSave').onclick = () => close({
-      id: idEl.value.trim(),
-      name: nameEl.value.trim(),
-    });
+    modal.querySelector('#edSave').onclick = () => {
+      // 2026-11: 标识符唯一性验证
+      const newId = idEl.value.trim();
+      if (newId && newId !== curId) {
+        const regs = (S.infer && S.infer.regs) || [];
+        const duplicate = regs.find(r => r.id === newId && 'reg' + r.addr !== key);
+        if (duplicate) {
+          errEl.textContent = '标识符 "' + newId + '" 已被 reg' + duplicate.addr + ' 使用';
+          errEl.style.display = 'block';
+          return;
+        }
+      }
+      errEl.style.display = 'none';
+      close({
+        id: newId,
+        name: nameEl.value.trim(),
+        dtype: dtypeEl.value,
+      });
+    };
     // 恢复默认: 两个都清空 = 设备端删掉这条别名, 回到 reg<addr>
-    modal.querySelector('#edReset').onclick = () => close({ id: '', name: '' });
+    modal.querySelector('#edReset').onclick = () => close({ id: '', name: '', dtype: curDtype });
     modal.querySelector('#edCancel').onclick = () => close(null);
     modal.addEventListener('click', e => { if (e.target === modal) close(null); });
     setTimeout(() => nameEl.focus(), 30);
@@ -1490,10 +1516,10 @@ function askEditRegName(row) {
 }
 
 // 保存一条别名并刷新推断表
-async function saveAlias(row, id, name) {
+async function saveAlias(row, id, name, dtype) {
   const key = 'reg' + row.addr;
   try {
-    await sendCmd(Protocol.Enc.aliasWrite({ key: key, id: id, name: name }), 'SALIAS', 4000);
+    await sendCmd(Protocol.Enc.aliasWrite({ key: key, id: id, name: name, dtype: dtype }), 'SALIAS', 4000);
     status('已保存 ' + key + ' 的名字，下次上报生效', true);
     toast('已保存：' + (name || id || key) + '（下次上报生效）');
     await doInfer();          // 重推一轮推断表，把新名字显示出来
@@ -1721,7 +1747,7 @@ if (el.inferTbody) {
     if (!row) return;
     const v = await askEditRegName(row);
     if (!v) return;
-    await saveAlias(row, v.id, v.name);
+    await saveAlias(row, v.id, v.name, v.dtype);
   });
 }
 

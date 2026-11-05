@@ -1126,12 +1126,13 @@ function M.load_infer(regs)
     log.info("mon", "loaded infer table from persist, rows=" .. #infer_order)
 end
 
--- 2026-11: 更新单行 name/id (W:SALIAS 调用, 同步到内存推断表)
-function M.update_row_name(addr, name, id)
+-- 2026-11: 更新单行 name/id/dtype (W:SALIAS 调用, 同步到内存推断表)
+function M.update_row_name(addr, name, id, dtype)
     for _, a in ipairs(infer_order) do
         if a.addr == addr then
             a.name = name or ""
             a.id = id or ""
+            if dtype and dtype ~= "" then a.dtype = dtype end
             infer_dirty = true
             return true
         end

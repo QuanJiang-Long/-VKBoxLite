@@ -45,7 +45,7 @@ function addRegRow(pre, addr, type, name, alias, count) {
     .map(t => '<option' + (t === type ? ' selected' : '') + '>' + t + '</option>').join('');
   tr.innerHTML =
     '<td><input class="c-addr" type="number" value="' + addr + '"></td>' +
-    '<td><select class="c-type">' + opts + '</select></td>' +
+    '<td><select class="c-type" onchange="onRowTypeChange(this)">' + opts + '</select></td>' +
     '<td><input class="c-count" type="number" value="' + (count || 1) + '" min="1" max="125"></td>' +
     '<td><input class="c-name" type="text" value="' + esc(name || '') + '"></td>' +
     '<td><input class="c-alias" type="text" value="' + esc(alias || '') + '" ' +
@@ -73,6 +73,16 @@ function addRegRow(pre, addr, type, name, alias, count) {
   refreshCfgDirty(pre);                // 增行是 DOM 操作，不触发 input 事件，得手动标脏
 }
 
+// 表格行中数据类型变化时自动设置寄存器个数
+function onRowTypeChange(sel) {
+  const type = sel.value;
+  const W = { uint16: 1, int16: 1, uint32: 2, int32: 2, float32: 2, uint64: 4, int64: 4, float64: 4 };
+  const w = W[type] || 1;
+  const tr = sel.closest('tr');
+  const countInput = tr.querySelector('.c-count');
+  if (countInput) countInput.value = w;
+}
+
 function deleteRow(btn) {
   btn.closest('tr').remove();
   refreshCfgDirty();                   // 删行同理
@@ -90,6 +100,15 @@ function addParamRow() {
 
 function closeModal() { $('modalAddReg').style.display = 'none'; }
 
+// 数据类型变化时自动设置寄存器个数
+// 16位=1, 32位=2, 64位=4
+function onRegTypeChange() {
+  const type = $('regType').value;
+  const W = { uint16: 1, int16: 1, uint32: 2, int32: 2, float32: 2, uint64: 4, int64: 4, float64: 4 };
+  const w = W[type] || 1;
+  $('regCount').value = w;
+}
+
 function confirmAddReg() {
   const addr = $('regAddr').value;
   const type = $('regType').value;
@@ -105,6 +124,17 @@ function confirmAddReg() {
   if (cnt % w !== 0) { regErr(type + ' 占 ' + w + ' 个寄存器，个数需为 ' + w + ' 的整数倍'); return; }
   if (!/^\w+$/.test(phyId.trim())) { regErr('标识符只能含字母、数字、下划线'); return; }
   if (phyId.trim().length > 16) { regErr('标识符最长 16 字符'); return; }
+  // 2026-11: 标识符唯一性验证
+  const trimmedId = phyId.trim();
+  if (trimmedId) {
+    const pre = cfgPrefix();
+    const tbody = E(pre, 'paramTbody');
+    const existingIds = Array.from(tbody.querySelectorAll('.c-name')).map(inp => inp.value.trim());
+    if (existingIds.includes(trimmedId)) {
+      regErr('标识符 "' + trimmedId + '" 已存在，请修改');
+      return;
+    }
+  }
   // Step 2e: 传当前档位 pre 给 addRegRow, 让行加到 m/p 各自 tab 的 paramTbody
   addRegRow(cfgPrefix(), parseInt(addr, 10), type, phyId.trim(), alias, cnt);
   regErr('');

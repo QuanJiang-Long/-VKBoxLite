@@ -44,6 +44,14 @@
     //   mqtt 凭证都不动). 不要发空字符串 / 多次, 设备端有"正在拉取"守卫
     clrPull:     ()  => 'W:CLRPULL',
 
+    // 2026-11: 清空 ds_poll (仅手动档的配置). 切 platform/sniff 走人时如果
+    //   勾选 "清空手动配置" 会发这条, 让设备端只擦 ds_poll
+    clrPoll:     ()  => 'W:CLRPOLL',
+
+    // 2026-11: 清空 ds_infer (sniff 推断表持久化槽). 切 manual/platform 时如果
+    //   勾选 "清空推断表" 会发这条, 让设备端只擦 ds_infer
+    clrInfer:    ()  => 'W:CLRINFER',
+
     // ---- MQTT ----
     mqtt:    ()   => 'R:MQTT',
     writeMqtt: (o) => 'W:MQTT=' + JSON.stringify(o),
