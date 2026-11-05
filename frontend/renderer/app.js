@@ -101,7 +101,7 @@ function wdtStalled(g, collecting) {
 const el = new Proxy({
   comSel: $('comSel'), btnRefresh: $('btnRefresh'), btnOpen: $('btnOpen'),
   btnImport: $('btnImport'), btnExport: $('btnExport'), btnReadInfo: $('btnReadInfo'),
-  fSn: $('fSn'), fImei: $('fImei'), fIccid: $('fIccid'), fCsq: $('fCsq'),
+  fSn: $('fSn'), fImei: $('fImei'), fIccid: $('fIccid'), fImsi: $('fImsi'), fCsq: $('fCsq'),
   fVer: $('fVer'), fProj: $('fProj'), fUrl: $('fUrl'),
   // tabPoll 内的引用 (Step 2a 之前业务用这些, 现在仍保留作 fallback)
   btnReadCfg: $('btnReadCfg'), btnSaveCfg: $('btnSaveCfg'), btnPullCfg: $('btnPullCfg'),
@@ -515,7 +515,7 @@ function syncPullCfgBtn() {
 //   用户名(设备 SN 派生)清; ClientID 只在"还是设备自动值"时清(手输的保留)
 // 2026-11-02: 增加模式卡片重置 + sniff 面板清理
 function clearDeviceView() {
-  [el.fSn, el.fImei, el.fIccid, el.fCsq, el.fVer, el.fProj, el.fUrl].forEach(e => {
+  [el.fSn, el.fImei, el.fIccid, el.fImsi, el.fCsq, el.fVer, el.fProj, el.fUrl].forEach(e => {
     if (e) e.value = '';
   });
   // 所有 .kv-grid 里的显示值(首页总览 + 手动/平台/sniff 三张状态卡) → '--'
@@ -738,6 +738,7 @@ async function readInfo() {
     el.fSn.value    = d.sn || '';
     el.fImei.value  = d.imei || '';
     el.fIccid.value = d.iccid || '';
+    el.fImsi.value  = d.imsi || '';
     el.fCsq.value   = d.csq != null ? d.csq : (d.rsrp != null ? 'rsrp ' + d.rsrp : '');
     el.fVer.value   = d.version || d.fw || '';
     el.fProj.value  = d.project || '';

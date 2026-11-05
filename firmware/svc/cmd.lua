@@ -192,6 +192,7 @@ local function reg_cmds()
             lock = sn.locked() and 1 or 0,
             imei = sn.imei(),
             uid = sn.uid(),
+            imsi = mval("imsi"),
             iccid = mval("iccid"),
             csq = mval("csq"),
             rsrp = mval("rsrp"),

@@ -250,6 +250,7 @@ body.mq-manual .auto-only{display:none !important;}
         <div class="item"><label>SN</label><input id="fSn" type="text" readonly title="SN 只读，烧写请用产线烧录工具"></div>
         <div class="item"><label>IMEI</label><input id="fImei" type="text" readonly title="设备 IMEI"></div>
         <div class="item"><label>ICCID</label><input id="fIccid" type="text" readonly title="SIM 卡 ICCID"></div>
+        <div class="item"><label>IMSI</label><input id="fImsi" type="text" readonly title="SIM 卡 IMSI"></div>
         <div class="item"><label>GSM信号强度</label><input id="fCsq" type="text" readonly title="CSQ 信号强度"></div>
         <div class="item"><label>版本号</label><input id="fVer" type="text" readonly title="固件版本"></div>
         <div class="item"><label>项目名称</label><input id="fProj" type="text" readonly title="项目标识"></div>
@@ -1043,7 +1044,7 @@ body.mq-manual .auto-only{display:none !important;}
             <label>寄存器地址</label>
             <input id="regAddr" type="number" value="1" min="0" max="65535">
             <label>数据类型</label>
-            <select id="regType">
+            <select id="regType" onchange="onRegTypeChange()">
                 <option value="">请选择</option>
                 <option>uint16</option>
                 <option>int16</option>
