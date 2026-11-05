@@ -120,17 +120,10 @@ local function key(slave, qty) return tostring(slave) .. ":" .. tostring(qty) en
 -- 拼一次 "slave:reg1234" 就是一笔垃圾。
 -- 超 MAX_INFER_ROWS 就不再建行(计数 infer_clamped), 返回 nil
 --
--- ⚠️ 字段数【必须 ≤8】(2026-10-28 实测): Lua 表的哈希槽按 2 的幂走,
---   6/7/8 字段 = 8 槽 = 203 字节/行; 9 个字段就跳到 16 槽 = 363 字节/行
---   (多 78%, 一分钱都不值)。所以这行只留 8 个字段:
---     slave/addr/fc/hits/answered/dtype/conf/value
---   砍掉的三样都是能推出来的:
---     seq    → 序号 = 行在 infer_order 里的位置(发现顺序), 不用存
---     status → 前端按 conf 推(≥80 ok / ≥60 review / 其余 uncertain),
---              "没应答"用 answered=false 表示
---     count  → 数量 = dtype 的宽度(前端按 dtype 算), 不用存
---   ⚠️ value 建行时也要占位(nil 不占槽): 8 个槽用满之后再加第 9 个字段
---     就会触发 rehash, 表直接翻倍。
+-- ⚠️ 2026-11: 字段数从 8 增加到 10 (加 name/id), 用于 sniff 持久化。
+--   内存代价: 每行从 203 字节涨到 363 字节 (8→16 哈希槽), 128 行总计
+--   从 26KB 涨到 46KB, 多 20KB。换来的是推断表行里自带 name/id,
+--   build_topo() 不再需要查 alias_map, 简化代码且支持持久化。
 local function acc_row(slave, addr, fc)
     local sl = infer_acc[slave]
     if not sl then sl = {}; infer_acc[slave] = sl end
@@ -143,9 +136,11 @@ local function acc_row(slave, addr, fc)
         stat.infer_clamped = stat.infer_clamped + 1
         return nil
     end
+    -- 2026-11: 加 name/id 字段, 默认值是 reg<addr>
     a = { slave = slave, addr = addr, fc = fc,
           hits = 0, answered = false,
-          dtype = "uint16", conf = 0, value = nil }
+          dtype = "uint16", conf = 0, value = nil,
+          name = "", id = "reg" .. tostring(addr) }
     sl[addr] = a
     infer_order[#infer_order + 1] = a
     infer_dirty = true
@@ -1089,6 +1084,118 @@ function M.recent_frames(n)
     local out = {}
     for i = math.max(1, #fs - (n or 10) + 1), #fs do out[#out + 1] = fs[i] end
     return out
+end
+
+-- 2026-11: 从持久化数据加载推断表到累加器 (进 sniff 时调用)
+-- regs: ds_infer 里的 regs 数组 [{addr, count, fc, dtype, name, id}]
+function M.load_infer(regs)
+    if type(regs) ~= "table" then return end
+    -- 清空现有累加器
+    infer_acc = {}
+    infer_order = {}
+    infer_dirty = true
+    merged_addrs = {}
+    -- 逐条加载
+    for _, r in ipairs(regs) do
+        if type(r) == "table" and r.addr then
+            local slave = 1  -- sniff 持久化不支持多从机, 默认 1
+            local a = acc_row(slave, r.addr, r.fc)
+            if a then
+                a.dtype = r.dtype or "uint16"
+                a.name = r.name or ""
+                a.id = r.id or ""
+                a.conf = 100  -- 持久化的是已确认的数据
+                a.answered = true
+                a.hits = 1
+                -- 32 位寄存器: 合并 addr+1
+                local count = r.count or 1
+                if count >= 2 then
+                    for j = 1, count - 1 do
+                        merged_addrs[r.addr + j] = true
+                    end
+                end
+            end
+        end
+    end
+    log.info("mon", "loaded infer table from persist, rows=" .. #infer_order)
+end
+
+-- 2026-11: 更新单行 name/id (W:SALIAS 调用, 同步到内存推断表)
+function M.update_row_name(addr, name, id)
+    for _, a in ipairs(infer_order) do
+        if a.addr == addr then
+            a.name = name or ""
+            a.id = id or ""
+            infer_dirty = true
+            return true
+        end
+    end
+    return false
+end
+
+-- 2026-11: 自动保存相关
+local auto_save_timer = nil
+local AUTO_SAVE_INTERVAL_MS = 30000  -- 30 秒
+
+-- 保存当前推断表到 ds_infer (由 ctrl.stop_sniff 或定时器调用)
+local function do_save_infer()
+    if not running or #infer_order == 0 then return end
+    local cfgstore = require "cfg"
+    if not cfgstore then return end
+    local detect_result = _G.mon_detect_result
+    if not detect_result then return end
+    -- 构建持久化数据
+    local save_data = {
+        baud = detect_result.baud,
+        databits = detect_result.databits or 8,
+        stopbits = detect_result.stopbits or 1,
+        parity = detect_result.parity or 0,
+        slave = 1,
+        regs = {},
+    }
+    for _, r in ipairs(infer_order) do
+        if not merged_addrs[r.addr] then
+            save_data.regs[#save_data.regs + 1] = {
+                addr = r.addr,
+                count = 1,  -- 32 位合并的在 merged_addrs 里, 这里只存主地址
+                fc = r.fc or 3,
+                dtype = r.dtype or "uint16",
+                name = r.name or "",
+                id = r.id or "",
+            }
+        end
+    end
+    if #save_data.regs > 0 then
+        local ok, err = cfgstore.save_infer(save_data)
+        if ok then
+            log.info("mon", "auto-saved infer table, regs=" .. #save_data.regs)
+        else
+            log.warn("mon", "auto-save ds_infer failed: " .. tostring(err))
+        end
+    end
+end
+
+-- 启动自动保存定时器 (B+C 策略: 每 30 秒保存一次)
+function M.start_auto_save()
+    if auto_save_timer then return end
+    local sys = require "sys"
+    if not sys then return end
+    auto_save_timer = sys.taskInit(function()
+        while running do
+            sys.wait(AUTO_SAVE_INTERVAL_MS)
+            if running then
+                pcall(do_save_infer)
+            end
+        end
+    end)
+    log.info("mon", "auto-save timer started")
+end
+
+-- 停止自动保存定时器
+function M.stop_auto_save()
+    auto_save_timer = nil
+    -- 定时器协程会在下次 sys.wait 后检查 running 标志自动退出
+    log.info("mon", "auto-save timer stopped")
 end
 
 return M

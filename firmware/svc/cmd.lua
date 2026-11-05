@@ -363,6 +363,30 @@ local function reg_cmds()
         else return M.reply("RET:CLRPULL=OK;cleared:") end
     end)
 
+    -- 2026-11: W:CLRINFER 清空 ds_infer (sniff 推断表持久化槽).
+    --   场景: 前端从 sniff 切 manual/platform 时弹窗, 默认勾选清空推断表.
+    --   前端在 W:MODE 之前发这条, 此时 sniff 可能还在运行, 允许清.
+    M.reg("W:CLRINFER", function()
+        if not cfgstore then return M.reply("RET:FAIL:CLRINFER:cfgstore 不可用") end
+        local ok, err, wrote = cfgstore.clear_infer()
+        if not ok then return M.reply("RET:FAIL:CLRINFER:" .. tostring(err)) end
+        log.info("cmd", string.format("W:CLRINFER cleared=%s", tostring(wrote)))
+        if wrote then return M.reply("RET:CLRINFER=OK;cleared:sniff 推断表")
+        else return M.reply("RET:CLRINFER=OK;cleared:") end
+    end)
+
+    -- 2026-11: W:CLRPOLL 清空 ds_poll (手动配置槽).
+    --   场景: 前端从 manual 切 platform/sniff 时弹窗, 默认勾选清空手动配置.
+    --   前端在 W:MODE 之前发这条, 此时 poll 可能还在运行, 允许清.
+    M.reg("W:CLRPOLL", function()
+        if not cfgstore then return M.reply("RET:FAIL:CLRPOLL:cfgstore 不可用") end
+        local ok, err, wrote = cfgstore.clear_poll()
+        if not ok then return M.reply("RET:FAIL:CLRPOLL:" .. tostring(err)) end
+        log.info("cmd", string.format("W:CLRPOLL cleared=%s", tostring(wrote)))
+        if wrote then return M.reply("RET:CLRPOLL=OK;cleared:manual 配置")
+        else return M.reply("RET:CLRPOLL=OK;cleared:") end
+    end)
+
     -- R:MQTT: 前端读 cfg / auto_pass / manual_on / pub / sub
     M.reg("R:MQTT", function()
         local e = mqtt_cfg.effective(device_id_str())
@@ -399,11 +423,42 @@ local function reg_cmds()
         M.reply("RET:REPORT=OK")
     end)
 
+    -- 2026-11: W:BOOTMODE 设置开机默认模式, 同时联动清除其他档配置
+    --   设 manual → 留 manual, 清 ds_pull + ds_infer
+    --   设 platform → 留 platform, 清 ds_poll + ds_infer
+    --   设 sniff → 留 sniff, 清 ds_poll + ds_pull
+    --   设 idle → 只改 boot_mode 值, 不碰配置
     M.reg("W:BOOTMODE", function(arg)
-        local m = trim(arg)
+        local m = trim(arg):lower()
         local ok, err = cfgstore.save_sys({ boot_mode = m })
         if not ok then return M.reply("RET:FAIL:BOOTMODE:" .. tostring(err)) end
-        M.reply("RET:BOOTMODE=OK")
+        -- 联动清除其他档配置
+        local cleared = {}
+        if m == MODE_MANUAL then
+            -- 清 ds_pull + ds_infer
+            local ok1, _, w1 = cfgstore.clear_pull()
+            if ok1 and w1 then cleared[#cleared + 1] = "platform" end
+            local ok2, _, w2 = cfgstore.clear_infer()
+            if ok2 and w2 then cleared[#cleared + 1] = "sniff" end
+        elseif m == MODE_PLATFORM then
+            -- 清 ds_poll + ds_infer
+            local ok1, _, w1 = cfgstore.clear_poll()
+            if ok1 and w1 then cleared[#cleared + 1] = "manual" end
+            local ok2, _, w2 = cfgstore.clear_infer()
+            if ok2 and w2 then cleared[#cleared + 1] = "sniff" end
+        elseif m == MODE_SNIFF then
+            -- 清 ds_poll + ds_pull
+            local ok1, _, w1 = cfgstore.clear_poll()
+            if ok1 and w1 then cleared[#cleared + 1] = "manual" end
+            local ok2, _, w2 = cfgstore.clear_pull()
+            if ok2 and w2 then cleared[#cleared + 1] = "platform" end
+        end
+        -- idle 不碰配置
+        if #cleared > 0 then
+            M.reply("RET:BOOTMODE=OK;cleared:" .. table.concat(cleared, "+"))
+        else
+            M.reply("RET:BOOTMODE=OK")
+        end
     end)
 
     -- R:SALIAS: 读 sniff 别名表 (用户给 reg<addr> 起的 id/name)
@@ -422,6 +477,11 @@ local function reg_cmds()
         end
         local ok, err = cfgstore.set_alias(key, s(t.id), s(t.name))
         if not ok then return M.reply("RET:FAIL:SALIAS:" .. tostring(err)) end
+        -- 2026-11: 同步更新内存推断表行, 自动保存时能拿到最新 name/id
+        local addr = tonumber(key:match("^reg(%d+)$"))
+        if addr and mon.update_row_name then
+            pcall(mon.update_row_name, addr, s(t.name), s(t.id))
+        end
         M.reply("RET:SALIAS=OK")
     end)
 
@@ -501,6 +561,7 @@ local function reg_cmds()
     --   后果就是轮询自己把识别轮每秒作废一次, 永远扫不出参数 (2026-10 踩过)
     --   restart 走 mon.restart_detect: 先清旧帧旧值(旧参数下的东西不能混进
     --   新一轮推断), 再重扫 (2026-10)
+    --   2026-11: restart 时同时清 ds_infer (持久化推断表), 做到真正的"重新识别"
     M.reg("R:AUTODETECT", function(arg)
         if arg == "restart" then
             if not mon.is_running() then
@@ -509,6 +570,8 @@ local function reg_cmds()
             -- A 方案 (2026-10): 重新识别 = 新一轮, 名字(别名表)一起清 ——
             -- 名字是"这一轮推断结果"的注解, 新一轮地址变了旧名字就张冠李戴
             if cfgstore and cfgstore.clear_alias then pcall(cfgstore.clear_alias) end
+            -- 2026-11: 持久化推断表也清, 否则下次进 sniff 会加载旧的
+            if cfgstore and cfgstore.clear_infer then pcall(cfgstore.clear_infer) end
             local ok, err = mon.restart_detect()
             if not ok then
                 return M.reply("RET:FAIL:AUTODETECT:" .. tostring(err))
