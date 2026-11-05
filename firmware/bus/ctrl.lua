@@ -171,6 +171,12 @@ function M.switch_mode(mode, from_boot)
             have_cfg = cfgstore and cfgstore.has_pull_cfg and cfgstore.has_pull_cfg()
         end
         if have_cfg then
+            -- 2026-11: 先加载配置到 poll 运行时, 再启动 (否则 R:REG 返回空)
+            local cfg = (slot == SLOT_PULL) and cfgstore.load_pull() or cfgstore.load_poll()
+            if cfg and pm then
+                local n, err = cfgstore.normalize_poll(cfg)
+                if n then pm.apply_cfg(n) end
+            end
             -- pm 为 nil = bus/poll 加载失败(模块缺失), 当成起不来
             if not (pm and pm.start(slot)) then return false, "FAIL poll start" end
         else
