@@ -49,7 +49,8 @@ local log = util.log()
 local mbus = require "bus/mbus"
 
 -- V2 日志优化 (2026-11-06): 单行化 + 耗时 + 堆 + R:BOOT 快照
-local _t, _n = os.clock(), 0
+local _t0 = os.clock()
+local _t, _n = _t0, 0
 local BOOT_LINES = {}
 
 local function mod(name, ok, m, extra)
