@@ -238,6 +238,11 @@ async function readCfgSilent() {
       if (fillOk(E(pre, 'inpRound'))) E(pre, 'inpRound').value = c.interval_ms || 3000;
       if (fillOk(E(pre, 'inpSlave'))) E(pre, 'inpSlave').value = c.slave || 1;
       if (fillOk(E(pre, 'inpTimeout'))) E(pre, 'inpTimeout').value = (c.timeout_ms == null) ? '' : c.timeout_ms;
+      // V1-1 修复 (2026-11-06): 用 R:CFG 的 regs 填充 S.regs，而不是 R:REG
+      // R:REG 返回的是寄存器当前值（可能为空），R:CFG.cfg.regs 才是寄存器配置
+      if (c.regs && Array.isArray(c.regs)) {
+        S.regs = c.regs;
+      }
     }
     // src hint 还是要根据 src 渲染, 但不再据此 early return
     renderCfgSrcHint(S.cfgSrc || 'pull');
@@ -246,10 +251,13 @@ async function readCfgSilent() {
     // 不能只判 Array.isArray, 否则空配置时 renderRegTable 不会被调用,
     // 参数表停留在上一次的内容/占位行上
     const d = rr.data;
-    if (Array.isArray(d) || (d && typeof d === 'object')) {
+    // V1-1 修复：只在 R:REG 有数据时更新 S.regs，否则保留 R:CFG 的 regs
+    if (Array.isArray(d) && d.length > 0) {
+      S.regs = d;
+    } else if (d && typeof d === 'object' && Object.keys(d).length > 0) {
       S.regs = toArr(d);
-      renderRegTable(pre);
     }
+    renderRegTable(pre);
     snapClean(pre);
   } catch (e) { /* 静默: 失败不打扰, 下次再试 */ }
 }
