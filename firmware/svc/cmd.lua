@@ -157,6 +157,12 @@ local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
 --   推整张表的话, 64 个地址就是 8KB 的 JSON —— 正是现场崩掉的那个大小。
 function M.push_infer()
     if not mon then return false end
+    -- V1-1 修复 (2026-11-06): SN 烧写期间暂停推送，避免干扰产线工具
+    local prov = package.loaded["sn/prov"]
+    if prov and prov.busy and prov.busy() then
+        log.debug("cmd", "skip INFER_PUSH: SN busy")
+        return false
+    end
     local off, n = mon.infer_view()
     local ok, inf = pcall(mon.infer_page, off, n)
     if not ok or type(inf) ~= "table" then return false end

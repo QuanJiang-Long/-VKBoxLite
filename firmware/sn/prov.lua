@@ -21,6 +21,12 @@ if UART_ID == nil then UART_ID = 4 end
 local rx_buf = ""
 local cb_registered, loop_started = false, false
 
+-- V1-1 修复 (2026-11-06): SN 烧写期间暂停 INFER_PUSH 推送
+-- 烧写工具在 W:SN 后紧跟 R:SN 回读校验，期间如果收到 RET:INFER_PUSH
+-- 会被当成意外应答，导致校验失败、自动上锁不成功
+local sn_busy = false
+function M.busy() return sn_busy end
+
 local function load_switch(key, default)
     if fskv then
         local v = fskv.get(key)
@@ -113,25 +119,40 @@ local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
 
 local function dispatch(line)
     log.debug("prov", "cmd:", line)
+    -- V1-1 修复 (2026-11-06): SN 操作期间暂停 INFER_PUSH，避免烧写工具收到意外应答
+    local is_sn_cmd = false
     local warg = line:match("^W:SN=(.+)$")
     if warg then
+        is_sn_cmd = true
         if not M.write_enable then return reply("RET:FAIL:write disabled") end
         local s, force = warg:match("^([^,]*),?(.*)$")
+        sn_busy = true
         local ok, err = sn().write(trim(s), { force = force:upper() == "FORCE" })
         if ok then reply("RET:OK") else reply("RET:FAIL:" .. tostring(err)) end
+        sn_busy = false
         return
     end
     local swarg = line:match("^W:SNEN=(.+)$")
     if swarg then
+        is_sn_cmd = true
         local name, val, persist = swarg:match("^%s*([^,]+)%s*,%s*([^,]+)%s*,?%s*(%a*)%s*$")
         if not name or not val then return reply("RET:FAIL:SNEN:bad args") end
         local on = (trim(val) == "1" or trim(val):upper() == "ON" or trim(val):upper() == "TRUE")
+        sn_busy = true
         local ok, err = M.set_switch(trim(name):lower(), on, trim(persist):upper() == "P")
         if ok then reply("RET:OK") else reply("RET:FAIL:" .. tostring(err)) end
+        sn_busy = false
         return
     end
     local fn = CMDS[line]
-    if fn then return fn() end
+    if fn then
+        -- R:SN, C:SN, LOCK:SN, UNLOCK:SN, R:ID, R:SNEN 都是 SN 相关
+        is_sn_cmd = line:match(":SN") or line == "R:ID" or line == "R:SNEN" or line == "C:SN"
+        if is_sn_cmd then sn_busy = true end
+        fn()
+        if is_sn_cmd then sn_busy = false end
+        return
+    end
     if type(_G.vcom_handle) == "function" and _G.vcom_handle(line) then return end
     log.debug("prov", "unknown cmd, ignored:", line)
 end
