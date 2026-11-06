@@ -42,17 +42,17 @@ eq(pubsched.due("prop", 0), true, "刚置脏就能发(第一次不受闸门限�
 pubsched.sent("prop")
 eq(pubsched.due("prop", 0), false, "发完不脏了就不该再发")
 
--- 2) ★ 核心: 内容一直变, 但 30 秒内只能发一次
+-- 2) ★ 核心: 内容一直变, 但 60 秒内只能发一次 (V1-3: 30→60 秒)
 pubsched.changed("prop")
 eq(pubsched.due("prop", 0), false, "刚发完又变了 → 闸门未到, 不发")
 advance(10)
 pubsched.changed("prop")
-eq(pubsched.due("prop", 0), false, "过了 10 秒仍不到 30 秒 → 不发")
-advance(19)
+eq(pubsched.due("prop", 0), false, "过了 10 秒仍不到 60 秒 → 不发")
+advance(49)
 pubsched.changed("prop")
-eq(pubsched.due("prop", 0), false, "过了 29 秒还不到 30 秒 → 不发")
+eq(pubsched.due("prop", 0), false, "过了 59 秒还不到 60 秒 → 不发")
 advance(1)
-eq(pubsched.due("prop", 0), true, "过了 30 秒 → 放行")
+eq(pubsched.due("prop", 0), true, "过了 60 秒 → 放行")
 
 -- 3) 闸门被"消费": due 返回 true 之后, 立刻再问一次就不该再发
 pubsched.sent("prop")
@@ -111,12 +111,13 @@ local st = pubsched.status()
 ok(st.prop ~= nil, "status 有 prop 通道")
 ok(st.prop.sent >= 1, "status 记了发送次数")
 ok(st.prop.blocked >= 1, "status 记了被闸门挡住的次数")
-eq(st.prop.min_ms, 30000, "最小间隔 = 30 秒")
+-- V1-3 合宙: MQTT_MIN_S=60 (原 30 秒)
+eq(st.prop.min_ms, 60000, "最小间隔 = 60 秒 (V1-3)")
 
--- 10) ⚠️ 关键回归: 模拟现场 —— 内容每秒都变, 30 秒内只该发一次
+-- 10) ⚠️ 关键回归: 模拟现场 —— 内容每秒都变, 60 秒内只该发一次 (V1-3: 30→60)
 pubsched.reset()
 local sent_count = 0
-for i = 1, 30 do
+for i = 1, 60 do
   pubsched.changed("prop")
   if pubsched.due("prop", 0) then
     sent_count = sent_count + 1
@@ -124,7 +125,7 @@ for i = 1, 30 do
   end
   advance(1)
 end
-eq(sent_count, 1, "30 秒内持续置脏 → 只发 1 次(原来会发 30 次)")
+eq(sent_count, 1, "60 秒内持续置脏 → 只发 1 次(原来会发 60 次)")
 
 pubsched._set_clock(nil, nil)   -- 还原真时钟
 
@@ -132,4 +133,4 @@ if fails > 0 then
   print(string.format('FAIL: %d 个断言不过', fails))
   os.exit(1)
 end
-print("PASS: 上报调度 —— 30 秒闸门挡住高频 / 兜底独立 / 通道互不干扰 / reset 放行")
+print("PASS: 上报调度 —— 60 秒闸门挡住高频 / 兜底独立 / 通道互不干扰 / reset 放行 (V1-3)")
