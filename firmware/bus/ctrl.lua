@@ -300,9 +300,13 @@ function M.switch_mode(mode, from_boot)
         stop_sniff()
         -- 2026-11: V1-1 合宙建议 - boot 进 idle 不清配置(保留上次状态),
         --   手动切 idle 仍清(用户主动复位)。from_boot=true 时跳过清理
+        log.info("ctrl", "switch_mode idle: from_boot=" .. tostring(from_boot))
         local cleared = {}
         if not from_boot then
+            log.info("ctrl", "switch_mode idle: clearing config (manual switch)")
             cleared = M.reset_user_cfg()
+        else
+            log.info("ctrl", "switch_mode idle: preserving config (boot)")
         end
         S.cur = "idle"  -- 34-fix: 记下当前 mode
         -- 第三个返回值是给 W:MODE 拼应答的(见 cmd.lua 的 cleared: 那段),

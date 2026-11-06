@@ -109,6 +109,7 @@ end
 if ctrl then
     local sysc = cfgstore and cfgstore.load_sys()
     local boot = sysc and sysc.boot_mode or "idle"
+    log.info("main", "  boot_mode from ds_sys: " .. tostring(boot) .. " (sysc=" .. tostring(sysc) .. ")")
     -- 三种主动模式都能开机自启。漏一个的症状很隐蔽: 开机模式选了它,
     -- 日志打"485 idle"但设备其实没起来, 用户只会以为"开机启动坏了"
     -- 记录 3 回归修: 这里历史漏改过, 原来写的是 "poll"/"pollpull", 但
@@ -124,8 +125,9 @@ if ctrl then
     else
         -- 2026-11: idle 也要调 switch_mode, 否则 reset_user_cfg() 不执行,
         --   旧配置残留, 切 manual 时会用旧配置起轮询
+        -- V1-1 (2026-11-06): from_boot=true 时不清配置 (保留上次状态)
         local ok, msg = ctrl.switch_mode("idle", true)
-        log.info("main", "  boot_mode=" .. tostring(boot) .. " -> " .. tostring(msg))
+        log.info("main", "  boot_mode=" .. tostring(boot) .. " -> " .. tostring(msg) .. " (from_boot=true, config preserved)")
     end
 end
 
