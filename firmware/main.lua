@@ -53,11 +53,18 @@ local _t0 = os.clock()
 local _t, _n = _t0, 0
 local BOOT_LINES = {}
 
-local function mod(name, ok, m, extra)
+local function mod(name, ok, m, extra, skip)
     _n = _n + 1
     local now = os.clock()
-    local res = ok and (m and "SKIP" or "OK  ") or "FAIL"
-    local line = string.format("%d/6 %-16s %s %5dms lua=%3dK %s",
+    local res
+    if not ok then
+        res = "FAIL"
+    elseif skip then
+        res = "SKIP"
+    else
+        res = "OK  "
+    end
+    local line = string.format("%d. %-16s %s %5dms lua=%3dK %s",
         _n, name, res, math.floor((now - _t) * 1000),
         math.floor(collectgarbage("count")), extra or "")
     _t = now
@@ -127,7 +134,7 @@ end
 
 -- stage 5: MQTT (预载于 stage 4, 这里只是确认)
 local ok, iot = pcall(require, "iot/iot")
-iot = mod("iot", ok, iot, "stage4 已预载")
+iot = mod("iot", ok, iot, "stage4 已预载", true)
 if iot then
     pcall(iot.init)
     local sn = _G.get_device_sn and _G.get_device_sn()
