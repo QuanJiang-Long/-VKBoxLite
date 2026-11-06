@@ -409,6 +409,32 @@ local function reg_cmds()
         }))
     end)
 
+    -- V2 日志优化：R:NET 4G 网络快照
+    M.reg("R:NET", function()
+        if not mobile then return M.reply("RET:NET=mobile unavailable") end
+        local st = mobile.status() or -1
+        local c = (st==1 or st==5) and mobile.scell() or nil
+        M.reply(string.format("RET:NET=iccid:%s;imsi:%s;imei:%s;num:%s;status:%d;csq:%s;rsrp:%s;rsrq:%s;snr:%s;band:%s;tac:%s;eci:%s;ip:%s",
+            tostring(mobile.iccid()), tostring(mobile.imsi()), tostring(mobile.imei()),
+            tostring(mobile.number()), st,
+            tostring(mobile.csq()), tostring(mobile.rsrp()), tostring(mobile.rsrq()),
+            tostring(mobile.snr()),
+            tostring(c and c.band), tostring(c and c.tac), tostring(c and c.eci),
+            tostring(socket.localIP() or "-")))
+    end)
+
+    -- V2 日志优化：R:IOT MQTT 连接快照
+    M.reg("R:IOT", function()
+        if not iot then return M.reply("RET:IOT=iot unavailable") end
+        local s = iot.status()
+        M.reply(string.format("RET:IOT=want:%d;conn:%d;sub:%d;sn:%s;host:%s:%s;manual:%d;pub:%s;subt:%s;ok:%d;fail:%d;bo:%d;err:%s;last:%s",
+            s.want_run and 1 or 0, s.connected and 1 or 0, s.subscribed and 1 or 0,
+            tostring(s.device_id), tostring(s.host), tostring(s.port),
+            s.manual_on and 1 or 0, tostring(s.pub), tostring(s.sub),
+            s.published or 0, s.failed or 0, s.backoff or 0,
+            tostring(s.last_err or s.reject_reason or "-"), tostring(s.last_pub or "-")))
+    end)
+
     M.reg("W:MQTT", function(arg)
         if not iot then return M.reply("RET:FAIL:MQTT:no iot") end
         local t = jdecode(arg)

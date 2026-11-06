@@ -48,30 +48,36 @@ local sys = util.get("sys")
 local log = util.log()
 local mbus = require "bus/mbus"
 
-local function mod(name, ok, m)
-    if ok then
-        log.info("main", "  [OK] " .. name)
-        return m
-    end
-    log.warn("main", "  [SKIP] " .. name .. ": " .. tostring(m))
-    return nil
+-- V2 日志优化 (2026-11-06): 单行化 + 耗时 + 堆 + R:BOOT 快照
+local _t, _n = os.clock(), 0
+local BOOT_LINES = {}
+
+local function mod(name, ok, m, extra)
+    _n = _n + 1
+    local now = os.clock()
+    local res = ok and (m and "SKIP" or "OK  ") or "FAIL"
+    local line = string.format("%d/6 %-16s %s %5dms lua=%3dK %s",
+        _n, name, res, math.floor((now - _t) * 1000),
+        math.floor(collectgarbage("count")), extra or "")
+    _t = now
+    log.info("boot", line)
+    BOOT_LINES[#BOOT_LINES + 1] = line
+    if not ok then log.error("boot", "  " .. name .. " -> " .. tostring(m)) end
+    return m
 end
 
-log.info("main", "boot " .. PROJECT .. " v" .. VERSION .. " build=" .. BUILD_ID)
+log.info("boot", "===== VKBoxLite v" .. VERSION .. " (" .. BUILD_ID .. ")  Air780EP =====")
 
--- stage 1: 看门狗(地基)
-log.info("main", "[1/6] guard")
-local guard = mod("svc/guard", pcall(require, "svc/guard"))
+-- stage 1: 看门狗 (地基)
+local guard = mod("guard", pcall(require, "svc/guard"), nil, "wdt 由 AON 托管")
 if guard then pcall(guard.init) end
 
--- stage 2: SN(产线优先)
-log.info("main", "[2/6] sn")
-local snc = mod("sn/sn", pcall(require, "sn/sn"))
+-- stage 2: SN (产线优先)
+local snc = mod("sn", pcall(require, "sn/sn"), nil,
+    snc and snc.state() == "ready" and ("sn=" .. tostring(_G.get_device_sn())) or "empty")
 if snc then
     pcall(snc.init)
     pcall(snc.identity_init)
-    log.info("main", string.format("  sn state=%s sn=%s", snc.state(),
-        tostring(_G.get_device_sn and _G.get_device_sn())))
     if type(snc.on_change) == "function" then
         pcall(snc.on_change, function(sn, state)
             if state ~= "ready" or sn == nil then return end
@@ -89,18 +95,12 @@ if snc then
 end
 
 -- stage 3: 协议/数据/配置
-log.info("main", "[3/6] bus/data/cfg")
-local collector = mod("data/collector", pcall(require, "data/collector"))
-local cfgstore = mod("cfg", pcall(require, "cfg"))
+local collector = mod("data+cfg", pcall(require, "data/collector"), nil, "maxregs=" .. (cfg and cfg.MAX_REGS or "?"))
+local cfgstore = mod("cfg", pcall(require, "cfg"), nil, nil)
 
--- stage 4: 485 子系统(默认 idle)
-log.info("main", "[4/6] 485")
--- ⚠️ 12-fix-8 (2026-10-28): 不在这里无条件加载 bus/poll。
---   它只有 manual/platform 档用得上(约 14KB 常驻堆), 而 sniff 档恰恰是
---   现场崩掉的档位(Lua 堆 307192 字节, 池用满 98.6% -> VM exit 重启)。
---   改成由 bus/ctrl / svc/cmd 在真正要用时惰性 require。
-local monmod = mod("bus/mon", pcall(require, "bus/mon"))
-local ctrl = mod("bus/ctrl", pcall(require, "bus/ctrl"))
+-- stage 4: 485 子系统 (默认 idle)
+local monmod = mod("485 mon+ctrl", pcall(require, "bus/mon"), nil, nil)
+local ctrl = mod("bus/ctrl", pcall(require, "bus/ctrl"), nil, nil)
 local gpio = util.try("gpio")
 if gpio then
     pcall(gpio.setup, mbus.DE_PIN, 0)
@@ -109,39 +109,24 @@ end
 if ctrl then
     local sysc = cfgstore and cfgstore.load_sys()
     local boot = sysc and sysc.boot_mode or "idle"
-    log.info("main", "  boot_mode from ds_sys: " .. tostring(boot) .. " (sysc=" .. tostring(sysc) .. ")")
-    -- 三种主动模式都能开机自启。漏一个的症状很隐蔽: 开机模式选了它,
-    -- 日志打"485 idle"但设备其实没起来, 用户只会以为"开机启动坏了"
-    -- 记录 3 回归修: 这里历史漏改过, 原来写的是 "poll"/"pollpull", 但
-    -- e0d0bf3 commit 已经把全项目 poll/pollpull 改成 manual/platform,
-    -- 开机路径漏了一处, 设备启动时 fskv 读到 "manual"/"platform" 走 else,
-    -- 用户看到的现象是 W:BOOTMODE=manual 重启后不进 manual。
     if boot == "manual" or boot == "platform" or boot == "sniff" then
-        -- 25-fix: 开机路径传 from_boot=true, 跳过 platform 的 MQTT 连接前置检查
-        --   (此时 iot.start 还没跑, MQTT 没连, 但 boot 应该正常进入,
-        --    连上后由 iot.task_main 自动拉取配置)
         local ok, msg = ctrl.switch_mode(boot, true)
-        log.info("main", "  boot_mode=" .. boot .. " -> " .. tostring(msg))
+        log.info("boot", "  mode=" .. boot .. " -> " .. tostring(msg))
     else
-        -- 2026-11: idle 也要调 switch_mode, 否则 reset_user_cfg() 不执行,
-        --   旧配置残留, 切 manual 时会用旧配置起轮询
-        -- V1-1 (2026-11-06): from_boot=true 时不清配置 (保留上次状态)
         local ok, msg = ctrl.switch_mode("idle", true)
-        log.info("main", "  boot_mode=" .. tostring(boot) .. " -> " .. tostring(msg) .. " (from_boot=true, config preserved)")
+        log.debug("ctrl", "idle(boot): preserving config")
     end
 end
 
--- stage 5: MQTT
-log.info("main", "[5/6] iot")
-local iot = mod("iot/iot", pcall(require, "iot/iot"))
+-- stage 5: MQTT (预载于 stage 4, 这里只是确认)
+local iot = mod("iot", pcall(require, "iot/iot"), nil, "stage4 已预载")
 if iot then
     pcall(iot.init)
     local sn = _G.get_device_sn and _G.get_device_sn()
     if sn and #tostring(sn) > 0 then
         pcall(iot.start)
     else
-        -- 18-fix: 决定必须先烧 SN 再连 MQTT, "no_SN 建连" 字段已删除
-        log.warn("main", "  未烧 SN, MQTT 不建连 (烧 SN 后能建连)")
+        log.warn("main", "  未烧 SN, MQTT 不建连")
     end
 end
 if snc and type(snc.start_warn_monitor) == "function" then
@@ -149,23 +134,117 @@ if snc and type(snc.start_warn_monitor) == "function" then
 end
 
 -- stage 6: 前端指令层 + 产线通道
-log.info("main", "[6/6] cmd/prov")
-local cmd = mod("svc/cmd", pcall(require, "svc/cmd"))
+local cmd = mod("cmd+prov", pcall(require, "svc/cmd"), nil, nil)
 if cmd then pcall(cmd.init) end
-local prov = mod("sn/prov", pcall(require, "sn/prov"))
+local prov = mod("sn/prov", pcall(require, "sn/prov"), nil, nil)
 if prov then
     pcall(prov.init)
     sys.taskInit(function()
-        log.info("main", "  VUART task: 等待 USB 枚举...")
         local ok, ready = pcall(prov.wait_ready, 30000)
         if ok and ready then
-            log.info("main", "  VUART ready COM" .. tostring(prov.uart_id()))
+            log.info("boot", "  vuart=COM" .. tostring(prov.uart_id()))
         else
-            log.error("main", "  VUART 30s 内未就绪")
+            log.error("boot", "  VUART 30s 内未就绪")
         end
     end)
 end
 
-log.info("main", "boot complete, entering sys.run() build=" .. BUILD_ID)
+-- V2 日志优化：开机摘要 + 4G netlog + R:BOOT 快照
+local function boot_report()
+    if cfgstore then
+        local poll = cfgstore.load_poll()
+        local pull = cfgstore.load_pull()
+        local infer = cfgstore.load_infer()
+        log.info("boot", string.format("cfg  poll=%s(%d) pull=%s(%d) infer=%s(%d)",
+            cfgstore.poll_src and cfgstore.poll_src() or "?", (poll and poll.regs and #poll.regs) or 0,
+            cfgstore.pull_src and cfgstore.pull_src() or "?", (pull and pull.regs and #pull.regs) or 0,
+            cfgstore.infer_src and cfgstore.infer_src() or "?", (infer and infer.regs and #infer.regs) or 0))
+        if poll then
+            log.info("boot", string.format("bus  uart1 %d %d%s%d de=%d slave=%d poll=%dms timeout=%dms",
+                poll.baud or 9600, poll.databits or 8,
+                ({[0]="N",[1]="E",[2]="O"})[poll.parity or 0] or "N", poll.stopbits or 1,
+                mbus.DE_PIN, poll.slave or 1, poll.interval_ms or 5000, poll.timeout_ms or 500))
+        end
+    end
+    if mobile then
+        local st = mobile.status() or -1
+        log.info("boot", string.format("4G   iccid=%s sim=rdy(%.2fs) net=%s csq=%s",
+            tostring(mobile.iccid() or "-"), os.clock() - _t0,
+            ({[0]="未注册",[1]="已注册",[2]="搜网中",[3]="被拒绝",[5]="漫游"})[st] or "?",
+            tostring(mobile.csq() or "-")))
+    end
+    if iot then
+        local s = iot.status()
+        log.info("boot", string.format("iot  want=%d conn=%d mode=%s manual=%d host=%s:%s",
+            s.want_run and 1 or 0, s.connected and 1 or 0, s.mode or "?",
+            s.manual_on and 1 or 0, tostring(s.host or "-"), tostring(s.port or "-")))
+    end
+end
+
+-- 4G netlog: 变化驱动打点 (SIM 就绪/注网/驻网/掉网)
+local ST_NAME = {[0]="未注册",[1]="已注册",[2]="搜网中",[3]="被拒绝",
+                 [4]="未知",[5]="漫游已注册",[6]="仅 SMS",[7]="仅 SMS 漫游",[8]="仅紧急"}
+local t0 = os.clock()
+local last_st, last_csq = nil, nil
+
+local function rssi_line(tag)
+    local st = mobile.status() or -1
+    local csq, rsrp, snr = mobile.csq(), mobile.rsrp(), mobile.snr()
+    local s = string.format("%-9s [%5.2fs] status=%d(%s) csq=%s rsrp=%s snr=%s",
+        tag, os.clock() - t0, st, ST_NAME[st] or "?", tostring(csq),
+        tostring(rsrp), tostring(snr))
+    if st == 1 or st == 5 then
+        local c = mobile.scell()
+        if c then s = s .. string.format(" %s%s band=%s tac=%s eci=%s",
+            tostring(c.mcc), tostring(c.mnc), tostring(c.band),
+            tostring(c.tac), tostring(c.eci)) end
+    end
+    log.info("net", s)
+end
+
+sys.taskInit(function()
+    -- SIM 就绪
+    while not mobile.simPin() do sys.wait(500) end
+    log.info("net", string.format("[%5.2fs] SIM ready iccid=%s imsi=%s num=%s",
+        os.clock() - t0, tostring(mobile.iccid()), tostring(mobile.imsi()),
+        tostring(mobile.number())))
+
+    -- 状态变化驱动
+    local reg_at = nil
+    while true do
+        local st = mobile.status() or -1
+        local csq = mobile.csq()
+        local chg = (st ~= last_st)
+            or (type(csq)=="number" and type(last_csq)=="number"
+                and math.abs(csq-last_csq) >= 2 and csq < 99)
+        if chg then
+            if st == 3 then
+                log.warn("net", string.format("[%5.2fs] 注册被拒! 网络侧不允许本卡接入", os.clock()-t0))
+                rssi_line("REG-DENY")
+                log.warn("net", "  → 查机卡绑定/区域限制/欠费; iccid=" .. tostring(mobile.iccid()))
+            elseif st == 1 or st == 5 then
+                reg_at = reg_at or os.clock()
+                rssi_line("REG-OK")
+                log.info("net", string.format("[%5.2fs] 驻网成功 耗时 %.2fs ip=%s",
+                    os.clock()-t0, os.clock()-reg_at,
+                    tostring(socket.localIP() or "-")))
+            else
+                rssi_line("NET")
+            end
+            last_st, last_csq = st, csq
+        end
+        sys.wait(1000)
+    end
+end)
+
+-- 注册 R:BOOT 快照指令
+if cmd then
+    cmd.reg("R:BOOT", function() boot_report() end)
+end
+
+log.info("boot", string.format("===== done %dms  lua=%d/%dK =====",
+    math.floor((os.clock() - _t0) * 1000),
+    math.floor(collectgarbage("count")),
+    math.floor(collectgarbage("count") * 1024 / 300)))
 
 sys.run()
