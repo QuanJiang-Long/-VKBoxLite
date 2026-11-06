@@ -274,7 +274,7 @@ function M.switch_mode(mode, from_boot)
                 if iot then pcall(iot.pull_start) end
                 -- 2026-11: 加载推断表到 mon 累加器 (让 build_topo 立即可用)
                 if cfgstore and mon.load_infer then
-                    pcall(mon.load_infer, c and c.regs or {})
+                    pcall(mon.load_infer, c and c.regs or {}, c and c.slave or 1)
                 end
                 S.cur = "sniff"
                 return true, "OK sniff started (from persist)"

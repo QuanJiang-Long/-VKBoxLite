@@ -1094,8 +1094,9 @@ end
 
 -- 2026-11: 从持久化数据加载推断表到累加器 (进 sniff 时调用)
 -- regs: ds_infer 里的 regs 数组 [{addr, count, fc, dtype, name, id}]
-function M.load_infer(regs)
+function M.load_infer(regs, slave)
     if type(regs) ~= "table" then return end
+    slave = tonumber(slave) or 1
     -- 清空现有累加器
     infer_acc = {}
     infer_order = {}
@@ -1104,7 +1105,6 @@ function M.load_infer(regs)
     -- 逐条加载
     for _, r in ipairs(regs) do
         if type(r) == "table" and r.addr then
-            local slave = 1  -- sniff 持久化不支持多从机, 默认 1
             local a = acc_row(slave, r.addr, r.fc)
             if a then
                 a.dtype = r.dtype or "uint16"
@@ -1123,7 +1123,7 @@ function M.load_infer(regs)
             end
         end
     end
-    log.info("mon", "loaded infer table from persist, rows=" .. #infer_order)
+    log.info("mon", "loaded infer table from persist, slave=" .. slave .. " rows=" .. #infer_order)
 end
 
 -- 2026-11: 更新单行 name/id/dtype (W:SALIAS 调用, 同步到内存推断表)
