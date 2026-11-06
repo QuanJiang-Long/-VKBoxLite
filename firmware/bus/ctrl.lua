@@ -298,8 +298,12 @@ function M.switch_mode(mode, from_boot)
         local pm3 = pollmod(false)
         if pm3 then pm3.stop() end
         stop_sniff()
-        -- 2026-11: 进 idle 一律清配置 (简化逻辑, 不区分开机/手动切)
-        local cleared = M.reset_user_cfg()
+        -- 2026-11: V1-1 合宙建议 - boot 进 idle 不清配置(保留上次状态),
+        --   手动切 idle 仍清(用户主动复位)。from_boot=true 时跳过清理
+        local cleared = {}
+        if not from_boot then
+            cleared = M.reset_user_cfg()
+        end
         S.cur = "idle"  -- 34-fix: 记下当前 mode
         -- 第三个返回值是给 W:MODE 拼应答的(见 cmd.lua 的 cleared: 那段),
         -- msg 本身保持原样, 别把清单塞进去 —— switch_mode 的返回值有别的调用方

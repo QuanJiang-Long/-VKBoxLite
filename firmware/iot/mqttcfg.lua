@@ -191,7 +191,11 @@ function M.save(c)
     -- 两条 topic(各 128) 直接超。2048 对最长字段仍有 2 倍余量
     if #s > 2048 then return false, "too large" end
     if not fskv then return false, "no fskv" end
-    fskv.set(K_CFG, s)
+    local ok, err = pcall(fskv.set, K_CFG, s)
+    if not ok then
+        log.warn("mqtt_cfg", "fskv.set failed:", tostring(err))
+        return false, "fskv.set failed"
+    end
     kv_flush()
     load_cache = nil      -- 12-fix-4: 落盘了, 缓存必须失效
     load_cache_src = "default"

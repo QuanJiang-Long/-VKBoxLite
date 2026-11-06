@@ -464,9 +464,15 @@ local function build_items()
     for k, d in pairs(collector.get_all_latest()) do
         local vs = MqttUtil.jnum(d.value)
         if vs then
-            -- reg<addr> 格式 (去掉 s<slave>_ 前缀, 单从机场景够用,
-            -- 多从机同地址会冲突, 但 sniff 模式是单从机视角)
-            local slave = tonumber(k:match("^reg%d+$") and "1") or cfg_slave
+            -- V1-4 合宙: sniff 用 mon.infer 的 slave, 其他用 cfg_slave
+            -- 原代码 reg<addr> 格式硬编码 slave=1, 多从机场景会错位
+            local slave
+            if sniff_mode then
+                local infer_data = mon.infer and mon.infer()
+                slave = (infer_data and infer_data.slave) or 1
+            else
+                slave = cfg_slave
+            end
             if slave and (sniff_mode or allowed == nil or allowed[k]) then
                 -- id: 别名表配了用别名, 否则用键本身; name: 名字 > 别名 id > cfg alias > 键
                 local sa = smap[k]
@@ -1294,10 +1300,11 @@ local function send_gw_res()
             { id = "IMEI", value = MqttUtil.imei(mobile) },
             { id = "ICCID", value = tostring(MqttUtil.mcall(mobile, "iccid") or "") },
         }, ts), 1)
+    -- V1-5 合宙: 无论成功失败都推进 res_at, 避免失败后死循环重试
+    S.res_at = os.time()
     if not ok then return false end
     -- 占用比是"上一个区间"的值, 发完就归零重新攒。不清的话 busy 一直涨而
     -- span 涨得更快, 占比会越算越小, 平台看到的是个单调下降的假曲线
-    S.res_at = os.time()
     S.busy_s, S.span_s = 0, 0
     -- U5 阈值检测: 上升沿触发, 防刷屏
     check_event_threshold(ram, cpu)

@@ -48,8 +48,8 @@ local cfg = require "core/config"
 
 local M = {}
 
--- 最小发布间隔(毫秒)。用户拍板 30 秒(2026-10-28)。
-M.PUB_MIN_MS = cfg.PUB_MIN_MS or 30000
+-- 最小发布间隔(毫秒)。V1-3 合宙: 用 MQTT_MIN_S 替代原 PUB_MIN_MS
+M.PUB_MIN_MS = (cfg.MQTT_MIN_S or 60) * 1000
 
 -- 通道表。min_ms = 该通道两次发送之间的最小间隔(毫秒)。
 local CH = {
@@ -78,26 +78,28 @@ local function consume(st)
     st.wall = clock_wall()
 end
 
--- 该不该发(会占用时间窗)。
+-- 该不该发(会占用时间窗)。单路径: 内容变+过闸门 OR 到期兜底
 --   fallback_s: 到期兜底周期(秒), 0 = 不做兜底。
 --              兜底不看脏标记 —— 指纹/数据长时间没变也定期重发一次,
 --              让平台确认设备还活着(原来的 interval_s 语义)。
 function M.due(ch, fallback_s)
     local st = CH[ch]
     if not st then return false end
+    local now = clock()
+    local now_wall = clock_wall()
+    -- 闸门: 距上次【尝试】满 min_ms
+    local gate_ok = ((now - (st.at or -1e9)) * 1000) >= st.min_ms
     -- 兜底: 距上次【尝试】满 fallback_s
-    if fallback_s and fallback_s > 0 and (clock_wall() - (st.wall or 0)) >= fallback_s then
+    local fallback_ok = fallback_s and fallback_s > 0 and (now_wall - (st.wall or 0)) >= fallback_s
+    -- 单路径判定: (内容变 OR 兜底到期) AND 过闸门
+    if (st.dirty or fallback_ok) and gate_ok then
         consume(st)
         return true
     end
-    if not st.dirty then return false end
-    -- 闸门: 距上次【尝试】满 min_ms
-    if ((clock() - (st.at or -1e9)) * 1000) < st.min_ms then
+    if not gate_ok then
         st.blocked = (st.blocked or 0) + 1
-        return false
     end
-    consume(st)
-    return true
+    return false
 end
 
 -- 纯时间闸门(会占用时间窗)。给"内容变了"要靠重建才能知道的通道用 ——

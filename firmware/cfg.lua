@@ -59,7 +59,11 @@ local function kv_set(k, s)
     if not fskv then return false end
     json_cache[k] = nil   -- 12-fix-3: 写盘了, 解码缓存必须失效
     cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号跟着涨(别名映射缓存靠它失效)
-    fskv.set(k, s)
+    local ok, err = pcall(fskv.set, k, s)
+    if not ok then
+        log.warn("cfg", "fskv.set failed:", k, tostring(err))
+        return false
+    end
     if fskv.save then pcall(fskv.save) end
     return true
 end
