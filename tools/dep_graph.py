@@ -3,7 +3,7 @@ import os
 import re
 import sys
 
-LUA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lua")
+LUA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firmware")
 
 def get_requires(path):
     """返回 [(模块名, 是否惰性)]。

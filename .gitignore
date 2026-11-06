@@ -17,15 +17,19 @@ dist/
 图/
 
 # 临时调试脚本 (check_lua / 探针生成 / diff 分析等)
-# commit 后清掉, 加规则避免再次出现
+# commit 后清掉，加规则避免再次出现
 .tmp_*.py
 .tmp_*.txt
 .tmp_*.sh
 
-# 烧录瘦身版脚本 (tools\\prep_burn.ps1 生成, 不进仓库)
+# LuatOS PC 模拟器日志（配置保留，日志忽略）
+.simulator/logs/
+
+# Agent 会话笔记（本地辅助，不进仓库）
+.agent-memory/
+
+# 烧录产物（去注释版固件，由 prep_burn 生成）
 build/
 
-# LuatOS PC ���������鸱���� (�����)
-pcconf/
-pclogs/
-
+# 根目录 package-lock.json（依赖在 frontend/ 下）
+package-lock.json

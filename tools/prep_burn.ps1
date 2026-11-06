@@ -16,7 +16,7 @@
 #   块后同一行的代码); 行尾注释一律不动。行号与源文件完全一致。
 
 param(
-    [string]$Src = (Join-Path $PSScriptRoot '..\lua'),
+    [string]$Src = (Join-Path $PSScriptRoot '..\firmware'),
     [string]$Dst = (Join-Path $PSScriptRoot '..\build\lua_burn')
 )
 
@@ -86,7 +86,7 @@ Get-ChildItem $Src -Recurse -Filter *.lua | ForEach-Object {
     $dstTotal += (Get-Item $outFile).Length
 }
 
-Write-Host ("source lua/   : {0,7} bytes ({1} KB)" -f $srcTotal, [math]::Round($srcTotal / 1kb, 1))
+Write-Host ("source firmware/: {0,7} bytes ({1} KB)" -f $srcTotal, [math]::Round($srcTotal / 1kb, 1))
 Write-Host ("slim build    : {0,7} bytes ({1} KB)   {2} comment lines removed" -f $dstTotal, [math]::Round($dstTotal / 1kb, 1), $stripped)
 Write-Host ("script area   :      262144 bytes (256 KB) max")
 if ($dstTotal -gt 262144) {

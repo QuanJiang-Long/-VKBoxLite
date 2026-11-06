@@ -69,7 +69,7 @@ if not exist "%SCR%" (
     echo [setup] simulator root staged at %SCR%
 )
 copy /y tools\luatos_pc_main.lua "%SCR%\main.lua" >nul
-robocopy lua "%SCR%\lua" /MIR /NJH /NJS /NDL /NFL >nul 2>&1
+robocopy firmware "%SCR%\lua" /MIR /NJH /NJS /NDL /NFL >nul 2>&1
 del /q "%SCR%\lua\main.lua" >nul 2>&1
 robocopy tests\lua "%SCR%\tests" /MIR /NJH /NJS /NDL /NFL >nul 2>&1
 set "LUA_TEST=%~1.lua"

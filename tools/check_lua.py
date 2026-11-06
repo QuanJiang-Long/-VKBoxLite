@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 
-LUA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lua")
+LUA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firmware")
 
 LUA_BUILTINS = {
     "assert", "error", "ipairs", "next", "pairs", "pcall", "print", "select",

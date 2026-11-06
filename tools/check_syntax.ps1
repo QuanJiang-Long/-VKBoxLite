@@ -22,7 +22,7 @@
 #
 # HOW IT WORKS:
 #   1. stage the simulator into %TEMP% (once)
-#   2. mirror the sources to <staging>\lua\
+#   2. mirror the sources to <staging>\firmware\
 #   3. write a generated main.lua that lists the files as LITERALS
 #      (the simulator's dependency-trim scanner only keeps files it can see
 #      as literals in main.lua -- a list passed via env var is invisible
@@ -36,7 +36,7 @@
 #   powershell -ExecutionPolicy Bypass -File tools\check_syntax.ps1
 #   powershell -ExecutionPolicy Bypass -File tools\check_syntax.ps1 -Root build\lua_burn
 param(
-    [string]$Root = "lua",
+    [string]$Root = "firmware",
     [switch]$NoSelfCheck
 )
 
@@ -90,7 +90,7 @@ $entries = @()
 foreach ($f in $files) {
     $rel = $f.FullName.Substring($srcFull.Length).TrimStart('\').Replace('\', '/')
     if ($rel -eq "main.lua") { $rel = "_entry.lua" }
-    $entries += ("lua/" + $rel)
+    $entries += ("firmware/" + $rel)
 }
 
 function Write-CheckerMain([string[]]$list) {
@@ -137,7 +137,7 @@ if ($r.Rc -ne 0) { exit 1 }
 
 # ---- pass 2: self-check -- prove the checker can actually fail ----
 if (-not $NoSelfCheck) {
-    $relBroken = "lua/_selfcheck_broken.lua"
+    $relBroken = "firmware/_selfcheck_broken.lua"
     $broken = Join-Path $scr $relBroken.Replace("/", "\")
     # duplicated `return` -- exactly the 12-fix bug
     [System.IO.File]::WriteAllText($broken, "local function f()`n  return true`n  return true`nend`nreturn f`n")

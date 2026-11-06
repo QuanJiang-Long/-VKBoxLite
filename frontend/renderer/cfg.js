@@ -45,12 +45,13 @@ function cfgSnap(pre) {
 }
 
 // 表单被程序改过（读配置 / 保存 / 拉取 / 导入）之后调用：当前状态记为干净
-function snapClean(pre) { S.cfgSnap = cfgSnap(pre); refreshCfgDirty(pre); }
+function snapClean(pre) { S.cfgSnap = cfgSnap(pre); console.log('[snapClean] 设置 cfgSnap 基线'); refreshCfgDirty(pre); }
 
 function refreshCfgDirty(pre) {
   // cfgSnap 还是 null 说明从没读过配置，没有可比基线，不算脏
   if (pre === undefined) pre = cfgPrefix();
   const d = S.cfgSnap !== null && cfgSnap(pre) !== S.cfgSnap;
+  console.log('[refreshCfgDirty] cfgSnap:', S.cfgSnap !== null ? '已设置' : 'null', '当前快照:', cfgSnap(pre).substring(0, 50), 'dirty:', d);
   if (d === S.cfgDirty) return;
   const wasDirty = S.cfgDirty;
   S.cfgDirty = d;

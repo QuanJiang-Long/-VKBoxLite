@@ -14,8 +14,8 @@ cd /d "%~dp0.."
 powershell -ExecutionPolicy Bypass -File "tools\prep_burn.ps1"
 echo.
 echo If "FREE" above is positive, burn the scripts in build\lua_burn\ with LuaTools.
-echo Do NOT burn the lua\ folder directly - script area is only 256KB.
+echo Do NOT burn the firmware\ folder directly - script area is only 256KB.
 echo.
-echo REMINDER: build\lua_burn\ is a SNAPSHOT. If you edited lua\ after running
+echo REMINDER: build\lua_burn\ is a SNAPSHOT. If you edited firmware\ after running
 echo this, run it again before burning, or you will flash the old code.
 pause
