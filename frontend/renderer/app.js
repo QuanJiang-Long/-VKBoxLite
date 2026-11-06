@@ -1093,6 +1093,11 @@ async function applyMode(mode) {
       const tbody = E(pre, 'paramTbody');
       if (tbody) tbody.innerHTML = '';
     });
+    // V1-1 修复 (2026-11-06): 切档后清除 cfgRead 标记，强制重新读取配置
+    // 场景：idle→manual 时，idle 读了空配置并标记 cfgRead_m=true，
+    // 切 manual 后不再重读，导致前端显示 0 寄存器但设备实际有配置
+    S.cfgRead_m = false;
+    S.cfgRead_p = false;
     // sniff 模式: W:MODE 只是"起了业务并开始后台识别", 不是识别完成。
     // 真正的到位要等 pollDetect 拿到参数 —— 那之前总线上看到的还是
     // 错参数的乱码, 所以这里必须说清"还在识别", 别让用户以为已经在听了
