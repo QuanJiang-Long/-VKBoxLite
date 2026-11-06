@@ -69,11 +69,13 @@ end
 log.info("boot", "===== VKBoxLite v" .. VERSION .. " (" .. BUILD_ID .. ")  Air780EP =====")
 
 -- stage 1: 看门狗 (地基)
-local guard = mod("guard", pcall(require, "svc/guard"), nil, "wdt 由 AON 托管")
+local ok, guard = pcall(require, "svc/guard")
+guard = mod("guard", ok, guard, "wdt 由 AON 托管")
 if guard then pcall(guard.init) end
 
 -- stage 2: SN (产线优先)
-local snc = mod("sn", pcall(require, "sn/sn"), nil,
+local ok, snc = pcall(require, "sn/sn")
+snc = mod("sn", ok, snc,
     snc and snc.state() == "ready" and ("sn=" .. tostring(_G.get_device_sn())) or "empty")
 if snc then
     pcall(snc.init)
@@ -95,12 +97,16 @@ if snc then
 end
 
 -- stage 3: 协议/数据/配置
-local collector = mod("data+cfg", pcall(require, "data/collector"), nil, "maxregs=" .. (cfg and cfg.MAX_REGS or "?"))
-local cfgstore = mod("cfg", pcall(require, "cfg"), nil, nil)
+local ok, collector = pcall(require, "data/collector")
+collector = mod("data+cfg", ok, collector, "maxregs=" .. (cfg and cfg.MAX_REGS or "?"))
+local ok, cfgstore = pcall(require, "cfg")
+cfgstore = mod("cfg", ok, cfgstore, nil)
 
 -- stage 4: 485 子系统 (默认 idle)
-local monmod = mod("485 mon+ctrl", pcall(require, "bus/mon"), nil, nil)
-local ctrl = mod("bus/ctrl", pcall(require, "bus/ctrl"), nil, nil)
+local ok, monmod = pcall(require, "bus/mon")
+monmod = mod("485 mon+ctrl", ok, monmod, nil)
+local ok, ctrl = pcall(require, "bus/ctrl")
+ctrl = mod("bus/ctrl", ok, ctrl, nil)
 local gpio = util.try("gpio")
 if gpio then
     pcall(gpio.setup, mbus.DE_PIN, 0)
@@ -119,7 +125,8 @@ if ctrl then
 end
 
 -- stage 5: MQTT (预载于 stage 4, 这里只是确认)
-local iot = mod("iot", pcall(require, "iot/iot"), nil, "stage4 已预载")
+local ok, iot = pcall(require, "iot/iot")
+iot = mod("iot", ok, iot, "stage4 已预载")
 if iot then
     pcall(iot.init)
     local sn = _G.get_device_sn and _G.get_device_sn()
@@ -134,9 +141,11 @@ if snc and type(snc.start_warn_monitor) == "function" then
 end
 
 -- stage 6: 前端指令层 + 产线通道
-local cmd = mod("cmd+prov", pcall(require, "svc/cmd"), nil, nil)
+local ok, cmd = pcall(require, "svc/cmd")
+cmd = mod("cmd+prov", ok, cmd, nil)
 if cmd then pcall(cmd.init) end
-local prov = mod("sn/prov", pcall(require, "sn/prov"), nil, nil)
+local ok, prov = pcall(require, "sn/prov")
+prov = mod("sn/prov", ok, prov, nil)
 if prov then
     pcall(prov.init)
     sys.taskInit(function()
