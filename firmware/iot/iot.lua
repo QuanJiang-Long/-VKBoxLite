@@ -1148,14 +1148,17 @@ end
 --   现场池子 95% 时, 这 8.6KB 连续块就是切不出来的那个。
 --   现在固定字段 + nodes 片段全塞进一个表, 一次 table.concat 出 body。
 --   拼出来的字节跟老逻辑【逐字节一致】(平台的物模型契约不能动)。
-local function send_topo(parts_in)
+-- V1-4 拆分 (2026-11-06): 支持发送空拓扑（不带 nodes）作为保活
+-- empty=true 时发送 {"vendor":...,"model":...,"fwVersion":...,"ts":...,"nodes":[]}
+-- empty=false/nil 时发送带 nodes 数组的完整拓扑
+local function send_topo(parts_in, empty)
     local did = cur_did()
     if not did then return false, "无 SN" end
     -- 识别未成功前不发拓扑 (见 pub_blocked)。旧门闸只看 detecting, 兜底失败
     -- 之后 detecting=false 但其实没识别成功, 照样会发 —— 现在统一按"未成功"判
     if pub_blocked() then return false, "识别未完成" end
     local parts = parts_in
-    if not parts then
+    if not parts and not empty then
         local p, err = build_topo()
         if not p then return false, err end
         parts = p
@@ -1171,7 +1174,9 @@ local function send_topo(parts_in)
         ',"ts":"', MqttUtil.ms_of(os.time()), '"',
         ',"nodes":[',
     }
-    for i = 1, #parts do b[#b + 1] = parts[i] end
+    if parts then
+        for i = 1, #parts do b[#b + 1] = parts[i] end
+    end
     b[#b + 1] = ']}'
     local body = table.concat(b)
     return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did), body, 1)
@@ -2661,6 +2666,18 @@ local function task_main()
                             S.topo_fail_n = (S.topo_fail_n or 0) + 1
                         end
                     end
+                end
+            end
+            -- V1-4 拆分 (2026-11-06): 空拓扑保活（不带 nodes）
+            -- 与数据上报同周期（60s min / 180s fallback），确认设备在线
+            -- 带 nodes 的拓扑由事件触发（首次/新增），不受此间隔控制
+            if get_mode() ~= "idle" and pubsched.due("topo_keepalive", c.interval_s) then
+                local pok, sent, e = pcall(send_topo, nil, true)
+                if pok and sent then
+                    pubsched.sent("topo_keepalive")
+                    log.info("iot", "topo keepalive posted (empty)")
+                else
+                    log.warn("iot", "topo keepalive failed: " .. tostring(e))
                 end
             end
             -- 12-fix-4: 每 30 秒一行结构普查(见 census() 上面的说明)
