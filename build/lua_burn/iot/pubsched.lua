@@ -49,7 +49,7 @@ local cfg = require "core/config"
 local M = {}
 
 
-M.PUB_MIN_MS = cfg.PUB_MIN_MS or 30000
+M.PUB_MIN_MS = (cfg.MQTT_MIN_S or 60) * 1000
 
 
 local CH = {
@@ -85,19 +85,21 @@ end
 function M.due(ch, fallback_s)
     local st = CH[ch]
     if not st then return false end
+    local now = clock()
+    local now_wall = clock_wall()
 
-    if fallback_s and fallback_s > 0 and (clock_wall() - (st.wall or 0)) >= fallback_s then
+    local gate_ok = ((now - (st.at or -1e9)) * 1000) >= st.min_ms
+
+    local fallback_ok = fallback_s and fallback_s > 0 and (now_wall - (st.wall or 0)) >= fallback_s
+
+    if (st.dirty or fallback_ok) and gate_ok then
         consume(st)
         return true
     end
-    if not st.dirty then return false end
-
-    if ((clock() - (st.at or -1e9)) * 1000) < st.min_ms then
+    if not gate_ok then
         st.blocked = (st.blocked or 0) + 1
-        return false
     end
-    consume(st)
-    return true
+    return false
 end
 
 

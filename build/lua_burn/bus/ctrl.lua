@@ -299,7 +299,15 @@ function M.switch_mode(mode, from_boot)
         if pm3 then pm3.stop() end
         stop_sniff()
 
-        local cleared = M.reset_user_cfg()
+
+        log.info("ctrl", "switch_mode idle: from_boot=" .. tostring(from_boot))
+        local cleared = {}
+        if not from_boot then
+            log.info("ctrl", "switch_mode idle: clearing config (manual switch)")
+            cleared = M.reset_user_cfg()
+        else
+            log.info("ctrl", "switch_mode idle: preserving config (boot)")
+        end
         S.cur = "idle"  -- 34-fix: 记下当前 mode
 
 

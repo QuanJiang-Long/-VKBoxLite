@@ -466,7 +466,13 @@ local function build_items()
         if vs then
 
 
-            local slave = tonumber(k:match("^reg%d+$") and "1") or cfg_slave
+            local slave
+            if sniff_mode then
+                local infer_data = mon.infer and mon.infer()
+                slave = (infer_data and infer_data.slave) or 1
+            else
+                slave = cfg_slave
+            end
             if slave and (sniff_mode or allowed == nil or allowed[k]) then
 
                 local sa = smap[k]
@@ -1294,10 +1300,11 @@ local function send_gw_res()
             { id = "IMEI", value = MqttUtil.imei(mobile) },
             { id = "ICCID", value = tostring(MqttUtil.mcall(mobile, "iccid") or "") },
         }, ts), 1)
+
+    S.res_at = os.time()
     if not ok then return false end
 
 
-    S.res_at = os.time()
     S.busy_s, S.span_s = 0, 0
 
     check_event_threshold(ram, cpu)
@@ -2631,6 +2638,31 @@ local function task_main()
                 S.topo_fail_at = nil
             end
             end  -- if pub_platform end
+
+
+
+
+
+
+            if should_pub_topo() and mqttcfg.load().manual_on then
+                if pubsched.due("topo", cfg.TOPO_REBUILD_MS / 1000) then
+                    local sig, parts, pids = topo_sig()
+                    if sig and sig ~= S.topo_sig then
+                        local pok, sent, e = pcall(send_topo, parts)
+                        if pok and sent then
+                            S.topo_ack_props = S.topo_ack_props or {}
+                            for _, id in ipairs(pids) do
+                                S.topo_ack_props[id] = true
+                            end
+                            S.topo_sent_at = os.clock()
+                            log.info("iot", "topo posted (manual mqtt): props=" .. #pids)
+                        else
+                            S.topo_fail_at = os.clock()
+                            S.topo_fail_n = (S.topo_fail_n or 0) + 1
+                        end
+                    end
+                end
+            end
 
             if (os.clock() - (S.census_at or -1e9)) >= 30 then
                 S.census_at = os.clock()

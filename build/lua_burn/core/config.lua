@@ -48,7 +48,8 @@ M.SN_MAX_LEN = 32
 M.SN_WARN_PERIOD_S = 600
 
 
-M.MQTT_INTERVAL_S = 120  -- 默认 2min, U2-m (兜底) / U3 res / U4 prop 共享
+M.MQTT_INTERVAL_S = 180  -- V1-3 合宙: 120→180 (3min), 减少流量 6 倍
+M.MQTT_MIN_S = 60        -- V1-3 合宙: 最小发布间隔 60s (原 PUB_MIN_MS=30s 架空 interval)
 M.MQTT_QOS = 1
 
 

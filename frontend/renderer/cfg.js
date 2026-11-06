@@ -184,6 +184,11 @@ async function readCfg(quiet) {
       if (fillOk(E(pre, 'inpRound'))) E(pre, 'inpRound').value = c.interval_ms || 3000;
       if (fillOk(E(pre, 'inpSlave'))) E(pre, 'inpSlave').value = c.slave || 1;
       if (fillOk(E(pre, 'inpTimeout'))) E(pre, 'inpTimeout').value = (c.timeout_ms == null) ? '' : c.timeout_ms;
+      // V1-1 修复 (2026-11-06): R:CFG 返回的 cfg.regs 是配置（点表定义），
+      // R:REG 返回的是当前值（轮询未读时为空）。优先用 cfg.regs 填充 S.regs
+      if (c.regs && Array.isArray(c.regs)) {
+        S.regs = c.regs;
+      }
       // 首次进 pollpull 时 ds_pull 还是空的, R:CFG 会回 src='default',
       // 这条提示只对用户主动点「读取配置」有意义; 自动路径
       // (waitPullDone / renderPushBanner) 走 silent, 不弹, 否则切档就被
@@ -193,15 +198,20 @@ async function readCfg(quiet) {
       }
     }
     const rr = await sendCmd(Protocol.Enc.reg(), 'REG');
-    // 设备端 regs 为空时回 {}（Lua 空表编码成对象而非数组），
-    // 不能只判 Array.isArray，否则空配置时 renderRegTable 不会被调用，
-    // 参数表停留在上一次的内容/占位行上
+    // V1-1 修复 (2026-11-06): R:REG 是寄存器当前值，轮询未读时为空 {}。
+    // 只有当 R:REG 有实际数据时才覆盖 S.regs（避免清空已从 cfg.regs 填好的点表）
     const d = rr.data;
-    if (Array.isArray(d) || (d && typeof d === 'object')) {
+    if (Array.isArray(d) && d.length > 0) {
+      S.regs = d;
+    } else if (d && typeof d === 'object' && Object.keys(d).length > 0) {
       S.regs = toArr(d);
+    }
+    // 无论 R:REG 是否为空，只要 S.regs 有内容就渲染
+    if (S.regs && S.regs.length > 0) {
       renderRegTable(pre);
       status('配置已读取：' + S.regs.length + ' 个寄存器', true);
     } else {
+      renderRegTable(pre);
       status('配置已读取', true);
     }
     snapClean(pre);                    // 读完了，当前表单就是干净基线

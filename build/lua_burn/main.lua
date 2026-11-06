@@ -109,6 +109,7 @@ end
 if ctrl then
     local sysc = cfgstore and cfgstore.load_sys()
     local boot = sysc and sysc.boot_mode or "idle"
+    log.info("main", "  boot_mode from ds_sys: " .. tostring(boot) .. " (sysc=" .. tostring(sysc) .. ")")
 
 
 
@@ -124,8 +125,9 @@ if ctrl then
     else
 
 
+
         local ok, msg = ctrl.switch_mode("idle", true)
-        log.info("main", "  boot_mode=" .. tostring(boot) .. " -> " .. tostring(msg))
+        log.info("main", "  boot_mode=" .. tostring(boot) .. " -> " .. tostring(msg) .. " (from_boot=true, config preserved)")
     end
 end
 
