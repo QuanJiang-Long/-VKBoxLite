@@ -1157,9 +1157,13 @@ local function do_save_infer()
         databits = detect_result.databits or 8,
         stopbits = detect_result.stopbits or 1,
         parity = detect_result.parity or 0,
-        slave = 1,
+        slave = 1,  -- 默认值，下面会从 infer_order 里取实际值
         regs = {},
     }
+    -- 从第一行取实际的 slave 值（sniff 持久化时所有行应该同一个 slave）
+    if #infer_order > 0 and infer_order[1].slave then
+        save_data.slave = infer_order[1].slave
+    end
     for _, r in ipairs(infer_order) do
         if not merged_addrs[r.addr] then
             save_data.regs[#save_data.regs + 1] = {
