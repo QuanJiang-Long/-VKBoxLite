@@ -164,7 +164,7 @@ function M.normalize_alias(c)
                         if not seen[key] then
                             seen[key] = true
                             out.regs[#out.regs + 1] = { key = key, id = id, name = nm }
-                            if #out.regs >= MAX_ALIAS then return nil, "别名条数过多" end
+                            if #out.regs > MAX_ALIAS then return nil, "别名条数过多" end
                         end
                     end
                 end
@@ -274,7 +274,7 @@ function M.normalize_poll(c)
         for _, r in ipairs(regs) do
             local nr, err = normalize_reg(r)
             if not nr then return nil, err end
-            if #out.regs >= cfg.MAX_REGS then return nil, "too many regs" end
+            if #out.regs > cfg.MAX_REGS then return nil, "too many regs" end
             -- 同 addr 只留首条。平台的 properties 实测会把同一属性发两遍
             -- (2026-10-08 日志: skipped 里 reg_100/reg_250 各出现两次),
             -- 原样存进重复项, 切 pollpull 后同一帧重复读, 白占总线时间
@@ -323,7 +323,7 @@ function M.normalize_infer(c)
                 if not seen[key] then
                     seen[key] = true
                     out.regs[#out.regs + 1] = nr
-                    if #out.regs >= MAX_ALIAS then break end
+                    if #out.regs > MAX_ALIAS then break end
                 end
             end
         end

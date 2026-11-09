@@ -783,7 +783,8 @@ end
 --   闸门只对 sniff 返回 true (iot.lua 的 should_pub_topo)。platform 档的
 --   物模型是平台自己下发的, 设备不通过 U2 拓扑上报它, 所以这里砍条数
 --   砍不到 platform 头上。
-local MAX_PROPS = 64
+-- ⚠️ V2 (2026-11-09): 128 点支持，MAX_PROPS 64→128
+local MAX_PROPS = 128
 
 -- ⚠️ topo-batch (2026-11-02): 拓扑分批发送, 每批最多 TOPO_BATCH_SIZE 个 property。
 --   原因: 82 个 property 的全量拓扑约 6KB, 在 300KB 堆上分配容易触发 OOM。
@@ -887,6 +888,8 @@ local function build_topo(only_ids, max_props, skip_ids)
     -- 清空缓冲区（不创建新表）
     for i = 1, #parts do parts[i] = nil end
     for i = 1, #prop_ids do prop_ids[i] = nil end
+    -- V2: addr → prop_ids 索引映射，用于覆盖时定位正确位置
+    local pos = {}
     if mode == "sniff" then
         -- 2026-11: sniff 持久化后, 推断表行里自带 name/id, 不再查 alias_map
         -- 优先用行里的 name/id, 没有则回退到 alias_map (兼容旧数据)
@@ -941,6 +944,7 @@ local function build_topo(only_ids, max_props, skip_ids)
                 g.addrs[#g.addrs + 1] = r.addr
                 g.props[#g.props + 1] = topo.prop(id, nm, "uint16", r.slave, r.addr, 1)
                 prop_ids[#prop_ids + 1] = id  -- topo-ack-filter: 记录属性 ID
+                pos[r.addr] = #prop_ids  -- V2: 记录位置
             end
         end
         -- ② 平台下发的配置行: 同址覆盖推断行(用户配的真名优先)
@@ -949,11 +953,8 @@ local function build_topo(only_ids, max_props, skip_ids)
             local g = group_of(pc.slave)
             local id, nm = prop_id_name(r)
             local prop = topo.prop(id, nm, r.dtype or "uint16", pc.slave, r.addr, r.count or 1)
-            -- 同址覆盖: 配置行顶掉推断行(位置不变, 跟老逻辑一致)
-            local hit = 0
-            for i = 1, #g.addrs do
-                if g.addrs[i] == r.addr then hit = i break end
-            end
+            -- V2: 用 pos[addr] 定位，不再扫描 g.addrs
+            local hit = pos[r.addr] or 0
             if hit > 0 then
                 -- ⚠️ incr-topo (2026-10-30): 增量过滤
                 -- ⚠️ topo-batch (2026-11-02): skip_ids 过滤
@@ -965,7 +966,7 @@ local function build_topo(only_ids, max_props, skip_ids)
                     -- hello-nodes 模式, 已达到上限, 跳过
                 else
                     g.props[hit] = prop
-                    prop_ids[hit] = id  -- topo-ack-filter: 覆盖旧的 ID
+                    prop_ids[hit] = id  -- V2: 用 pos 定位，覆盖正确的 ID
                 end
             else
                 -- ⚠️ incr-topo (2026-10-30): 增量过滤
@@ -2486,6 +2487,7 @@ local function task_main()
                 if pubsched.ready("topo") then
                     -- ⚠️ incr-topo (2026-10-30): 增量拓扑逻辑
                     local cur_pids = {}
+                    local cur_slaves = {}  -- V2: 收集从机 ID
                     local smap = cfgstore.alias_map()
                     local mode = get_mode()
                     if mode == "sniff" then
@@ -2493,11 +2495,13 @@ local function task_main()
                             local sa = smap["reg" .. tostring(r.addr or "")]
                             local id = (sa and sa.id ~= "" and sa.id) or "reg" .. tostring(r.addr or "")
                             cur_pids[id] = true
+                            if r.slave then cur_slaves[r.slave] = true end  -- V2
                         end
                         local pc = cfgstore.load_pull()
                         for _, r in ipairs((pc and pc.regs) or {}) do
                             local id, _ = prop_id_name(r)
                             cur_pids[id] = true
+                            if pc.slave then cur_slaves[pc.slave] = true end  -- V2
                         end
                     else
                         local c = active_cfg()
@@ -2506,12 +2510,17 @@ local function task_main()
                                 local id, _ = prop_id_name(r)
                                 cur_pids[id] = true
                             end
+                            if c.slave then cur_slaves[c.slave] = true end  -- V2
                         end
                     end
                     local pid_list = {}
                     for id in pairs(cur_pids) do pid_list[#pid_list + 1] = id end
                     table.sort(pid_list)
-                    local prop_sig = table.concat(pid_list, ",")
+                    -- V2: 签名加入 slave 信息，从机变化时强制重建拓扑
+                    local slave_list = {}
+                    for s in pairs(cur_slaves) do slave_list[#slave_list + 1] = tostring(s) end
+                    table.sort(slave_list)
+                    local prop_sig = table.concat(pid_list, ",") .. "|slave=" .. table.concat(slave_list, ",")
                     -- 2026-11-03: 诊断日志 - 追踪拓扑重建逻辑
                     log.info("iot", "topo check: cur=" .. #pid_list .. " cached_sig=" .. tostring(S.topo_prop_sig and "yes" or "no") .. " sent_sig=" .. tostring(S.topo_sent_sig and "yes" or "no"))
                     local need_rebuild = true
@@ -2550,7 +2559,7 @@ local function task_main()
                                 nodes_json = n
                                 prop_ids = pids
                                 S.topo_at = os.clock()
-                                S.topo_prop_sig = prop_sig
+                                -- V2: topo_prop_sig 移到 all_batches_ok 成功后再更新
                                 S.topo_prop_ids = prop_ids
                                 log.info("iot", "topo rebuilt: props=" .. #pids .. " sig=" .. tostring(s))
                                 -- ⚠️ topo-batch (2026-11-02): 分批发送拓扑。
@@ -2622,6 +2631,7 @@ local function task_main()
                                     S.topo_fail_at = nil
                                     S.topo_fail_n = 0
                                     S.topo_sent_sig = sig
+                                    S.topo_prop_sig = prop_sig  -- V2: 全部批次成功后才更新签名
                                     pubsched.sent("topo")
                                 end
                             else
