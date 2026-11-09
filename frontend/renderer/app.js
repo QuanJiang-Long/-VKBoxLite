@@ -2020,6 +2020,8 @@ function toCsv(data) {
 }
 // sniff CSV 解析 (特殊格式, 无 [serial] 段, 只有寄存器数据)
 function parseSniffCsv(text) {
+  // 去掉 BOM 头
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
   const lines = text.split(/\r?\n/);
   const result = { serial: {}, registers: [], mqtt: {} };
   let headerParsed = false;
@@ -2060,8 +2062,10 @@ function parseCsv(text) {
   for (let line of lines) {
     line = line.trim();
     if (!line || line.startsWith('#')) continue;
-    if (line.startsWith('[') && line.endsWith(']')) {
-      section = line.slice(1, -1);
+    // WPS/Excel 会在每行末尾补逗号，去掉后再判断 section 头
+    const cleanLine = line.replace(/,+$/, '');
+    if (cleanLine.startsWith('[') && cleanLine.endsWith(']')) {
+      section = cleanLine.slice(1, -1);
       headers = null;
       continue;
     }
