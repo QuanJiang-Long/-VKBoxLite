@@ -2051,6 +2051,8 @@ function parseSniffCsv(text) {
 }
 
 function parseCsv(text) {
+  // 去掉 BOM 头（Excel 保存时可能添加）
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
   const lines = text.split(/\r?\n/);
   let section = null;
   let headers = null;
@@ -2153,8 +2155,8 @@ function exportCfgAsCsv(pre) {
     registers: collectRegs(pre),
     mqtt: m
   });
-  const header = '# VKBox 配置导出\n# 导出时间: ' + exported + '\n';
-  const blob = new Blob(['\uFEFF' + header + csv], { type: 'text/csv;charset=utf-8' });
+  // BOM 头帮助 Excel 识别 UTF-8，不加 # 注释（Excel 会破坏它）
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
   downloadBlob(blob, 'VKBoxLite-' + (S.mode || 'manual') + '-' + exported.slice(0,10).replace(/-/g,'') + '.csv');
   toast('配置已导出为 CSV');
 }
