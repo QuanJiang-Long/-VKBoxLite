@@ -489,8 +489,19 @@ async function saveCfg() {
       await readMode();
     } catch (e) {
       const msg = cfgErr(e.message);
-      status('保存失败：' + msg, false);
-      toast('保存失败：' + msg);
+      // 保存失败 = 设备那份一个字没动 (cfg.lua 的 kv_set 写不进去就早返回,
+      //   poll 也不重启), 面板上这版还挂着「未保存」标记。这句话必须说清,
+      //   否则用户以为"我填的这 60 行设备里也有", 接下来查的是"为什么采不到数"
+      //   —— 2026-11-10 现场就是在这上面绕了一圈。
+      // 顺手把设备【当前生效的点位数】读出来贴在后面: R:MODE 只读状态,
+      //   不碰表单(碰表单的是 R:CFG, 那条会覆盖你正打着字的东西)
+      await readMode();
+      const live = S.modeStat && S.modeStat.poll && S.modeStat.poll.regs;
+      const tail = (typeof live === 'number')
+        ? '；设备仍是原来那份配置（当前生效 ' + live + ' 点）'
+        : '；设备仍是原来那份配置';
+      status('保存失败：' + msg + tail, false);
+      toast('保存失败：' + msg + tail);
     }
   } catch (e) {
     status('保存失败：' + e.message, false);
