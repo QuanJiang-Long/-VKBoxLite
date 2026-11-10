@@ -9,6 +9,8 @@ local wdt = util.try("wdt")
 local M = {}
 
 local ticks, last_alive = 0, 0
+-- 上一拍的采集引擎状态, 给 stall 时钟重定基用 (见 sync_running)
+local was_running, was_mode = false, ""
 
 local function wdt_ok()
     if not wdt then return false end
@@ -71,10 +73,24 @@ local function collector_running(mode)
     return m.is_running() and true or false
 end
 
+-- stall 时钟重定基 (2026-11-10)。last_alive 只有 alive() 会动, 所以采集引擎
+-- 停着的那段时间里它一路陈旧; 引擎【重新起来的下一拍】直接拿
+-- ticks - last_alive 算差值, 停机多久就报多少秒 stall。
+-- 现场: 128 点配置落盘失败 → poll 读回空表跑起来, 日志里 poll 于
+-- uptime=1117 起, uptime=1120 的 monitor 就算出 stall=611s 直接 reboot ——
+-- 用户看到的是"改完配置 3 秒后设备自己重启", 而不是配置报错。
+-- 规则统一, 不按档位特判: 采集引擎在跑 且 (相对上一拍刚起来 / 刚换档) → 归零。
+local function sync_running(mode)
+    local r = collector_running(mode)
+    if r and (not was_running or mode ~= was_mode) then last_alive = ticks end
+    was_running, was_mode = r, mode
+    return r
+end
+
 -- 本档位当前的 stall 秒数; nil = 不该判 stall(没采集在跑)
 local function stall_of(mode)
     if not is_active_mode(mode) then return nil end
-    if not collector_running(mode) then return nil end
+    if not sync_running(mode) then return nil end
     return ticks - last_alive
 end
 -- 导出: 单元测试用 (tests/lua/test_guard_modes.lua)

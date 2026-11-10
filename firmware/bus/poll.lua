@@ -390,6 +390,10 @@ local function poll_task()
             if sys then sys.wait(5) end
         end
         drain_write_queue(mygen)
+        -- 每轮收尾再喂一次: 块内那次只在"真发过帧"时才喂, 空配置(regs=0,
+        -- 合并后 plan 为空)一轮一帧都不发就永远喂不到 → guard 判成采集引擎
+        -- 卡死而重启。轮内那次保留: 一轮可能要发几十帧, 全超时能跑上百秒
+        if guard then guard.alive() end
         stat.rounds = stat.rounds + 1
         -- 每轮打一行汇总: 既证明轮询在周期跑, 又便于对比 ok/timeout
         if stat.ok == okBefore then

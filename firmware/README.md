@@ -412,6 +412,29 @@ W/user.poll on_receive id=1 got 8 bytes but respFlag=false (raw=[01 03 00 61 00 
 sniff 识别期不受影响：`mon.start()` 先于 `mon.request_detect()` 调用，
 `is_running()` 一直是 true，且 `sniff_wait()` 每 20ms 喂一次 `guard.alive()`。
 
+### 这条判据当时没盖住的另一半：stall 时钟不重定基（2026-11-10）
+
+上面只看"引擎在不在跑"，没看"**什么时候开始跑的**"。`last_alive` 只有
+`guard.alive()` 会动，引擎停着的那段时间里它一路陈旧；引擎**重新起来的下一拍**
+直接 `ticks - last_alive`，停机多久就报多少秒 stall。
+
+现场（128 点保存失败那次）：uptime=509 之后 poll 没在跑，1117.2 `poll.start()`
+成功把 `is_running` 翻成 true，1120.5 的 monitor 当场算出 `stall=611s` →
+`collector stalled!` → 重启。**"保存失败后 3.3 秒设备自己重启"**，用户看到的是
+改完配置设备重启，而不是配置报错。（此前把它描述成"空转 611 秒才重启"是错的。）
+
+两处一起补：
+
+- `guard.lua`：`sync_running()` 按 **(档位, 引擎在跑)** 这个组合的跳变重定基 ——
+  刚起来、或刚切档（`ctrl` 切档是 stop→start，中间的 false 不一定被每 10s 一拍的
+  monitor 采到），时钟都归零。规则统一，不按档位特判。
+- `poll.lua`：轮询循环**每轮收尾**再喂一次。块内那次只在"真发过帧"时才喂，
+  空配置（`regs=0`、合并后 `plan` 为空）一帧都不发就永远喂不到。
+  轮内那次保留：一轮可能要发几十帧，全超时能跑上百秒。
+
+看门狗没有退化，`tests/lua/test_guard_modes.lua` 把两面都锁住了：起 poll 那一拍
+`stall=0` 且不重启，而引擎在跑、121 秒不喂照样 `reboot`。
+
 ## sniff 通讯参数自动识别（`R:AUTODETECT`）
 
 上面的缺口靠识别来补：sniff 侧不可配，那就现场试出来。
@@ -2075,3 +2098,4 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
 - **W:CFG 保存失败已修**：`save_json` 上限 512 太小，5 个寄存器（含别名）就超限，
   一直回 `too large`，前端只看到"保存失败"。上限与 `prov.lua` 的 `MAX_BUF` 对齐到 16KB
   （`W:CFG` 是一整行命令，行超 `MAX_BUF` 会被整缓冲丢弃，存得下也传不过来）
+
