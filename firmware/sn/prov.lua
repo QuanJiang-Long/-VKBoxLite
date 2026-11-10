@@ -18,7 +18,13 @@ local MAX_BUF = 16384
 local UART_ID = uart.VUART_0
 if UART_ID == nil then UART_ID = 4 end
 
-local rx_buf = ""
+-- 收包缓冲: rx_buf = 已拼好、待切行的字节; rx_parts = 还没拼的分片。
+--   原来 on_receive 每收一片就 rx_buf = rx_buf .. data —— 一条 12KB 的
+--   W:CFG(128 点最坏 12.7KB)要连抄十几次(1+2+…+12KB ≈ 78KB 垃圾), 而 Lua
+--   堆总共才 300KB。2026-11-10 现场保存 90 点时池子 used 306712/307192,
+--   再抄一份 5KB 就 not enough memory。分片攒着, 只在真攒出完整一行时并
+--   一次, 单分片时一次都不抄。
+local rx_buf, rx_parts, rx_len = "", {}, 0
 local cb_registered, loop_started = false, false
 
 -- V1-1 修复 (2026-11-06): SN 烧写期间暂停 INFER_PUSH 推送
@@ -126,7 +132,14 @@ local function trim(s)
 end
 
 local function dispatch(line)
-    log.debug("prov", "cmd:", line)
+    -- 同 cmd.M.reply 的 12-fix-9 规矩: 整条命令别交给日志模块格式化。
+    --   128 点的 W:CFG 有 12.7KB, 打全行 = 又一份同尺寸分配 + 同尺寸串口输出,
+    --   正好压在最紧的地方。短命令照旧打全(排查够用), 长行只打长度 + 头 80 字节
+    if #line > 80 then
+        log.debug("prov", "cmd:", #line, "B:", line:sub(1, 80))
+    else
+        log.debug("prov", "cmd:", line)
+    end
     -- V1-1 修复 (2026-11-06): SN 操作期间暂停 INFER_PUSH，避免烧写工具收到意外应答
     local is_sn_cmd = false
     local warg = line:match("^W:SN=(.+)$")
@@ -165,9 +178,27 @@ local function dispatch(line)
     log.debug("prov", "unknown cmd, ignored:", line)
 end
 
+-- 把攒下的分片并进 rx_buf —— 但只在【确实攒出了完整一行】时才并, 否则
+-- 继续攒着(大命令逐片到达, 提前并等于白抄一遍)
+local function rx_merge()
+    if #rx_parts == 0 then return end
+    local has_line = false
+    for i = 1, #rx_parts do
+        if rx_parts[i]:find("\n", 1, true) then has_line = true break end
+    end
+    if not has_line then return end
+    local joined = #rx_parts == 1 and rx_parts[1] or table.concat(rx_parts)
+    rx_parts, rx_len = {}, 0
+    rx_buf = rx_buf == "" and joined or rx_buf .. joined
+end
+
 function M.poll()
     local n = 0
     while n < 8 do
+        -- 每轮都先并进新分片: 派活(dispatch)期间 handler 可能让出 CPU 很久
+        --   (W:CFG 重启轮询要 sys.wait(500)), 那期间到的字节就躺在 rx_parts 里,
+        --   并进来才能和老代码一样在同一轮 poll 里接着切下一行
+        rx_merge()
         local nl = rx_buf:find("\n", 1, true)
         if not nl then break end
         local end_pos = nl - 1
@@ -177,12 +208,35 @@ function M.poll()
         rx_buf = rx_buf:sub(nl + 1)
         line = trim(line)
         if #line > 0 then
-            pcall(dispatch, line)
+            -- ⚠️ 吞掉错误会掩盖整类故障: 2026-11-10 情况1 整条 90 点 W:CFG
+            --   收到了、日志也打了, 却一个应答都没有 —— 因为分配失败发生在
+            --   cmd.M.handle 里 pcall(fn) 【之外】的 gsub, 一路冒到这里的
+            --   pcall 被无声吃掉。必须打出来, 至少让人知道命令崩在哪
+            local pok, perr = pcall(dispatch, line)
+            if not pok then
+                log.error("prov", "cmd crashed:", line:sub(1, 40), tostring(perr))
+                pcall(reply, "RET:FAIL:internal error")
+            end
             n = n + 1
         end
     end
     return n
 end
+
+-- 收到一片字节就先【攒着】, 不拼串 —— 拼串的活儿在 rx_merge 里, 见上面
+-- rx_parts 的注释(一条 128 点的 W:CFG 逐片到达, 边收边拼要白抄几十 KB)
+local function rx_push(data)
+    rx_parts[#rx_parts + 1] = data
+    rx_len = rx_len + #data
+    if rx_len + #rx_buf > MAX_BUF then
+        -- 超限只能整批丢: 命令以 \n 结尾, 留着半行也没法补
+        rx_parts, rx_len, rx_buf = {}, 0, ""
+    end
+end
+
+-- 单测入口: 等价于 uart 收到一片字节 (tests/lua/test_prov_rx.lua)。
+--   模拟器里 uart 是只读表、换不掉 read, 所以留这个口子让测试直接喂
+function M._rx_feed(s) rx_push(s) end
 
 local function on_receive(id, len)
     if id ~= UART_ID then return end
@@ -194,8 +248,7 @@ local function on_receive(id, len)
             return
         end
         if type(data) ~= "string" or #data == 0 then break end
-        rx_buf = rx_buf .. data
-        if #rx_buf > MAX_BUF then rx_buf = "" end
+        rx_push(data)
     end
 end
 
