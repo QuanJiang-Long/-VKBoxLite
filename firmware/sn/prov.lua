@@ -115,7 +115,15 @@ CMDS["R:SNEN"] = function()
         st.write and 1 or 0, st.clear and 1 or 0, st.lock and 1 or 0, st.unlock and 1 or 0))
 end
 
-local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
+local function trim(s)
+    -- 快速路径: 命令首尾无空白时零分配（大 JSON 命令避免 gsub 二次分配）
+    local f = s:byte(1)
+    if f and f > 32 then
+        local l = s:byte(-1)
+        if l and l > 32 then return s end
+    end
+    return (s:gsub("^%s*(.-)%s*$", "%1"))
+end
 
 local function dispatch(line)
     log.debug("prov", "cmd:", line)
@@ -162,9 +170,11 @@ function M.poll()
     while n < 8 do
         local nl = rx_buf:find("\n", 1, true)
         if not nl then break end
-        local line = rx_buf:sub(1, nl - 1)
+        local end_pos = nl - 1
+        -- \r\n 行尾: 跳过 \r, 避免 gsub 对大字符串二次分配
+        if end_pos > 0 and rx_buf:byte(end_pos) == 13 then end_pos = end_pos - 1 end
+        local line = rx_buf:sub(1, end_pos)
         rx_buf = rx_buf:sub(nl + 1)
-        line = (line:gsub("[\r\n]", ""))
         line = trim(line)
         if #line > 0 then
             pcall(dispatch, line)
