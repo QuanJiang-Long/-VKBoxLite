@@ -171,15 +171,21 @@ check("预览带着应答头", preview and preview:sub(1, 8) == "RET:CFG=",
     string.format("%q", tostring(preview and preview:sub(1, 40))))
 
 -- ===== 6) R:MEM: 现场日志只留前 80 字节, 应答必须压进去 =====
+-- 调试组只在 _G.DEBUG 下注册(发布版整组不进注册表), 拿不到就跳过而不是判失败
+local has_mem = cmd.handle("R:MEM") ~= false
 local _, s4 = ask("R:MEM")
-check("R:MEM 有应答", s4:sub(1, 8) == "RET:MEM=", s4:sub(1, 40))
-check("R:MEM 不超过 80 字节", #s4 - 2 <= 80, string.format("%d 字节: %s", #s4 - 2, s4))
-check("R:MEM 报了 Lua 水位", s4:find("lua:%d+K", 1) ~= nil, s4)
-check("R:MEM 报了 Lua 池", s4:find("lua:%d+/%d+", 1) ~= nil, s4)
-check("R:MEM 报了系统池", s4:find("sys:%d+/%d+", 1) ~= nil, s4)
-check("R:MEM 报了最大连续块", s4:find("max:%d+ fail:%d+", 1) ~= nil, s4)
-local mx = tonumber(s4:match("max:(%d+)"))
-check("试探至少给出 4096", mx and mx >= 4096, "max=" .. tostring(mx))
+if not has_mem then
+    print("  (跳过 R:MEM 用例: 调试组未注册)")
+else
+    check("R:MEM 有应答", s4:sub(1, 8) == "RET:MEM=", s4:sub(1, 40))
+    check("R:MEM 不超过 80 字节", #s4 - 2 <= 80, string.format("%d 字节: %s", #s4 - 2, s4))
+    check("R:MEM 报了 Lua 水位", s4:find("lua:%d+K", 1) ~= nil, s4)
+    check("R:MEM 报了 Lua 池", s4:find("lua:%d+/%d+", 1) ~= nil, s4)
+    check("R:MEM 报了系统池", s4:find("sys:%d+/%d+", 1) ~= nil, s4)
+    check("R:MEM 报了最大连续块", s4:find("max:%d+ fail:%d+", 1) ~= nil, s4)
+    local mx = tonumber(s4:match("max:(%d+)"))
+    check("试探至少给出 4096", mx and mx >= 4096, "max=" .. tostring(mx))
+end
 
 if failed > 0 then
     print(string.format("FAIL: %d/%d 项不通过", failed, checked))

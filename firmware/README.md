@@ -164,7 +164,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | W:BOOTMODE=idle\|poll\|pollpull\|sniff | 开机默认模式（大小写不敏感）。`sniff` 同样自动识别，但不堵开机流程 |
 | R:SN / R:ID / W:SN=xxx[,FORCE] / C:SN / LOCK:SN / UNLOCK:SN / R:SNEN / W:SNEN=n,0\|1[,P] | SN 产线指令（VUART_0 通道） |
 
-> 指令集与 `frontend/protocol.js` 的 `Enc` 一一对应。`W:RAWTEST`/`W:GC` 是前端不调用的现场诊断入口，且**仅开发版注册**（`_build_flag.lua` = true 的发布固件里没有）。`R:FRAMES`/`R:INFER`/`R:AUTODETECT` 源自调试组，但已是 sniff 面板的正式依赖，2026-10 已**转正注册**（`cmd.lua` 的 `reg_cmds`，发布版可用）。
+> 指令集与 `frontend/protocol.js` 的 `Enc` 一一对应。`W:RAWTEST`/`W:GC`/`R:MEM` 是前端不调用的现场诊断入口，且**仅开发版注册**（`_build_flag.lua` = true 的发布固件里没有）。`R:FRAMES`/`R:INFER`/`R:AUTODETECT` 源自调试组，但已是 sniff 面板的正式依赖，2026-10 已**转正注册**（`cmd.lua` 的 `reg_cmds`，发布版可用）。
 >
 > **`R:MQTT` 的 stat 带 `sub_list`**（2026-10）：设备实际订阅清单（`build_subs()` 的产物，当前 5 条）。前端"其他生效 Topic"里的 **D2n** 那条用它替换模板——常量里是 `.../{sn}-N`（N=从机序号占位符），设备实际订的是 `.../{sn}-1`（多从机展开 `-1..-K`）。显示模板等于骗人：现场照着 `-N` 订阅收不到东西。老固件没有这个字段，前端退回模板。
 >
@@ -2121,4 +2121,16 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
   USB 包边界（前端 `main.js` 的 `onData` 有 `rxBuffer`，产线 `serial_port.py` 的
   `read_line` 读到 `\n` 为止）。段与段之间没有 yield 点，`uart.write` 是 C 调用，
   协作式调度下别的任务插不进 VUART。
+- **`R:MEM` 加回（2026-11-10，仅开发版）**：2026-10 删它是因为信息并进了
+  `R:STAT`，现在加回是因为 `R:STAT` 那份在现场**看不见** —— 应答日志只打前
+  80 字节，`lua_kb` 永远被截掉。这条应答刻意压在 80 字节内，三个口径一起报：
+  `lua:` 水位（`collectgarbage("count")`）、`lua:`/`sys:` 两个池的 `已用/总量`
+  （现场那两条互相误导的日志就靠这个拆开：`guard mem=67940/203040` 是**系统池**，
+  只用了 33%；同一时刻 Lua 池是 `used 306768/307192` = 99.86%）、
+  `max:`/`fail:` 阶梯试探出的**最大连续可分配块**。
+  最后这一项才是它该存在的理由：水位判不出碎片化，而 128 点卡的正是连续块
+  （GC 只回收、合并不了相邻空闲块，见 12-fix-8 第三层）。每档前做一次
+  full GC（上一档的探测块要真还回去才测得准下一档），有毫秒级停顿 —— 所以
+  只进开发版。测法：`W:GC` → `R:MEM` → 立刻再保存 80 点，用 `max:` 判
+  "306KB 是真常驻还是峰值"。
 

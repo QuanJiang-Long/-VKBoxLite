@@ -665,14 +665,18 @@ local function reg_cmds()
     end)
 end
 
--- B 类：仅开发调试用的 2 条指令。发布版整个函数不调用,
+-- B 类：仅开发调试用的 3 条指令。发布版整个函数不调用,
 -- 键 + 闭包 + 闭包内捕获的 poll/iot 等 upvalue 全部不进注册表,
 -- 出厂固件更小、也不接受任何探针/总线诊断入口。
 --   W:GC      强制 GC + 踢连接 (乱用会断 MQTT, 不给客户)
 --   W:RAWTEST 485 裸探针: 能直接往总线上发原始帧 —— 交付版绝对不能开,
 --              现场排障时切开发版烧一次 (见 lua/README.md「开发版 vs 发布版」)
--- 2026-10: R:NET/R:MEM 已删 (信息早就并进 R:STAT 的 iot/guard 段, 前端 0 引用,
---   留着只是白占脚本区); R:FRAMES/R:INFER/R:AUTODETECT 已转正进 reg_cmds
+--   R:MEM     内存口径探针 (2026-11-10 为 128 点排障重新加回, 见下面说明)
+-- 历史: 2026-10 曾把 R:NET/R:MEM 删掉(信息早就并进 R:STAT 的 iot/guard 段,
+--   前端 0 引用, 留着只是白占脚本区)。R:MEM 现在【换了职责】才加回来:
+--   它量的不是水位(那部分 R:STAT 已经有了), 而是【最大连续可分配块】——
+--   水位判不出碎片化, 而这正是 128 点卡住的那一层。
+--   R:FRAMES/R:INFER/R:AUTODETECT 已转正进 reg_cmds
 local function reg_debug_cmds()
     M.reg("W:GC", function()
         collector.trim_cache()
@@ -680,6 +684,48 @@ local function reg_debug_cmds()
         collectgarbage("collect")
         if iot then iot.kick() end
         M.reply("RET:GC=OK")
+    end)
+
+    -- R:MEM: 三个口径一次报齐, 应答刻意压在 80 字节内(tx_frags 只打前 80)。
+    --   为什么要单独一条: 现场两条日志互相误导 ——
+    --     I/user.guard ... mem=67940/203040        ← rtos.meminfo("sys")
+    --       系统池只用了 33%, 看着"内存多得很"
+    --     E/mem memory allocation failed total 307192, used 306768, alloc 160
+    --                                             ← Lua 池 99.86% 满, 160B 都给不出
+    --   R:STAT 里带了 lua_kb, 但那一段永远被 80 字节截断掉, 现场看不到。
+    --   max/fail: 阶梯试分配。Lua 池是固定池, 碎片化时总量够也拿不到连续大块
+    --   (GC 只能回收, 合并不了相邻空闲块), 所以"还剩多少"和"能发出 3.9KB
+    --   的应答体"是两件事, 必须分开量。
+    --   ⚠️ 每档前做一次 full GC(上一档的探测块要真还回去才测得准下一档),
+    --      有毫秒级停顿 —— 这也是它只进开发版的原因。
+    M.reg("R:MEM", function()
+        local p = {}
+        p[#p + 1] = string.format("lua:%dK", math.floor(collectgarbage("count")))
+        if rtos then
+            -- 池水位: "lua" 是 Lua 固定池(307192 那个), "sys" 是系统池。
+            -- 拿不到就整段不报, 别用 0 冒充(0/0 会被读成"池子空着")
+            for _, k in ipairs({ "lua", "sys" }) do
+                local ok, total, used = pcall(rtos.meminfo, k)
+                if ok and type(total) == "number" and type(used) == "number" then
+                    p[#p + 1] = string.format("%s:%d/%d", k, used, total)
+                end
+            end
+        end
+        local last_ok, first_fail = 0, 0
+        local steps = { 1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384 }
+        for i = 1, #steps do
+            local n = steps[i]
+            collectgarbage("collect")
+            local ok, s = pcall(string.rep, "x", n)
+            if ok and type(s) == "string" and #s == n then
+                last_ok = n
+            else
+                first_fail = n
+                break
+            end
+        end
+        p[#p + 1] = string.format("max:%d fail:%d", last_ok, first_fail)
+        M.reply("RET:MEM=" .. table.concat(p, " "))
     end)
 
     M.reg("W:RAWTEST", function(arg)
