@@ -103,7 +103,7 @@ end
 CMDS["LOCK:SN"] = function()
     if not M.lock_enable then return reply("RET:FAIL:lock disabled") end
     if sn().state() ~= "ready" then return reply("RET:FAIL:no sn") end
-    sn().set_lock()
+    if not sn().set_lock() then return reply("RET:FAIL:lock not persisted") end
     reply("RET:OK")
 end
 

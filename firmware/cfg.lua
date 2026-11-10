@@ -55,15 +55,30 @@ local cfg_ver = 0
 
 function M.version() return cfg_ver end
 
+-- fskv 单值硬顶 4096B。超限 (以及 flash 空间不足) 时 C 层只打一行
+--   E/fskv value too big N max 4096 然后【返回 false】, 不 raise —— 所以
+--   pcall 那一关是过的。原来 kv_set 只看 pcall 的 ok, 把"没写进去"当成
+--   "写好了": 前端收到 RET:CFG=OK, poll 起来的却是 fskv 里的旧值/空表。
+-- 判失败只认【明确的 false】: 万一某版 bsp 的 fskv.set 成功时不返值,
+--   写成 not ret 会把所有正常保存都判成失败。
+local FSKV_VALUE_MAX = 4096
+
 local function kv_set(k, s)
-    if not fskv then return false end
+    if not fskv then return false, "no fskv" end
+    local n = type(s) == "string" and #s or 0
+    if n > FSKV_VALUE_MAX then
+        log.warn("cfg", "value too big", k, n, "max", FSKV_VALUE_MAX)
+        return false, "配置 " .. n .. "B 超 fskv 单值上限 " .. FSKV_VALUE_MAX .. "B"
+    end
+    local ok, ret = pcall(fskv.set, k, s)
+    if not ok or ret == false then
+        log.warn("cfg", "fskv.set failed:", k, n .. "B", tostring(ret))
+        return false, "fskv.set 拒写(值 " .. n .. "B)"
+    end
+    -- 只有真写进去了才动缓存/版本号: 写失败时 fskv 里的内容没变,
+    -- 清缓存+涨版本号等于白让所有下游解码缓存失效一遍
     json_cache[k] = nil   -- 12-fix-3: 写盘了, 解码缓存必须失效
     cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号跟着涨(别名映射缓存靠它失效)
-    local ok, err = pcall(fskv.set, k, s)
-    if not ok then
-        log.warn("cfg", "fskv.set failed:", k, tostring(err))
-        return false
-    end
     if fskv.save then pcall(fskv.save) end
     return true
 end

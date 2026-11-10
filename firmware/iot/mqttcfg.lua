@@ -191,9 +191,11 @@ function M.save(c)
     -- 两条 topic(各 128) 直接超。2048 对最长字段仍有 2 倍余量
     if #s > 2048 then return false, "too large" end
     if not fskv then return false, "no fskv" end
-    local ok, err = pcall(fskv.set, K_CFG, s)
-    if not ok then
-        log.warn("mqtt_cfg", "fskv.set failed:", tostring(err))
+    -- fskv.set 失败只返回 false 不 raise, pcall 的 ok 那关是过的:
+    -- 只看 ok 会把"没写进去"当成"存好了" (同 cfg.lua kv_set 的坑)
+    local ok, ret = pcall(fskv.set, K_CFG, s)
+    if not ok or ret == false then
+        log.warn("mqtt_cfg", "fskv.set failed:", #s .. "B", tostring(ret))
         return false, "fskv.set failed"
     end
     kv_flush()
