@@ -2062,6 +2062,8 @@ function parseCsv(text) {
   for (let line of lines) {
     line = line.trim();
     if (!line || line.startsWith('#')) continue;
+    // WPS 会在空行补逗号（,,,,,,,,,），跳过纯逗号行
+    if (/^,+$/.test(line)) continue;
     // WPS/Excel 会在每行末尾补逗号，去掉后再判断 section 头
     const cleanLine = line.replace(/,+$/, '');
     if (cleanLine.startsWith('[') && cleanLine.endsWith(']')) {
@@ -2072,6 +2074,8 @@ function parseCsv(text) {
     if (!section) continue;
     const cells = parseCsvLine(line);
     if (!headers) { headers = cells; continue; }
+    // 跳过全空数据行（WPS 尾部空行）
+    if (cells.every(c => c === '')) continue;
     if (section === 'meta') {
       const cols = CSV_COLS.meta;
       for (let i = 0; i < cols.length; i++) result.meta[cols[i][1]] = cells[i] || '';
@@ -2173,7 +2177,8 @@ function downloadBlob(blob, name) {
 }
 
 // CSV 导入时所有值都是字符串, 需要转布尔/数值
-function csvToBool(v) { return v === true || v === 'true' || v === '1'; }
+// WPS 会把 false/true 转成 FALSE/TRUE
+function csvToBool(v) { return v === true || String(v).toLowerCase() === 'true' || v === '1'; }
 function csvToInt(v, fallback) { const n = parseInt(v, 10); return isNaN(n) ? fallback : n; }
 
 // 内部统一: 把 {serial, registers, mqtt} 数据填到当前 tab
