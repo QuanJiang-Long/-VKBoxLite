@@ -55,36 +55,60 @@ if UART_ID == nil then UART_ID = 4 end
 
 local g_cmds = {}
 
+-- ⚠️ 12-fix-9 (2026-10-29): 【别把整条应答打进日志】。
+--   原来 log.debug("cmd", "tx:", s) 把整条应答(64 个地址时 8158 字节)
+--   原样交给日志模块格式化 —— 那就是又一份 8KB 的分配 + 8KB 的串口输出。
+--   现场 300KB 的堆就是这样被一次次抄没的(池 294448/307192 = 95.8%,
+--   "alloc 8147 failed" → json encode out of memory → 整机卡死)。
+--   只打长度 + 前 80 字节: 排查够用, 代价是一条小日志。
+-- ⚠️ 128点排障 (2026-11-10): 应答【逐段写, 不拼整行】。
+--   table.concat 出来的那份整行, 是 jencode 产物之外的【第二份完整拷贝】,
+--   也就是发送峰值 = 2 倍应答体。60 点配置保存成功后前端点"读取配置",
+--   应答体 3919B 已经躺在堆上了, concat 还要 3919B 的连续块 —— 池子贴着
+--   天花板时正好切不出来, 现场就是这个错:
+--     RET:FAIL:handler error:cmd.lua:100: not enough memory for buffer allocation
+--   拆开发之后峰值只剩 1 倍应答体。
+--   为什么可以拆: ① uart.write 是 C 调用, 不让出 CPU; LuatOS 协程是协作式的,
+--     段与段之间没有 yield 点, 别的任务插不进来(VUART 上只有 cmd/prov 两个写者,
+--     全都在自己的调用里写完)。② 收端一律按 \r\n 切行, 不按包边界: 前端
+--     main.js 的 onData 有 rxBuffer, 产线 serial_port.py 的 read_line 读到 \n
+--     为止。拆段只是把同一行分进几个 USB 包里。
+local function tx_frags(frags)
+    local n = 0
+    for i = 1, #frags do n = n + #frags[i] end
+    -- 前 80 字节: 逐段凑, 凑够就收手(每次应答最多 3 个小字符串, 都 <=80B)
+    local head = ""
+    for i = 1, #frags do
+        if #head >= 80 then break end
+        head = head .. frags[i]:sub(1, 80 - #head)
+    end
+    log.debug("cmd", "tx:", n, "B:", head)
+    for i = 1, #frags do
+        if #frags[i] > 0 then pcall(uart.write, UART_ID, frags[i]) end
+    end
+end
+
 function M.reply(s)
-    -- ⚠️ 12-fix-9 (2026-10-29): 【别把整条应答打进日志】。
-    --   原来 log.debug("cmd", "tx:", s) 把整条应答(64 个地址时 8158 字节)
-    --   原样交给日志模块格式化 —— 那就是又一份 8KB 的分配 + 8KB 的串口输出。
-    --   现场 300KB 的堆就是这样被一次次抄没的(池 294448/307192 = 95.8%,
-    --   "alloc 8147 failed" → json encode out of memory → 整机卡死)。
-    --   只打长度 + 前 80 字节: 排查够用, 代价是一条小日志。
-    log.debug("cmd", "tx:", #s, "B:", s:sub(1, 80))
-    pcall(uart.write, UART_ID, s .. "\r\n")
+    tx_frags({ s, "\r\n" })
 end
 
--- 12-fix-9: 大应答专用(R:INFER / INFER_PUSH)。
---   一次 table.concat 拼出整行, 省掉 "RET:INFER=" .. json .. "\r\n" 中间
---   那两次拷贝 —— 每一次拷贝都是一份同样大的垃圾(json 8KB → +前缀 8KB
---   → +换行 8KB = 24KB)。拼完只留一份。
+-- 大应答(R:INFER / INFER_PUSH): payload 已经是一整串, 没有可省的第二份拷贝
 local function reply_big(key, payload)
-    local s = table.concat({ key, payload, "\r\n" })
-    log.debug("cmd", "tx:", #s, "B:", s:sub(1, 80))
-    pcall(uart.write, UART_ID, s)
+    tx_frags({ key, payload, "\r\n" })
 end
 
--- ⚠️ 12-fix-11 (2026-10-29): JSON 应答【只拼一次】。
+-- ⚠️ 12-fix-11 (2026-10-29): JSON 应答走【片段表】, 不要在字符串上叠字符串。
 --   原来的写法 M.reply("RET:X=" .. jencode(t)) 会造两份大字符串:
 --   一份是 jencode 的产物, 一份是拼接后的整行; M.reply 里再 s.."\r\n"
 --   又是第三份。R:STAT 现场实测 2226 字节, 每 5 秒问一次 →
 --   每次 6.7KB 垃圾(2226×3), 一年不停 —— 现场池子 95% 的碎片就是这么攒的。
---   这里把 key / 各段 / 花括号 / 换行 全塞进一个表, 一次 table.concat 拼完,
---   全程只留【一份】大字符串: 2226 + 2235 = 4.4KB, 少造 2.3KB/次。
+--   这里把 key / 各段 / 花括号 / 换行 全塞进一个表: 小片段本身是编码时
+--   就在的, 不额外产生整行拷贝(2026-11-10 起连最后那次 concat 也省了,
+--   见上面 tx_frags)。
 --   传 table 时按 "{" frag "," frag "}" 拼(给 R:STAT 这种多段 JSON 用)。
-local function json_reply_str(key, val)
+--   json_reply_str 仍然 concat, 但只给单测验结构用
+--   (见 M._json_reply_str / M._stat_reply), 串口上不走它。
+local function json_reply_frags(key, val)
     local t
     if type(val) == "table" then
         t = { key, "{" }
@@ -97,12 +121,13 @@ local function json_reply_str(key, val)
         t = { key, val }
     end
     t[#t + 1] = "\r\n"
-    return table.concat(t)
+    return t
+end
+local function json_reply_str(key, val)
+    return table.concat(json_reply_frags(key, val))
 end
 local function reply_json(key, val)
-    local s = json_reply_str(key, val)
-    log.debug("cmd", "tx:", #s, "B:", s:sub(1, 80))
-    pcall(uart.write, UART_ID, s)
+    tx_frags(json_reply_frags(key, val))
 end
 
 -- 只拼不发(给单测用)。模拟器里 uart 是 C 库的只读表, 换不掉 write,

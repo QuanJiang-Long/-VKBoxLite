@@ -2109,4 +2109,16 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
   `LOCK:SN` 不再无条件回 `RET:OK`）。**这条只把"假成功"变成"明确报错"，
   128 点存不下这件事本身还没解决**（容量路线 A 分片 / B 文件系统 / C 紧凑编码 /
   D 降上限 仍待定；已知 60 点≈3900B 低于 4096 也会因 Lua 申请不到连续块而失败）
+- **应答发送不再抄第二份整行（2026-11-10）**：上一条修完，60 点保存真的落盘了，
+  于是下一个坑第一次暴露出来 —— 前端点「读取配置」报
+  `读取配置失败：设备返回失败：cmd.lua:100: not enough memory for buffer allocation`。
+  那一线是 `reply_json` 里的 `table.concat`：`jencode` 已经产出 3919B 应答体，
+  concat 要一块**同样大的连续内存**，池子贴着天花板时切不出来 —— 也就是
+  发送峰值一直是 **2 倍应答体**。现在 `tx_frags()` 逐段 `uart.write`，峰值降到
+  1 倍（`test_cmd_tx.lua` 实测：3919B 应答体的一次发送净分配 1.2KB，
+  退回 concat 就是 ~4KB）。拆段安全的两个前提，都在测试里钉住了：
+  ① 串口上的字节**一字没变**、每行仍带 `\r\n`；② 收端一律按换行切行而不是按
+  USB 包边界（前端 `main.js` 的 `onData` 有 `rxBuffer`，产线 `serial_port.py` 的
+  `read_line` 读到 `\n` 为止）。段与段之间没有 yield 点，`uart.write` 是 C 调用，
+  协作式调度下别的任务插不进 VUART。
 
