@@ -244,15 +244,25 @@ local function reg_cmds()
 
     M.reg("W:CFG", function(arg)
         if blocked_while_detecting("CFG") then return end
+        -- 大配置(128 点整行最坏 12.7KB)解码前先收一轮垃圾: Lua 堆池平时就
+        --   贴着天花板(R:STAT 每 5 秒造 1.5KB 串), 2026-11-10 现场保存 90 点
+        --   时池子已 used 306712/307192, 连 160B 都分配不出来。
+        --   ⚠️ GC 合并不了相邻空闲块(见 README 12-fix-8 第三层), 它救不了
+        --   连续大块; 但这条路径上的分配绝大多数是寄存器表那种小对象,
+        --   收一轮就有货。停顿只在人工保存时发生, 不在 UART 收帧路径上。
+        if #arg > 4096 then collectgarbage("collect") end
         local t = jdecode(arg)
         if not t then return M.reply("RET:FAIL:CFG:bad json") end
         local n, err = cfgstore.normalize_poll(t)
+        t = nil -- 解码表就此不可达, 归一化结果只留 n 一份
         if not n then return M.reply("RET:FAIL:CFG:" .. tostring(err)) end
         local cur_mode = ctrl.get_mode()
         local slot = (cur_mode == "platform") and SLOT_PULL or SLOT_POLL
         local ok, serr
-        if slot == SLOT_PULL then ok, serr = cfgstore.save_pull(t)
-        else ok, serr = cfgstore.save_poll(t) end
+        -- 落归一化后的 n, 不再用 save_poll(t): 后者会在内部再 normalize 一遍,
+        --   等于把 128 个寄存器表(~30KB)白造第二次
+        if slot == SLOT_PULL then ok, serr = cfgstore.save_pull_norm(n)
+        else ok, serr = cfgstore.save_poll_norm(n) end
         if not ok then return M.reply("RET:FAIL:CFG:" .. tostring(serr)) end
         -- 34-fix: 进入 polling 档 (manual/platform) 时, 如果 poll 因为空配置
         --   没起来 (34-fix 的副作用, 之前一定起来), 现在 W:CFG 写完要把
@@ -686,14 +696,23 @@ end -- R:FRAMES/R:INFER/R:AUTODETECT 已转正到 reg_cmds (2026-10, 见上面�
 
 function M.handle(line)
     if type(line) ~= "string" then return false end
-    line = line:gsub("[\r\n]", "")
-    local fn = g_cmds[line]
-    if not fn then
-        local cmd, arg = line:match("^%s*([%w:]+)%s*=%s*(.-)%s*$")
-        if cmd then fn = g_cmds[cmd]; line = arg end
+    -- ⚠️ 这里不能再 gsub 去 \r\n: prov 已按换行切好行并跳掉了 \r。
+    --   老代码 `line:gsub("[\r\n]","")` 有两个毛病: ① 对一条 12.7KB 的
+    --   128 点 W:CFG 白抄一份同大小的垃圾; ② 它在下面 pcall(fn) 【之外】,
+    --   抄不动就整个函数抛错、被 prov 的 pcall 吞掉 —— 前端只看到设备
+    --   收了命令却不应答(2026-11-10 情况1)。改成 find/sub: 只切一个小命令名,
+    --   参数那份拷贝是 jdecode 必需的, 省不掉。
+    local eq = line:find("=", 1, true)
+    local fn, arg
+    if eq then
+        fn = g_cmds[line:sub(1, eq - 1)]
+        if fn then arg = line:sub(eq + 1) end
+    else
+        fn = g_cmds[line]
+        arg = line
     end
     if not fn then return false end
-    local ok, err = pcall(fn, line)
+    local ok, err = pcall(fn, arg)
     if not ok then
         M.reply("RET:FAIL:handler error:" .. tostring(err))
     end

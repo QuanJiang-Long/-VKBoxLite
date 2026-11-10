@@ -368,6 +368,13 @@ for name, sec in pairs(SECTIONS) do
         if not n then return false, err end
         return save_json(sec.key, n)
     end
+    -- 落盘【已经归一化过】的表。W:CFG 大配置(128 点)必须先 normalize 一遍
+    --   校验、再落盘、再拿同一份去 apply_cfg; 走 save_xxx 会在里面再
+    --   normalize 一次 —— 那 128 个寄存器表(~30KB)白造一遍, 池子只剩几 KB
+    --   时就是压死的一根。n 已是 norm 的产物, 落盘内容和 save_xxx 逐字节相同
+    M["save_" .. name .. "_norm"] = function(n)
+        return save_json(sec.key, n)
+    end
 end
 
 -- 配置来源: fskv 里从未写过就是 default(前端据此提示"尚未保存过配置")
