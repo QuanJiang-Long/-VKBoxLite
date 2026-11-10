@@ -1503,7 +1503,7 @@ B 模型下 `clientId` = **SN 加一个下划线**、`user` = **裸 SN**。
   前端优先显示它。error 事件里 `conack` 表示"连上了被平台拒"，
   其余值（`connect` 等）表示"根本没连上"，两者文案不同，别混。
 
-## 485 轮询日志（poll_reg）
+## 485 轮询日志（poll_block）
 
 每笔事务固定两行，直接在日志里核对地址/长度/别称/数据：
 
@@ -1522,8 +1522,33 @@ I/user.poll Rx s1 addr=14 len=1 CT hex=00ea val=234
 | Rx | `hex=00ea` | 原始字节（小写十六进制） |
 | | `val=234` | 按 dtype 解出的值 |
 
-失败时的三种日志：`Rx timeout addr=14 CT rx=00ea39cb`（收到字节但组不成帧）、
-`Rx timeout ... rx=-`（一个字节都没收到）、`Rx err fc=83 code=2 ...`（从机返异常码）。
+**点位表里地址严格相邻的行会被并成一帧发**（2026-11-10），合并帧的日志换形状：
+
+```
+I/user.poll Tx s1 fc3 addr=14 qty=3 rows=3 CT+2 raw=[01 03 00 0e 00 03 ...]
+I/user.poll Rx s1 addr=14 qty=3 rows=3 ok
+D/user.poll Rx addr=15 Ua hex=00ea val=234
+```
+
+- `rows=3 CT+2` = 这块并了 3 行，起始别称 CT，另有 2 行；合并条件只有"下一行
+  `addr` 正好等于块尾"，**有空隙或重叠一律断块**——跨未映射地址不少仪表直接回
+  Illegal Data Address，整帧作废反而丢数据。单块字数上限 125（Modbus fc3）。
+- 合并块里每行的逐值行降到 `debug` 档：`info` 档一帧两行，不再每点一行。
+  要按点核对就把日志级别放开，字段和单帧读时一致。
+- **单行（没得并）的日志形状和上面完全相同**，`hex=`/`val=` 也一字不差。
+- 合并只发生在 `bus/poll.lua` 内部：`regs` 结构、点位表顺序、`push_data` 的
+  addr/name/hex/dtype、`R:VAL`、U4 上报、前端全都不变。
+- ⚠️ `stat.ok`/`stat.timeout` 现在按**块**计，不是按行：80 点连续表并成 1 块，
+  一轮只 +1。判断"这轮有没有采到新值"看 `round N ok=…` 是否递增，别拿它和
+  点位数对等。`R:STAT` 的 poll 段多了一个 `frames` = 每轮实际发几帧，
+  `regs` 与 `frames` 差得越多说明表越连续；两数相等就是全都不相邻。
+
+超时的日志把收发两端都打出来，直接跟 sscom 抓包对照：
+`Rx timeout addr=14 qty=3 rows=3 Tx raw=[...] Rx n=0 raw=[-]` 是一个字节都没收到
+（从机地址/波特率/AB 线/DE 极性），`Rx n=48 raw=[...]` 是收到了但组不成帧
+（缺首字节 = DE 拉低太慢，缺尾字节 = 超时太早，含乱字节 = 总线噪声）。
+`Rx err fc=83 code=2 ...` 是从机返异常码，`code=2` = Illegal Data Address，
+合并块真撞上它就把那几行拆成不相邻的行，自然就不并了。
 
 > ⚠️ `poll.lua` 的 `hexspaced()` **必须定义在 `on_receive()` 之前**（11-fix,
 > 2026-10-27）。`on_receive` 的 `respFlag=false` 分支要用它，而 `local function`
