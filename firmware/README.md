@@ -38,7 +38,7 @@ return false        -- false=开发版 / true=发布版
 
 | 差别 | 开发版 | 发布版 |
 |---|---|---|
-| 调试指令注册 | `W:GC`（强制 GC+踢连接）、`W:RAWTEST`（485 裸探针）、`R:MEM`（内存口径探针）、`W:FS`（文件系统探针）**都注册** | **都不注册** |
+| 调试指令注册 | `W:GC`（强制 GC+踢连接）、`W:RAWTEST`（485 裸探针）、`R:MEM`（内存口径探针）、`W:FS`（文件系统探针）、`R:CTRACE`（W:CFG 分阶段内存采样回读）**都注册** | **都不注册** |
 | 原始 hex 收进 ring | 收（`collector.push_raw_rx`） | 不收（省内存，也不留总线原始报文） |
 
 其余全部指令（含 sniff 三件套 `R:FRAMES`/`R:INFER`/`R:AUTODETECT`）**两版都有**。
@@ -60,6 +60,7 @@ return false        -- false=开发版 / true=发布版
 >
 > `R:NET` 已在 2026-10 删除（信息早就并进 `R:STAT` 的 mqtt/guard 段，前端 0 引用，留着只是白占脚本区）。
 > `R:MEM` 2026-11-10 **换了职责加回来**：量的不是水位（那部分 `R:STAT` 有），是【最大连续可分配块】。
+> 128 点这条线上现场要发的三条是：**重启** → `W:FS`（文件路线能不能走）→ 存一次 96/128 点（面板「保存配置」或串口发一条 `W:CFG`）→ 立刻 `R:CTRACE`（这份配置在设备上吃过哪几步的内存、死在第几步）。保存失败**不用重跑**，`#1` 就是失败那条。
 
 ## 功能
 
@@ -151,6 +152,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:STAT | 运行状态汇总（mode/data/guard/mqtt）；`mqtt` 段另带 `push_pending`/`push_n`/`push_seen`/`push_err`（平台主动重推横幅用） |
 | W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt,msg_id,replied,src,seen,autosaved,autosave_at,autosave_regs,push_n,push_err}`，`mqtt` 段含 `pub`/`sub` 两个拼好的 topic；`autosaved`=解析成功即已落盘生效并自动回执；`msg_id`/`replied` 反映回执；`src`=`pull`/`push`）。平台主动重推的配置也走这个返回（`src=push`）。前提只需配好 MQTT 服务器地址和端口，设备会自己连 |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配”（**仅开发版注册**，发布版不可用） |
+| R:CTRACE | W:CFG 的**分阶段内存采样**回读（**仅开发版注册**，2026-11-11）。发一条 `W:CFG`（点一次「保存配置」也算）之后再发这条，把最近两次保存各用一行打出：`RET:CTRACE=#2 arg=8271 regs=128 tot=307192 | enter 175000/175000 | gc …/… | decoded … | norm … | freed … | saved … | done …`。每段 `已用/历史峰值`（`rtos.meminfo("lua")` 的 used/max_used）：相邻两段**已用**之差 = 这一步留在堆上多少；某段**峰值**比上一段高 = 上一步内部冒出来一个采样点看不见的瞬时峰（落盘时那份整串 JSON 就是这种）。七段 = 走完，**停在第几段就是死在第几步**；`#1` 是上一条，所以保存失败后**不用重跑**，失败那条还在。归一化失败时 `regs=-1`（不冒充 0）。为什么这么设计见下文「`R:CTRACE`：把 128 点的内存峰值量到每一步上」 |
 | R:MQTT / W:MQTT={json} | MQTT 配置读写，读返回 `{cfg,auto_pass,manual_on,pub,sub,ready,err,stat}`。`cfg`=手动档表单原值，`auto_pass`=首页凭证密码，`manual_on`=当前档位，`pub`/`sub`=当前档次实际生效的成品 topic |
 | W:MQTTRC | 只重连不动配置（等价 `iot.kick()`：销毁 client 后 backoff 归 1 立刻重连） |
 | R:REPORT | 立即上报 |
@@ -166,7 +168,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | W:BOOTMODE=idle\|poll\|pollpull\|sniff | 开机默认模式（大小写不敏感）。`sniff` 同样自动识别，但不堵开机流程 |
 | R:SN / R:ID / W:SN=xxx[,FORCE] / C:SN / LOCK:SN / UNLOCK:SN / R:SNEN / W:SNEN=n,0\|1[,P] | SN 产线指令（VUART_0 通道） |
 
-> 指令集与 `frontend/protocol.js` 的 `Enc` 一一对应。`W:RAWTEST`/`W:GC`/`R:MEM` 是前端不调用的现场诊断入口，且**仅开发版注册**（`_build_flag.lua` = true 的发布固件里没有）。`R:FRAMES`/`R:INFER`/`R:AUTODETECT` 源自调试组，但已是 sniff 面板的正式依赖，2026-10 已**转正注册**（`cmd.lua` 的 `reg_cmds`，发布版可用）。
+> 指令集与 `frontend/protocol.js` 的 `Enc` 一一对应。`W:RAWTEST`/`W:GC`/`R:MEM`/`W:FS`/`R:CTRACE` 是前端不调用的现场诊断入口，且**仅开发版注册**（`_build_flag.lua` = true 的发布固件里没有）。`R:FRAMES`/`R:INFER`/`R:AUTODETECT` 源自调试组，但已是 sniff 面板的正式依赖，2026-10 已**转正注册**（`cmd.lua` 的 `reg_cmds`，发布版可用）。
 >
 > **`R:MQTT` 的 stat 带 `sub_list`**（2026-10）：设备实际订阅清单（`build_subs()` 的产物，当前 5 条）。前端"其他生效 Topic"里的 **D2n** 那条用它替换模板——常量里是 `.../{sn}-N`（N=从机序号占位符），设备实际订的是 `.../{sn}-1`（多从机展开 `-1..-K`）。显示模板等于骗人：现场照着 `-N` 订阅收不到东西。老固件没有这个字段，前端退回模板。
 >
@@ -2093,8 +2095,10 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
 - **本地落盘功能已整体移除**（按需求，poll 模式不做本地保存）：删除 `data/store.lua`、
   `collector.on_store`、`R:DISK`/`W:STORE`、`R:STAT` 的 store 段、配置里的
   `DATA_FILE`/`KEEP_ROUNDS`/`STORE_ENABLE`/`CHANGE_EPS`/`FLUSH_*` 及寄存器的 `eps` 字段
-- **存储空间功能已整体移除**：本固件 `rtos.fsinfo` 与 `fs` 库均不存在，
-  前端首页"存储空间"栏、store.stats 的 `fs` 段、R:DISK 的探测字段全部删除
+- **存储空间功能已整体移除**（此结论已于 2026-11-11 **撤回**，见上面 API 勘误一节：
+  当年探的是 `fs` 库和 `rtos.fsinfo`，现役 API 是 `io` 库，`io.open` 从没试过）：
+  前端首页"存储空间"栏、store.stats 的 `fs` 段、R:DISK 的探测字段确实删了，
+  但**"本机型没有可写文件系统"不是删除的理由**，能不能写由 `W:FS` 实测回答
 - 看门狗参数、MQTT 用法、启动顺序均对照官方文档核对修正
 - 切帧统一为 CRC 试探法（每个候选长度都验 CRC，fc15/16 用 byte(7)=bc）；事务前 drain 清残帧（v1 只在失败后 drain）
 - 配置校验与原工程对齐：串口参数范围 / MAX_REGS=128 / 标识符去重 / count%width
@@ -2140,4 +2144,23 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
   full GC（上一档的探测块要真还回去才测得准下一档），有毫秒级停顿 —— 所以
   只进开发版。测法：`W:GC` → `R:MEM` → 立刻再保存 80 点，用 `max:` 判
   "306KB 是真常驻还是峰值"。
+- **`R:CTRACE`：把 128 点的内存峰值量到每一步上（2026-11-11，仅开发版）**：
+  `R:MEM` 答的是"现在能不能切出一块"，答不了"整条保存路径的峰到底在哪一步、
+  多大" —— 而那正是路线 B/C 要不要做**就地归一化**、配置要不要**分批下发**的
+  唯一依据（厂家给的那张峰值表是估的）。`cmd.lua` 因此在 `W:CFG` 的进出口各加
+  一次采样（`enter`/`gc`/`decoded`/`norm`/`freed`/`saved`/`done`），用
+  `R:CTRACE` 回读最近两次。三个设计上的讲究：
+  ① `norm` 段必须夹在 `normalize_poll` 返回之后、`t = nil` 之前 —— 那一刻解码表
+  和归一化表**同时在堆上**，就是这条路径的峰，采样点错一位结论就整个错；
+  ② `used` 只看得见"还留在堆上的"，落盘时 `jencode` 那份整串 JSON 返回即消失，
+  所以同时读 `max_used`：`saved` 段 `max` 比 `used` 高出来的那截就是它；
+  ③ `freed` 段前主动收一轮 GC，为的是把"解码表确实能还回去"和"哪里还攥着它"
+  分开 —— 现场"开机 16 秒存得下 80 点、107 秒存不下"要排除的就是后者。
+  ⚠️ **读法只在开机后第一次大配置保存上成立**：`max_used` 是自开机以来的单调高
+  水位、不会回落，那一次之后各段的 `max` 全等于同一个数，看着就像"没有瞬时峰"。
+  所以现场顺序是 **重启 → 存一次 96/128 点 → 立刻 `R:CTRACE`**，中间不要插别的保存。
+  **发布版一个字节都不许多走**：采样靠 `_G.DEBUG` 打开的 `TR_ON` 开关，关掉以后
+  那几个函数白检一次 nil，不注册 `R:CTRACE`、一次 `meminfo` 都不问、也不多出
+  那次 GC（`>4096B` 才做的入口 GC 是 83847fe 原有行为，没动）。这些都在
+  `test_cmd_ctrace.lua` 里钉着（含"失败那条采样停在第几段"和"不被下一次保存挤掉"）。
 

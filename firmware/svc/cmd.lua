@@ -197,6 +197,76 @@ function M.push_infer()
     return true
 end
 
+-- ==== W:CFG 分阶段内存采样 (2026-11-11, 仅开发版) ====
+-- 为什么要有它: 128 点卡的是【内存峰值】这道门, 而厂家给的那张表是算出来的,
+--   不是量出来的。整条 W:CFG 只有"解码 → 归一化 → 落盘"三步, 每一步都把整份
+--   寄存器表在内存里过一遍, 但哪一步吃掉多少、峰究竟在哪, 只有一个办法知道:
+--   在每一步的进出口各采一次样。
+-- 两个数缺一不可:
+--   used = 即时水位。相邻两次一减 = 这一步【留在堆上】多少。
+--   max  = rtos.meminfo("lua") 的 max_used, 【自开机以来】的峰值。采样点看不见、
+--          但确实在这一步内部出现过又立刻还掉的瞬时峰就是它 —— 落盘时 jencode
+--          那份整串 JSON 属于这种(返回时字符串已经没了)。两次采样之间 max
+--          涨了, 涨到的那个值就是这一步的真实峰值。
+-- 装填只在开发版: reg_debug_cmds 里置 TR_ON, 发布版这四个函数就是白检一次 nil,
+--   W:CFG 的行为一个字节都没变(该做的 GC 本来 >4096B 时就在做)。
+-- ⚠️ max_used 是【自开机以来】的单调高水位, 不会回落 —— 所以"每段 max 比上段
+--   高多少"这个读法只在【开机后第一次大配置保存】上成立: 那一次之后高水位已经
+--   被顶上去了, 再存第二次各段的 max 全等于同一个数, 看着像"没有瞬时峰"。
+--   现场读法因此是: 重启 → 存一次 96/128 点 → 立刻 R:CTRACE, 中间别插别的保存。
+local TR_ON, TR, TR_LAST = false, nil, nil
+
+local function trc_sample(stage)
+    if not TR then return end
+    local used, mx = -1, -1
+    if rtos then
+        local ok, _, u, m = pcall(rtos.meminfo, "lua")
+        if ok then
+            if type(u) == "number" then used = u end
+            if type(m) == "number" then mx = m end
+        end
+    end
+    local s = TR.s
+    s[#s + 1] = string.format("%s %d/%d", stage, used, mx)
+end
+
+local function trc_begin(nbytes)
+    if not TR_ON then return end
+    -- 只保最近两条: 现场往往是"保存失败 → 再发 R:CTRACE", 失败那条最值钱,
+    -- 不能被下一次点保存挤掉
+    if TR then TR_LAST = TR end
+    TR = { arg = nbytes, regs = -1, tot = -1, s = {} }
+    if rtos then
+        local ok, t = pcall(rtos.meminfo, "lua")
+        if ok and type(t) == "number" then TR.tot = t end
+    end
+    trc_sample("enter")
+end
+
+-- t = nil 之后调, 顺手做一次 full GC 再采样。为什么要 GC: 不主动收, used 里的
+--   t 只是"看起来还在", 分不清"解码表确实没引用了、能还回去"和"哪里还攥着它"
+--   —— 现场"开机 16 秒存得下 80 点、107 秒存不下"要排除的正是后面这种。
+local function trc_freed()
+    if not TR then return end
+    collectgarbage("collect")
+    trc_sample("freed")
+end
+
+local function trc_regs(n)
+    if not TR then return end
+    TR.regs = (type(n) == "table") and #(n.regs or {}) or -1
+end
+
+-- 一条采样 ≈ 200B, 单独 concat 一份字符串、单独一行发出去。
+--   不用 reply_json: 那要 json.encode 再抄一份, 而这条命令恰恰是在池子快死的时候
+--   读的, 每一份额外拷贝都可能让它自己失败。
+local function trc_line(tr, tag)
+    if not tr then return nil end
+    local p = { string.format("%s arg=%d regs=%d tot=%d", tag, tr.arg, tr.regs, tr.tot) }
+    for i = 1, #tr.s do p[#p + 1] = tr.s[i] end
+    return table.concat(p, " | ")
+end
+
 -- A 类：上位软件业务必需的 16 条指令
 local function reg_cmds()
     -- R:INFO: 前端打开串口读设备信息用的第一条指令
@@ -269,6 +339,7 @@ local function reg_cmds()
 
     M.reg("W:CFG", function(arg)
         if blocked_while_detecting("CFG") then return end
+        trc_begin(#arg)
         -- 大配置(128 点整行最坏 12.7KB)解码前先收一轮垃圾: Lua 堆池平时就
         --   贴着天花板(R:STAT 每 5 秒造 1.5KB 串), 2026-11-10 现场保存 90 点
         --   时池子已 used 306712/307192, 连 160B 都分配不出来。
@@ -276,11 +347,19 @@ local function reg_cmds()
         --   连续大块; 但这条路径上的分配绝大多数是寄存器表那种小对象,
         --   收一轮就有货。停顿只在人工保存时发生, 不在 UART 收帧路径上。
         if #arg > 4096 then collectgarbage("collect") end
+        trc_sample("gc")
         local t = jdecode(arg)
+        trc_sample("decoded")
         if not t then return M.reply("RET:FAIL:CFG:bad json") end
         local n, err = cfgstore.normalize_poll(t)
+        -- 这一刻 t 和 n 同时在堆上 = 这条路径的峰, 采样必须在放开 t 之前
+        trc_sample("norm")
         t = nil -- 解码表就此不可达, 归一化结果只留 n 一份
+        -- ⚠️ 归一化失败就地返回: 采样的"停在第几段"就是"死在第几步",
+        --    这里再多走一段 freed, 读的人会以为归一化过了
         if not n then return M.reply("RET:FAIL:CFG:" .. tostring(err)) end
+        trc_regs(n)
+        trc_freed()
         local cur_mode = ctrl.get_mode()
         local slot = (cur_mode == "platform") and SLOT_PULL or SLOT_POLL
         local ok, serr
@@ -288,6 +367,8 @@ local function reg_cmds()
         --   等于把 128 个寄存器表(~30KB)白造第二次
         if slot == SLOT_PULL then ok, serr = cfgstore.save_pull_norm(n)
         else ok, serr = cfgstore.save_poll_norm(n) end
+        -- 落盘内部那份 jencode 字符串已经还掉了, used 看不见它; 靠 max 的涨幅
+        trc_sample("saved")
         if not ok then return M.reply("RET:FAIL:CFG:" .. tostring(serr)) end
         -- 34-fix: 进入 polling 档 (manual/platform) 时, 如果 poll 因为空配置
         --   没起来 (34-fix 的副作用, 之前一定起来), 现在 W:CFG 写完要把
@@ -319,6 +400,9 @@ local function reg_cmds()
             end
         end
         if iot and iot.reply_config then pcall(iot.reply_config) end
+        -- 重启轮询(建块计划)之后采一次: n 还要经过 apply_cfg 才被 poll 持有,
+        -- 这一步涨了说明 poll 那边又留了一份表
+        trc_sample("done")
         M.reply("RET:CFG=OK")
     end)
 
@@ -665,7 +749,7 @@ local function reg_cmds()
     end)
 end
 
--- B 类：仅开发调试用的 4 条指令。发布版整个函数不调用,
+-- B 类：仅开发调试用的 5 条指令。发布版整个函数不调用,
 -- 键 + 闭包 + 闭包内捕获的 poll/iot 等 upvalue 全部不进注册表,
 -- 出厂固件更小、也不接受任何探针/总线诊断入口。
 --   W:GC      强制 GC + 踢连接 (乱用会断 MQTT, 不给客户)
@@ -673,12 +757,14 @@ end
 --              现场排障时切开发版烧一次 (见 lua/README.md「开发版 vs 发布版」)
 --   R:MEM     内存口径探针 (2026-11-10 为 128 点排障重新加回, 见下面说明)
 --   W:FS      文件系统探针 (2026-11-11 为 128 点路线 B 定生死, 见下面说明)
+--   R:CTRACE  读 W:CFG 的分阶段内存采样 (2026-11-11, 为 128 点量出真实峰值)
 -- 历史: 2026-10 曾把 R:NET/R:MEM 删掉(信息早就并进 R:STAT 的 iot/guard 段,
 --   前端 0 引用, 留着只是白占脚本区)。R:MEM 现在【换了职责】才加回来:
 --   它量的不是水位(那部分 R:STAT 已经有了), 而是【最大连续可分配块】——
 --   水位判不出碎片化, 而这正是 128 点卡住的那一层。
 --   R:FRAMES/R:INFER/R:AUTODETECT 已转正进 reg_cmds
 local function reg_debug_cmds()
+    TR_ON = true                   -- 打开 W:CFG 的分阶段采样(见文件顶部说明)
     M.reg("W:GC", function()
         collector.trim_cache()
         collectgarbage("collect")
@@ -868,6 +954,20 @@ local function reg_debug_cmds()
         M.reply("RET:FS=" .. table.concat(p, " ") .. " =>" .. verdict)
     end)
 
+    -- R:CTRACE: 读最近两次 W:CFG 的分阶段内存采样 (#1=上一条, #2=最新一条)。
+    --   用法: 点一次"保存配置"(或串口发 W:CFG), 再发这条。保存失败【不用重跑】,
+    --   失败那条采样本来就留着。
+    --   每段的 "a/b" = used/max_used; 相邻两段的 used 之差 = 这一步留下多少,
+    --   任何一段的 max 高于前一段 = 前一步内部冒出过更高的瞬时峰。
+    --   为什么单独一条指令、不并进 RET:CFG=OK: 前端按 "RET:CFG=OK" 判成败,
+    --   后面多挂一串字符就变成"保存失败", 而且产线工具同样按整行对答。
+    M.reg("R:CTRACE", function()
+        if not TR then return M.reply("RET:CTRACE=empty (还没发过 W:CFG)") end
+        local one = trc_line(TR_LAST, "#1")
+        if one then M.reply("RET:CTRACE=" .. one) end
+        M.reply("RET:CTRACE=" .. trc_line(TR, "#2"))
+    end)
+
     M.reg("W:RAWTEST", function(arg)
         if blocked_while_detecting("RAWTEST") then return end
         local poll = pollmod(true)
@@ -937,7 +1037,7 @@ function M.init()
     --   require cmd 就是循环依赖(命令模块会拿到半初始化的 iot 表)。
     --   项目里已有同类全局钩子(_G.vcom_handle / _G.mon_detect_result)。
     _G.cmd_push_infer = M.push_infer
-    -- 发布版: 调试组 2 条 (W:GC/W:RAWTEST) 整组不注册;
+    -- 发布版: 调试组 5 条 (W:GC/W:RAWTEST/R:MEM/W:FS/R:CTRACE) 整组不注册;
     -- R:FRAMES/R:INFER/R:AUTODETECT 已转正在 reg_cmds, 发布版仍可用
     if _G.DEBUG then reg_debug_cmds() end
     local names = {}
