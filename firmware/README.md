@@ -38,7 +38,7 @@ return false        -- false=开发版 / true=发布版
 
 | 差别 | 开发版 | 发布版 |
 |---|---|---|
-| 调试指令注册 | `W:GC`（强制 GC+踢连接）、`W:RAWTEST`（485 裸探针）**都注册** | **都不注册** |
+| 调试指令注册 | `W:GC`（强制 GC+踢连接）、`W:RAWTEST`（485 裸探针）、`R:MEM`（内存口径探针）、`W:FS`（文件系统探针）**都注册** | **都不注册** |
 | 原始 hex 收进 ring | 收（`collector.push_raw_rx`） | 不收（省内存，也不留总线原始报文） |
 
 其余全部指令（含 sniff 三件套 `R:FRAMES`/`R:INFER`/`R:AUTODETECT`）**两版都有**。
@@ -58,7 +58,8 @@ return false        -- false=开发版 / true=发布版
 
 > 现场排障的具体做法：把 `_build_flag.lua` 改成 `return false` → `tools\prep_burn.bat` → 烧 `build\lua_burn\` → 排障完改回 `return true` 再烧一次。
 >
-> `R:NET`/`R:MEM` 已在 2026-10 删除（信息早就并进 `R:STAT` 的 mqtt/guard 段，前端 0 引用，留着只是白占脚本区）。
+> `R:NET` 已在 2026-10 删除（信息早就并进 `R:STAT` 的 mqtt/guard 段，前端 0 引用，留着只是白占脚本区）。
+> `R:MEM` 2026-11-10 **换了职责加回来**：量的不是水位（那部分 `R:STAT` 有），是【最大连续可分配块】。
 
 ## 功能
 
@@ -154,6 +155,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | W:MQTTRC | 只重连不动配置（等价 `iot.kick()`：销毁 client 后 backoff 归 1 立刻重连） |
 | R:REPORT | 立即上报 |
 | W:GC | 强制 GC + 重连（**仅开发版注册**） |
+| W:FS | 文件系统探针（**仅开发版注册**，2026-11-11）：逐个报 `io.open`/`io.fsstat`/`io.exists`/`io.fileSize`/`io.remove`/`os.rename` 的存在性，`io.fsstat("/")` 算出可用/总空间（块数口径和字节口径都认），然后**真写一个 8192B 临时文件 → 改名 → 读回 → 删掉**，末尾给一句可直接照抄的判定：`=>B:YES`（文件路线成立）/`=>B:NO(没有io.open)`/`=>B:NO(open返回nil)`/`=>B:NO-MEM(8KB申请不到)`/`=>B?:写了没读回8192`。为什么要有这条：128 点整份配置 8271B 撞 fskv 单值 4096 硬顶，唯一的出路是把它写文件，而"到底能不能写"这件事只有真机能回答。探测不碰任何配置，两个临时文件名都会删。⚠️ 那条 8192B 的 blob 顺带就是"能不能一次切出 8KB 连续块"的实测——128 点配置正好这个尺寸 |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配”（**仅开发版注册**——它能直接往总线上发帧，交付版不能开，见下「开发版 vs 发布版」） |
 | R:FRAMES[=n] | 旁听帧（n 取 1~50，默认 20，**正式注册**，sniff 报文卡依赖） |
 | R:INFER[=off,n] | 读**常驻推断表**（2026-10-28 起是累加器，不再每次重建）`{regs:[{slave,addr,fc,hits,answered,dtype,conf,value}], slaves, ignored, stat, total, off, n, pages, page}`（**只读参考**，不写任何配置）。**行只增不减**：请求帧里出现过的地址就进表，顺序 = 嗅探到的发现顺序（前端第 1 列"序号"就是这个顺序，前端自己编号，设备不存序号字段）；`hits` = 累计被请求多少次；`answered`=false 表示主站轮询了但没收到应答（这类地址**也进表**）；`value` = 旁听应答最新解析值。**最多累计 128 行**（`MAX_INFER_ROWS`，见「内存缓冲上限」一节）；`ignored` = 表里"没应答"的地址数。⚠️ **2026-10-29 起分页**：`off`=起始行号(0 起)、`n`=本页行数（上限 32）。`regs` 是**本页**的行，`slaves/ignored/stat/total/pages` 是**整张表**的口径。`id`/`name`（U4 上报 payload 的 id/name，别名映射）**不在行上**了，改挂顶层 `names` 表：`{"reg230":{"id":"x","name":"y"}}`，**只有跟默认值 `reg<addr>` 不一样的才登记**，没有的条目前端自己退回 `reg<addr>` |
@@ -196,7 +198,12 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 - `rtos.meminfo("sys")` 返回 **3 个 int**（总/已用/历史峰值），不是 table
 - `mobile.imei/csq/rsrp/iccid()` 均为无参函数；`mobile.status()` 不能用于判断联网（以连上目标服务器为准）
 - `json.decode` 返回 obj/result/err 三个值；`json.encode` 第二参为浮点精度模式，缺省 "7f"
-- `rtos.fsinfo` 官方确认不存在；`fs` 库也不存在 → 存储空间功能已整体移除
+- `rtos.fsinfo` 不存在；**但"本机型没有可写文件系统"这个老结论已撤回**（2026-11-11）：
+  当年探的是 `fs.*` 和 `rtos.fsinfo`，而 `fs` 库在 LuatOS 里已被 `io` 库整体取代
+  （`io.fsstat` 替 `fs.fsstat`、`io.fileSize` 替 `fs.fsize`），**`io.open` 从没试过**。
+  开机日志 `D/sfd.lfs init ok` + `fs 128kbyte` 说明 littlefs 确实挂起来了。
+  现在用 `W:FS` 一条指令实测（见下），别再拿这条老结论当"只能走 fskv"的依据。
+  注意两个坑：`/luadb` 是**只读**烧录区（写它必失败）；可用空间以 `io.fsstat("/")` 实测为准，别按 128KB 全额假设。
 - 32 位固件：`ts*1000` 回绕、`%.0f` 大数科学计数法 → 数值全部手工拼（int_str/ms_of）
 - `tonumber(nil)` 会崩 VM → 所有外部取值先判 nil
 - 日志：开机不调 `setLevel`；guard 心跳用 `print` 走 stdout

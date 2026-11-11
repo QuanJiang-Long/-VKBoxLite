@@ -665,13 +665,14 @@ local function reg_cmds()
     end)
 end
 
--- B 类：仅开发调试用的 3 条指令。发布版整个函数不调用,
+-- B 类：仅开发调试用的 4 条指令。发布版整个函数不调用,
 -- 键 + 闭包 + 闭包内捕获的 poll/iot 等 upvalue 全部不进注册表,
 -- 出厂固件更小、也不接受任何探针/总线诊断入口。
 --   W:GC      强制 GC + 踢连接 (乱用会断 MQTT, 不给客户)
 --   W:RAWTEST 485 裸探针: 能直接往总线上发原始帧 —— 交付版绝对不能开,
 --              现场排障时切开发版烧一次 (见 lua/README.md「开发版 vs 发布版」)
 --   R:MEM     内存口径探针 (2026-11-10 为 128 点排障重新加回, 见下面说明)
+--   W:FS      文件系统探针 (2026-11-11 为 128 点路线 B 定生死, 见下面说明)
 -- 历史: 2026-10 曾把 R:NET/R:MEM 删掉(信息早就并进 R:STAT 的 iot/guard 段,
 --   前端 0 引用, 留着只是白占脚本区)。R:MEM 现在【换了职责】才加回来:
 --   它量的不是水位(那部分 R:STAT 已经有了), 而是【最大连续可分配块】——
@@ -726,6 +727,145 @@ local function reg_debug_cmds()
         end
         p[#p + 1] = string.format("max:%d fail:%d", last_ok, first_fail)
         M.reply("RET:MEM=" .. table.concat(p, " "))
+    end)
+
+    -- W:FS: 文件系统探针。128 点路线 B(整份配置写文件, 不受 fskv 单值 4096 约束)
+    --   成不成立, 只取决于三件事, 这一条指令一次答完:
+    --     1) Lua 侧到底有没有 io.open
+    --     2) 可写区有多大 (io.fsstat)
+    --     3) 写 8192B → 读回 → rename → 删, 整条走得通吗
+    --   为什么现在必须测: 开机日志两行摆在那儿互相打架 ——
+    --     self_info: firmware[1] BASIC fs 128kbyte   +  D/sfd.lfs init ok
+    --     而 README 早年写的是"fs 库和 rtos.fsinfo 都取不到 ⇒ 本机型没有可写
+    --     文件系统", 据此选了 fskv。合宙指出那是【查错了函数名】: fs 库已被
+    --     io 库取代(io.fsstat 替 fs.fsstat), 我们从没试过 io.open。
+    --   所以这里不猜: 逐个报函数存在性(报 nil 也要报, 缺字段会被读成"日志
+    --     被截断没看见", 明写 nil 才是明确答案), 再真写一次。
+    --   ⚠️ 探测会往可写区写一个 8KB 临时文件再删掉, 不碰任何配置/键。
+    --   ⚠️ 8192B 那块 blob 同时就是"能不能一次切出 8KB 连续块"的实测——
+    --      128 点整份配置正好是这个尺寸, 白捡一个数据点。
+    --   ⚠️ 路径形状未知(绝对/裸名), 每种都试: 只试一种失败就下"没有文件系统"
+    --      的结论, 正是这次要避开的第二个坑。/luadb 是只读烧录区, 不试。
+    M.reg("W:FS", function()
+        local p, verdict = {}, "?"
+        local io_lib, os_lib = rawget(_G, "io"), rawget(_G, "os")
+        local function fn(t, n)
+            if type(t) ~= "table" then return "no-lib" end
+            return tostring(type(t[n]))
+        end
+        p[#p + 1] = "open:" .. fn(io_lib, "open")
+        p[#p + 1] = "fsstat:" .. fn(io_lib, "fsstat")
+        p[#p + 1] = "exist:" .. fn(io_lib, "exists")
+        p[#p + 1] = "fsize:" .. fn(io_lib, "fileSize")
+        p[#p + 1] = "rm:" .. fn(io_lib, "remove")
+        p[#p + 1] = "ren:" .. fn(os_lib, "rename")
+        if rtos then p[#p + 1] = "rtos.fsinfo:" .. tostring(type(rtos.fsinfo)) end
+
+        -- io.fsstat 返回几个值、第一个是不是 bool, 各版固件说法不一
+        -- → 只认"从 pcall 返回里挑出前三个数", 别按写死的下标解
+        local function nums(t)
+            local out = {}
+            for i = 1, #t do
+                if type(t[i]) == "number" then out[#out + 1] = t[i] end
+            end
+            return out
+        end
+        local space = "?"
+        if type(io_lib) == "table" and type(io_lib.fsstat) == "function" then
+            local pack = { pcall(io_lib.fsstat, "/") }
+            local n = nums(pack)
+            if #pack >= 1 and pack[1] and #n >= 2 then
+                -- 三个数 = 块数,已用块,块字节 (合宙给的口径 32/4/4096);
+                -- 只有两个数 = 已经是字节 (总量,已用)。两种都算, 别猜死一种
+                local tot, free
+                if #n >= 3 then
+                    tot, free = n[1] * n[3], (n[1] - n[2]) * n[3]
+                else
+                    tot, free = n[1], n[1] - n[2]
+                end
+                if free < 0 then free = -1 end
+                space = string.format("%dK/%dK", math.floor(free / 1024),
+                    math.floor(tot / 1024))
+                local raw = {}
+                for i = 1, #n do raw[i] = tostring(n[i]) end
+                p[#p + 1] = "fs=" .. table.concat(raw, ",")
+            else
+                space = "stat-fail"
+            end
+        end
+        p[#p + 1] = "free:" .. space
+
+        -- 真写一次: tmp → 校验长度 → rename → 校验 → 删
+        local blob = nil
+        if type(io_lib) ~= "table" or type(io_lib.open) ~= "function" then
+            -- 没有 io.open 就谈不上写, 别去 alloc —— 报成"申请不到 8K"
+            -- 会把结论带歪(那是内存问题, 这是固件没编 io 库, 下一步完全不同)
+            p[#p + 1] = "blob:skip"
+            verdict = "B:NO(没有io.open)"
+        else
+            local ok, s = pcall(string.rep, "x", 8192)
+            if ok and type(s) == "string" and #s == 8192 then blob = s end
+            if not blob then
+                p[#p + 1] = "blob:FAIL-8K"
+                verdict = "B:NO-MEM(8KB申请不到)"
+            else
+                local done, open_nil = false, false
+                for _, tmp in ipairs({ "/vk_probe.tmp", "vk_probe.tmp" }) do
+                    if not done then
+                        local bin = tmp:gsub("tmp$", "bin")
+                        local r = { path = tmp:sub(1, 1) }
+                        local f = io_lib.open(tmp, "wb")
+                        if not f then
+                            r.w = "open-nil"
+                            open_nil = true
+                        else
+                            local wok = f:write(blob)
+                            f:close()
+                            r.w = wok and "ok" or "write-fail"
+                            local sz = io_lib.fileSize and io_lib.fileSize(tmp) or -1
+                            r.wsz = tostring(sz)
+                            if type(os_lib) == "table" and type(os_lib.rename) == "function" then
+                                r.ren = tostring(os_lib.rename(tmp, bin))
+                            else
+                                r.ren = "no-rename"
+                            end
+                            local g = io_lib.open(bin, "rb")
+                            if g then
+                                local got = g:read("*a") or ""
+                                g:close()
+                                r.rsz = tostring(#got)
+                            else
+                                r.rsz = "read-fail"
+                            end
+                            if io_lib.remove then
+                                io_lib.remove(bin)
+                                io_lib.remove(tmp)
+                            end
+                            if io_lib.exists then
+                                r.left = tostring(io_lib.exists(tmp) or io_lib.exists(bin))
+                            end
+                            -- 判据只看"写完 + 改名后读回 8192"。fileSize 在部分
+                            -- 固件里不存在(wsz 会是 -1), 它是补充信息不是闸门 ——
+                            -- 拿它当条件会把一条明明能用的路径误判成 B?
+                            done = (r.w == "ok" and r.rsz == "8192")
+                        end
+                        local q = {}
+                        for k, v in pairs(r) do q[#q + 1] = k .. "=" .. v end
+                        table.sort(q)
+                        p[#p + 1] = "probe:" .. table.concat(q, " ")
+                    end
+                end
+                if done then
+                    verdict = "B:YES"
+                elseif open_nil then
+                    verdict = "B:NO(open返回nil)"
+                else
+                    verdict = "B?:写了没读回8192"
+                end
+            end
+        end
+        log.info("fs", "probe", verdict, space)
+        M.reply("RET:FS=" .. table.concat(p, " ") .. " =>" .. verdict)
     end)
 
     M.reg("W:RAWTEST", function(arg)
