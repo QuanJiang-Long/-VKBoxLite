@@ -451,22 +451,27 @@ do
         end)(), push_map[41071])
 end
 
--- S5 从站单帧只肯回 16 字(over=trunc): 少回字被当成成功 (缺陷②)
+-- S5 从站单帧只肯回 16 字(over=trunc): 少回字 = 整块显式丢弃 (缺陷②, 11-11 已修)
 do
     new_slave({ max_qty = 16, over = "trunc" })
     fill_words(41001, 41130)
     local rs = regs_blocked(128, 41001, 64)
     local m = run_round(cfg_of(rs), 1)
     check("S5 请求确实是 64 字(从站被问到超上限)", m and slave.peak_qty == 64, slave.peak_qty)
-    known_bug("S5 从站少回字被记成 ok、不报错(缺陷②: poll_block 不校验 bc == 2*qty)",
-        m and m.ok == 2 and m.timeout == 0 and m.werr == 0 and m.pushes == 32,
+    check("S5 少回字被 bc 校验拦下: 计 werr 不计 ok(缺陷②已修)",
+        m and m.ok == 0 and m.timeout == 0 and m.werr == 2 and m.pushes == 0,
         m and string.format("ok=%d timeout=%d werr=%d 值=%d/128", m.ok, m.timeout, m.werr, m.pushes))
-    check("S5 每块只有前 16 点有值(后 48 点本轮没数据)",
+    check("S5 整块显式丢弃: 连前 16 点也不写(不半对更新)",
+        push_map[41001] == nil and push_map[41016] == nil and push_map[41017] == nil,
+        "还在写部分值")
+    check("S5 有 warn 日志留下现场线索",
         (function()
-            return push_map[41001] ~= nil and push_map[41016] ~= nil
-                and push_map[41017] == nil and push_map[41064] == nil
-        end)(), "边界不是 16/17")
-    print("     现场含义: 前端看到 128 行都在, 后 96 行还是上一轮的旧值, 日志一条不报")
+            for _, l in ipairs(logs) do
+                if l:find("bad bc") then return true end
+            end
+            return false
+        end)(), "日志里找不到 bad bc")
+    print("     现场含义: 少回字在计数和日志里都看得见; 前端保持上一轮的值, 不会把旧值当新值")
 end
 
 -- S6 同一件事从站改用异常码回答: 计数看得见

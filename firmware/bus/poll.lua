@@ -262,8 +262,20 @@ local function poll_block(blk)
             f.fc or 0, f.code or 0, blk.addr, blk.qty, #rows))
         return
     end
-    stat.ok = stat.ok + 1
     local data = f.data or ""
+    -- 缺陷② (11-11): 从站被问到超自己上限的字数时, 有的不报异常码而是【少回字】
+    -- (请求 64 字只回 16 字)。原来这里不校验, 少回的字被 extract_row 的 span
+    -- 截断规则吃掉 → 靠后的行本轮一个值都不产生, 而 stat.ok 照加、日志一条不报
+    -- → 前端 128 行都在, 靠后的是上一轮的旧值, 现场看不出来。
+    -- 现在按 fc3 的硬约定校验 bc == 2*qty: 对不上就整块显式丢弃(宁可不更新,
+    -- 不写半对的值), 计入 werr 并 warn, 让这件事在统计和日志里都看得见。
+    if #data ~= blk.qty * 2 then
+        stat.werr = stat.werr + 1
+        log.warn("poll", string.format("Rx bad bc addr=%d qty=%d rows=%d bc=%d want=%d",
+            blk.addr, blk.qty, #rows, #data, blk.qty * 2))
+        return
+    end
+    stat.ok = stat.ok + 1
     if single then
         local r = rows[1].r
         local n, hx, vv = extract_row(data, 0, r)

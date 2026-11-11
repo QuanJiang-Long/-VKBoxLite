@@ -262,8 +262,20 @@ local function poll_block(blk)
             f.fc or 0, f.code or 0, blk.addr, blk.qty, #rows))
         return
     end
-    stat.ok = stat.ok + 1
     local data = f.data or ""
+
+
+
+
+
+
+    if #data ~= blk.qty * 2 then
+        stat.werr = stat.werr + 1
+        log.warn("poll", string.format("Rx bad bc addr=%d qty=%d rows=%d bc=%d want=%d",
+            blk.addr, blk.qty, #rows, #data, blk.qty * 2))
+        return
+    end
+    stat.ok = stat.ok + 1
     if single then
         local r = rows[1].r
         local n, hx, vv = extract_row(data, 0, r)

@@ -1623,13 +1623,18 @@ D/user.poll Rx addr=15 Ua hex=00ea val=234
   整帧 255B，正好规范上限；同函数 fc15/16 分支本来就放到 246，两处原来不一致）。
   同时 `MAX_BLOCK_QTY` 也从 125 收到 96 —— 不贴那条线跑，留 52B 余量，且
   ≤128 点的表帧数不变（零总线代价）。钉在 `test_poll_slave` S1/S2b。
-- **缺陷②（未修）**：`poll_block` 不校验 `bc == 2*qty`。从站单帧只肯回 16 字却按
+- **缺陷②（11-11 已修）**：`poll_block` 原来不校验 `bc == 2*qty`。从站单帧只肯回 16 字却按
   64 字请求作答时（这类从站真存在，回异常码的那种反而好），少回的字被
   `extract_row` 的 span 截断规则吃掉 → 后面的行本轮一个值都不产生，而 `stat.ok`
   照加、日志一条不报 → 前端 128 行都在，靠后的是上一轮的旧值。
-  修法：`bc ~= 2*blk.qty` 时计一次错并 warn（宁可显式丢，不要静默旧值）。
-- 测试里这三条用 `known_bug()` 钉住：缺陷还在打 `KNOWN BUG`（不算失败），
-  一旦修好它反过来 FAIL，提醒把那条改成正常断言，别让回归悄悄溜进来。
+  **修法**：`#data ~= blk.qty * 2` 时整块显式丢弃——`stat.werr +1` 并
+  `Rx bad bc addr=.. qty=.. bc=.. want=..` warn，不进 `stat.ok`、一个值都不 push
+  （宁可整块不更新，也不写半对的值；少回字在计数和日志里都看得见）。
+  钉在 `test_poll_slave` S5。校验对单行读同样生效，所以 `count` 写大了的表
+  从站少回也会报，不再静默。
+- 这两条原来用 `known_bug()` 钉住：缺陷还在时打 `KNOWN BUG`（不算失败），修好后
+  它反过来 FAIL，提醒改成正常断言。**现已全部翻成 `check()`**，跑出来是
+  `0 项断言失败, 0 条已知缺陷被钉住`；`known_bug()` 这个 harness 留着以后钉新缺陷。
 
 > ⚠️ `poll.lua` 的 `hexspaced()` **必须定义在 `on_receive()` 之前**（11-fix,
 > 2026-10-27）。`on_receive` 的 `respFlag=false` 分支要用它，而 `local function`

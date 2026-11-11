@@ -288,9 +288,13 @@ function M.try_extract_len(buf)
         if crc_at(buf, 6) then return 8 end
     end
 
+
+
+
+
     if fc >= 1 and fc <= 4 and #buf >= 5 then
         local bc = buf:byte(3)
-        if bc and bc >= 1 and bc <= 0xF4 then
+        if bc and bc >= 1 and bc <= 0xFA then
             local total = bc + 5
             if #buf >= total then
                 if crc_at(buf, 3 + bc) then return total end
