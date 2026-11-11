@@ -86,7 +86,11 @@ local function slave_reply(req)
     s.n_req = s.n_req + 1
     if qty > s.peak_qty then s.peak_qty = qty end
     local q = qty
-    if q > s.max_qty then
+    if s.over == "plus" then
+        -- 非规范从站: 你要 64 字我回 66 字(尾巴是块后那两个地址的内容)。
+        -- 现实里确有这类表(整窗回吐), 用来验"多回字不该被这次校验打死"。
+        q = math.min(qty + s.pad_qty, 125)
+    elseif q > s.max_qty then
         if s.over == "exc" then return exc_resp(3, 3), s.delay_ms end
         if s.over == "trunc" then q = s.max_qty end
         -- over == "ignore": 守 125 上限的规范从站, 照量回
@@ -232,6 +236,8 @@ local function new_slave(o)
     slave = {
         addr = o.addr or 1, regs = {}, max_qty = o.max_qty or 125,
         over = o.over or "ignore",       -- qty 超上限: ignore 照回 / trunc 少回 / exc 异常码3
+                                          -- plus = 【多回】(非规范, 回 qty+pad_qty 字)
+        pad_qty = o.pad_qty or 2,         -- plus 模式多回几个字
         unmapped = o.unmapped or "gap0", -- 未映射地址: gap0 回 0 / exc 异常码2
         delay_ms = o.delay_ms or 5, offline = o.offline or false,
         n_req = 0, n_rsp = 0, n_drop = 0, n_badcrc = 0, peak_qty = 0,
@@ -467,11 +473,42 @@ do
     check("S5 有 warn 日志留下现场线索",
         (function()
             for _, l in ipairs(logs) do
-                if l:find("bad bc") then return true end
+                if l:find("short bc") then return true end
             end
             return false
-        end)(), "日志里找不到 bad bc")
+        end)(), "日志里找不到 short bc")
     print("     现场含义: 少回字在计数和日志里都看得见; 前端保持上一轮的值, 不会把旧值当新值")
+end
+
+-- S5b 非规范从站【多回字】(over=plus, 要 64 字回 66 字): 值本来就是对的,
+--     11-11 定的是"只拦少回" —— 多回只 warn, 不许动计数、更不许把能用的表打死
+do
+    new_slave({ over = "plus", pad_qty = 2 })
+    fill_words(41001, 41140)
+    local rs = regs_blocked(128, 41001, 64)
+    local m = run_round(cfg_of(rs), 1)
+    check("S5b 从站确实多回了(应答比请求长)", m and slave.n_rsp == 2, slave.n_rsp)
+    check("S5b 多回字照旧采集: ok=2 werr=0 值=128",
+        m and m.ok == 2 and m.timeout == 0 and m.werr == 0 and m.pushes == 128,
+        m and string.format("ok=%d timeout=%d werr=%d 值=%d/128", m.ok, m.timeout, m.werr, m.pushes))
+    local bad, first = 0, nil
+    for i = 1, #rs do
+        local r = rs[i]
+        if push_map[r.addr] ~= w16(r.addr) then
+            bad = bad + 1
+            first = first or string.format("addr=%d 期望=%s 实得=%s", r.addr,
+                tostring(w16(r.addr)), tostring(push_map[r.addr]))
+        end
+    end
+    check("S5b 128 个值逐个仍等于从站内容(尾巴没把行切片挤偏)", bad == 0, first)
+    check("S5b 多回字留 warn 但不计错",
+        (function()
+            for _, l in ipairs(logs) do
+                if l:find("over bc") then return true end
+            end
+            return false
+        end)(), "日志里找不到 over bc")
+    print("     现场含义: 日志里真出现 over bc 就说明这类表存在, 那时再决定要不要一起丢")
 end
 
 -- S6 同一件事从站改用异常码回答: 计数看得见

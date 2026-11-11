@@ -269,11 +269,19 @@ local function poll_block(blk)
 
 
 
-    if #data ~= blk.qty * 2 then
+
+
+
+    local want = blk.qty * 2
+    if #data < want then
         stat.werr = stat.werr + 1
-        log.warn("poll", string.format("Rx bad bc addr=%d qty=%d rows=%d bc=%d want=%d",
-            blk.addr, blk.qty, #rows, #data, blk.qty * 2))
+        log.warn("poll", string.format("Rx short bc addr=%d qty=%d rows=%d bc=%d want=%d",
+            blk.addr, blk.qty, #rows, #data, want))
         return
+    end
+    if #data > want then
+        log.warn("poll", string.format("Rx over bc addr=%d qty=%d rows=%d bc=%d want=%d",
+            blk.addr, blk.qty, #rows, #data, want))
     end
     stat.ok = stat.ok + 1
     if single then
