@@ -1094,8 +1094,9 @@ end
 
 
 
-function M.load_infer(regs)
+function M.load_infer(regs, slave)
     if type(regs) ~= "table" then return end
+    slave = tonumber(slave) or 1
 
     infer_acc = {}
     infer_order = {}
@@ -1104,7 +1105,6 @@ function M.load_infer(regs)
 
     for _, r in ipairs(regs) do
         if type(r) == "table" and r.addr then
-            local slave = 1  -- sniff 持久化不支持多从机, 默认 1
             local a = acc_row(slave, r.addr, r.fc)
             if a then
                 a.dtype = r.dtype or "uint16"
@@ -1123,7 +1123,7 @@ function M.load_infer(regs)
             end
         end
     end
-    log.info("mon", "loaded infer table from persist, rows=" .. #infer_order)
+    log.info("mon", "loaded infer table from persist, slave=" .. slave .. " rows=" .. #infer_order)
 end
 
 
@@ -1157,9 +1157,13 @@ local function do_save_infer()
         databits = detect_result.databits or 8,
         stopbits = detect_result.stopbits or 1,
         parity = detect_result.parity or 0,
-        slave = 1,
+        slave = 1,  -- 默认值，下面会从 infer_order 里取实际值
         regs = {},
     }
+
+    if #infer_order > 0 and infer_order[1].slave then
+        save_data.slave = infer_order[1].slave
+    end
     for _, r in ipairs(infer_order) do
         if not merged_addrs[r.addr] then
             save_data.regs[#save_data.regs + 1] = {

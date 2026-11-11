@@ -210,8 +210,19 @@ end
 -- 导出给单测: M._extract_row
 M._extract_row = extract_row
 
--- Modbus fc3 单帧上限, 与 mbus.build_read 的 qty 校验同值
-local MAX_BLOCK_QTY = 125
+-- 单块最多合并多少个寄存器。11-10 首版取 125(=Modbus fc3 规范上限, 跟 build_read
+-- 的 qty 校验同值), 11-11 收到 96。理由是【定帧那一头只认到 122】:
+-- mbus.try_extract_len 收 fc3 响应的条件写成 `byte_count <= 0xF4`(244B = 122 字),
+-- 123~125 字的应答字节全收齐了也切不出帧 → 整块每轮一次 timeout、一块点位全丢。
+-- 128 点连续表首版正好被排成 125+3, 表现就是"配 128 点只出 3 个值"。
+-- 取 96 而不是 122: bc=192B 离 244 还有 52B 余量, 不用去贴那条看不见的线;
+-- 而对 ≤128 点的表, 96 和 125 的帧数是一样的(128 → 96+32 两帧), 总线时间零代价。
+-- 超过 96 的相邻行自动另起一帧; 断点只落在【行边界】上, 所以 uint32/float32
+-- 这种占两字的行不会被切成半行(计划里是"加进去会超就 break", 不是截断 qty)。
+-- ⚠️ 合并这条路封住了。单独一行自己写 count=123..125 的路 11-11 也封住了:
+--   mbus.try_extract_len 的定帧门从 0xF4(122字) 放到 0xFA(125字, 规范上限),
+--   单行大 count 的应答现在能正常切帧 (钉在 test_poll_slave S2b)。
+local MAX_BLOCK_QTY = 96
 
 local function poll_block(blk)
     local slave = lastCfg.slave or cfg.SLAVE_ADDR
@@ -280,7 +291,9 @@ end
 -- 把点位表排成合并读计划。规则:
 --   1) 只合【严格相邻】: 下一行 addr == 上一行末addr, 有空隙或重叠就断块。
 --      跨未映射地址很多仪表直接回 Illegal Data Address, 整帧作废反而丢数据。
---   2) 单块字数 ≤ MAX_BLOCK_QTY(125), 超了自动开下一块。
+--   2) 单块字数 ≤ MAX_BLOCK_QTY(见上面定义处的说明), 超了自动开下一块。
+--      断点只落在【行边界】上: 是"加进去会超就不加", 不是把 qty 截断,
+--      所以占两字的 uint32/float32 行不会被切成半行。
 --   3) 行跨度 = count 字(uint32 之类 count=2 占两字), 与单行读的 qty 一致。
 --   4) 排序只作用于计划, 【不动 regs 本身】—— 点位表顺序是前端和上报的次序。
 -- 导出给单测: M._build_plan

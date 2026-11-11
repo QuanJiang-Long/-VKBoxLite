@@ -191,9 +191,11 @@ function M.save(c)
 
     if #s > 2048 then return false, "too large" end
     if not fskv then return false, "no fskv" end
-    local ok, err = pcall(fskv.set, K_CFG, s)
-    if not ok then
-        log.warn("mqtt_cfg", "fskv.set failed:", tostring(err))
+
+
+    local ok, ret = pcall(fskv.set, K_CFG, s)
+    if not ok or ret == false then
+        log.warn("mqtt_cfg", "fskv.set failed:", #s .. "B", tostring(ret))
         return false, "fskv.set failed"
     end
     kv_flush()

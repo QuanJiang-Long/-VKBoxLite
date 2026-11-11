@@ -18,8 +18,20 @@ local MAX_BUF = 16384
 local UART_ID = uart.VUART_0
 if UART_ID == nil then UART_ID = 4 end
 
-local rx_buf = ""
+
+
+
+
+
+
+local rx_buf, rx_parts, rx_len = "", {}, 0
 local cb_registered, loop_started = false, false
+
+
+
+
+local sn_busy = false
+function M.busy() return sn_busy end
 
 local function load_switch(key, default)
     if fskv then
@@ -91,7 +103,7 @@ end
 CMDS["LOCK:SN"] = function()
     if not M.lock_enable then return reply("RET:FAIL:lock disabled") end
     if sn().state() ~= "ready" then return reply("RET:FAIL:no sn") end
-    sn().set_lock()
+    if not sn().set_lock() then return reply("RET:FAIL:lock not persisted") end
     reply("RET:OK")
 end
 
@@ -109,49 +121,122 @@ CMDS["R:SNEN"] = function()
         st.write and 1 or 0, st.clear and 1 or 0, st.lock and 1 or 0, st.unlock and 1 or 0))
 end
 
-local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
+local function trim(s)
+
+    local f = s:byte(1)
+    if f and f > 32 then
+        local l = s:byte(-1)
+        if l and l > 32 then return s end
+    end
+    return (s:gsub("^%s*(.-)%s*$", "%1"))
+end
 
 local function dispatch(line)
-    log.debug("prov", "cmd:", line)
+
+
+
+    if #line > 80 then
+        log.debug("prov", "cmd:", #line, "B:", line:sub(1, 80))
+    else
+        log.debug("prov", "cmd:", line)
+    end
+
+    local is_sn_cmd = false
     local warg = line:match("^W:SN=(.+)$")
     if warg then
+        is_sn_cmd = true
         if not M.write_enable then return reply("RET:FAIL:write disabled") end
         local s, force = warg:match("^([^,]*),?(.*)$")
+        sn_busy = true
         local ok, err = sn().write(trim(s), { force = force:upper() == "FORCE" })
         if ok then reply("RET:OK") else reply("RET:FAIL:" .. tostring(err)) end
+        sn_busy = false
         return
     end
     local swarg = line:match("^W:SNEN=(.+)$")
     if swarg then
+        is_sn_cmd = true
         local name, val, persist = swarg:match("^%s*([^,]+)%s*,%s*([^,]+)%s*,?%s*(%a*)%s*$")
         if not name or not val then return reply("RET:FAIL:SNEN:bad args") end
         local on = (trim(val) == "1" or trim(val):upper() == "ON" or trim(val):upper() == "TRUE")
+        sn_busy = true
         local ok, err = M.set_switch(trim(name):lower(), on, trim(persist):upper() == "P")
         if ok then reply("RET:OK") else reply("RET:FAIL:" .. tostring(err)) end
+        sn_busy = false
         return
     end
     local fn = CMDS[line]
-    if fn then return fn() end
+    if fn then
+
+        is_sn_cmd = line:match(":SN") or line == "R:ID" or line == "R:SNEN" or line == "C:SN"
+        if is_sn_cmd then sn_busy = true end
+        fn()
+        if is_sn_cmd then sn_busy = false end
+        return
+    end
     if type(_G.vcom_handle) == "function" and _G.vcom_handle(line) then return end
     log.debug("prov", "unknown cmd, ignored:", line)
+end
+
+
+
+local function rx_merge()
+    if #rx_parts == 0 then return end
+    local has_line = false
+    for i = 1, #rx_parts do
+        if rx_parts[i]:find("\n", 1, true) then has_line = true break end
+    end
+    if not has_line then return end
+    local joined = #rx_parts == 1 and rx_parts[1] or table.concat(rx_parts)
+    rx_parts, rx_len = {}, 0
+    rx_buf = rx_buf == "" and joined or rx_buf .. joined
 end
 
 function M.poll()
     local n = 0
     while n < 8 do
+
+
+
+        rx_merge()
         local nl = rx_buf:find("\n", 1, true)
         if not nl then break end
-        local line = rx_buf:sub(1, nl - 1)
+        local end_pos = nl - 1
+
+        if end_pos > 0 and rx_buf:byte(end_pos) == 13 then end_pos = end_pos - 1 end
+        local line = rx_buf:sub(1, end_pos)
         rx_buf = rx_buf:sub(nl + 1)
-        line = (line:gsub("[\r\n]", ""))
         line = trim(line)
         if #line > 0 then
-            pcall(dispatch, line)
+
+
+
+
+            local pok, perr = pcall(dispatch, line)
+            if not pok then
+                log.error("prov", "cmd crashed:", line:sub(1, 40), tostring(perr))
+                pcall(reply, "RET:FAIL:internal error")
+            end
             n = n + 1
         end
     end
     return n
 end
+
+
+
+local function rx_push(data)
+    rx_parts[#rx_parts + 1] = data
+    rx_len = rx_len + #data
+    if rx_len + #rx_buf > MAX_BUF then
+
+        rx_parts, rx_len, rx_buf = {}, 0, ""
+    end
+end
+
+
+
+function M._rx_feed(s) rx_push(s) end
 
 local function on_receive(id, len)
     if id ~= UART_ID then return end
@@ -163,8 +248,7 @@ local function on_receive(id, len)
             return
         end
         if type(data) ~= "string" or #data == 0 then break end
-        rx_buf = rx_buf .. data
-        if #rx_buf > MAX_BUF then rx_buf = "" end
+        rx_push(data)
     end
 end
 

@@ -288,9 +288,13 @@ function M.try_extract_len(buf)
         if crc_at(buf, 6) then return 8 end
     end
     -- fc 1-4: 读响应 5 + byte_count
+    -- 11-11: 门从 0xF4(244B=122字) 放到 0xFA(250B=125字)。原来 qty=123~125 的
+    -- 应答收到了也永远切不出帧 → 每轮一次 timeout、整块点位全丢(缺陷①, 钉在
+    -- test_poll_slave S1)。规范上限就是 125 字; 同函数 fc15/16 分支本来就放到
+    -- 246, 两处原来不一致。整帧 255B, 仍在一个 UART 读缓冲之内。
     if fc >= 1 and fc <= 4 and #buf >= 5 then
         local bc = buf:byte(3)
-        if bc and bc >= 1 and bc <= 0xF4 then
+        if bc and bc >= 1 and bc <= 0xFA then
             local total = bc + 5
             if #buf >= total then
                 if crc_at(buf, 3 + bc) then return total end

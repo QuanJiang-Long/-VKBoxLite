@@ -4,7 +4,7 @@
 --   每帧白等 500ms → 一轮 64 秒。改成把【严格相邻】的行并成一帧。
 --
 -- 这里钉住的是最容易改坏的两件事:
---   1) 合并边界: 有空隙/重叠/超 125 字必须断块。错并一帧, 仪表回 Illegal
+--   1) 合并边界: 有空隙/重叠/超 MAX_BLOCK_QTY(现 96) 字必须断块。错并一帧, 仪表回 Illegal
 --      Data Address 就是整块点位本轮全丢 —— 比不合并更糟, 而且前端看不出来。
 --   2) 行偏移切片: 合并块里每行取到的字节必须和"单独读那一行"一字不差
 --      (值的个数、hex 串、push 的 addr 序列)。前端和 R:VAL 只认 addr→值,
@@ -114,16 +114,22 @@ p = poll._build_plan({ R(100, 2, "uint32"), R(102, 1, "uint16") })
 check("100(2字)+102 相邻 → 1 帧 qty=3", #p == 1 and p[1].qty == 3, plan_str(p))
 check("第二行偏移=2", offs_str(p[1]) == "100@0,102@2", offs_str(p[1]))
 
--- 7. 125 字上限
+-- 7. 96 字上限 (11-11 从 125 收到 96: 不贴定帧门跑留余量; mbus 门本身已放到 0xFA=125, 见 poll.lua 常量处说明)
 local big = {}
 for i = 1, 200 do big[i] = R(2000 + i - 1) end
 p = poll._build_plan(big)
-check("200 连续 → 125+75 两帧", #p == 2 and p[1].qty == 125 and p[2].qty == 75, plan_str(p))
-check("第二帧从 2125 起", p[2].addr == 2125, plan_str(p))
+check("200 连续 → 96+96+8 三帧",
+    #p == 3 and p[1].qty == 96 and p[2].qty == 96 and p[3].qty == 8, plan_str(p))
+check("第二帧从 2096 起", p[2].addr == 2096, plan_str(p))
 local exactly = {}
-for i = 1, 125 do exactly[i] = R(300 + i - 1) end
+for i = 1, 96 do exactly[i] = R(300 + i - 1) end
 p = poll._build_plan(exactly)
-check("恰好 125 → 1 帧", #p == 1 and p[1].qty == 125, plan_str(p))
+check("恰好 96 → 1 帧", #p == 1 and p[1].qty == 96, plan_str(p))
+local over = {}
+for i = 1, 97 do over[i] = R(500 + i - 1) end
+p = poll._build_plan(over)
+check("97 → 96+1 两帧(超一个也要另起)",
+    #p == 2 and p[1].qty == 96 and p[2].qty == 1, plan_str(p))
 
 -- 8. 128 点连续表: 就是 V2 的场景
 local v2 = {}

@@ -55,25 +55,46 @@ if UART_ID == nil then UART_ID = 4 end
 
 local g_cmds = {}
 
-function M.reply(s)
 
 
 
 
 
 
-    log.debug("cmd", "tx:", #s, "B:", s:sub(1, 80))
-    pcall(uart.write, UART_ID, s .. "\r\n")
+
+
+
+
+
+
+
+
+
+
+
+
+local function tx_frags(frags)
+    local n = 0
+    for i = 1, #frags do n = n + #frags[i] end
+
+    local head = ""
+    for i = 1, #frags do
+        if #head >= 80 then break end
+        head = head .. frags[i]:sub(1, 80 - #head)
+    end
+    log.debug("cmd", "tx:", n, "B:", head)
+    for i = 1, #frags do
+        if #frags[i] > 0 then pcall(uart.write, UART_ID, frags[i]) end
+    end
 end
 
-
-
+function M.reply(s)
+    tx_frags({ s, "\r\n" })
+end
 
 
 local function reply_big(key, payload)
-    local s = table.concat({ key, payload, "\r\n" })
-    log.debug("cmd", "tx:", #s, "B:", s:sub(1, 80))
-    pcall(uart.write, UART_ID, s)
+    tx_frags({ key, payload, "\r\n" })
 end
 
 
@@ -84,7 +105,10 @@ end
 
 
 
-local function json_reply_str(key, val)
+
+
+
+local function json_reply_frags(key, val)
     local t
     if type(val) == "table" then
         t = { key, "{" }
@@ -97,12 +121,13 @@ local function json_reply_str(key, val)
         t = { key, val }
     end
     t[#t + 1] = "\r\n"
-    return table.concat(t)
+    return t
+end
+local function json_reply_str(key, val)
+    return table.concat(json_reply_frags(key, val))
 end
 local function reply_json(key, val)
-    local s = json_reply_str(key, val)
-    log.debug("cmd", "tx:", #s, "B:", s:sub(1, 80))
-    pcall(uart.write, UART_ID, s)
+    tx_frags(json_reply_frags(key, val))
 end
 
 
@@ -157,6 +182,12 @@ local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
 
 function M.push_infer()
     if not mon then return false end
+
+    local prov = package.loaded["sn/prov"]
+    if prov and prov.busy and prov.busy() then
+        log.debug("cmd", "skip INFER_PUSH: SN busy")
+        return false
+    end
     local off, n = mon.infer_view()
     local ok, inf = pcall(mon.infer_page, off, n)
     if not ok or type(inf) ~= "table" then return false end
@@ -164,6 +195,76 @@ function M.push_infer()
     if iot and iot.attach_names then inf = iot.attach_names(inf) end
     reply_big("RET:INFER_PUSH=", jencode(inf))
     return true
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+local TR_ON, TR, TR_LAST = false, nil, nil
+
+local function trc_sample(stage)
+    if not TR then return end
+    local used, mx = -1, -1
+    if rtos then
+        local ok, _, u, m = pcall(rtos.meminfo, "lua")
+        if ok then
+            if type(u) == "number" then used = u end
+            if type(m) == "number" then mx = m end
+        end
+    end
+    local s = TR.s
+    s[#s + 1] = string.format("%s %d/%d", stage, used, mx)
+end
+
+local function trc_begin(nbytes)
+    if not TR_ON then return end
+
+
+    if TR then TR_LAST = TR end
+    TR = { arg = nbytes, regs = -1, tot = -1, s = {} }
+    if rtos then
+        local ok, t = pcall(rtos.meminfo, "lua")
+        if ok and type(t) == "number" then TR.tot = t end
+    end
+    trc_sample("enter")
+end
+
+
+
+
+local function trc_freed()
+    if not TR then return end
+    collectgarbage("collect")
+    trc_sample("freed")
+end
+
+local function trc_regs(n)
+    if not TR then return end
+    TR.regs = (type(n) == "table") and #(n.regs or {}) or -1
+end
+
+
+
+
+local function trc_line(tr, tag)
+    if not tr then return nil end
+    local p = { string.format("%s arg=%d regs=%d tot=%d", tag, tr.arg, tr.regs, tr.tot) }
+    for i = 1, #tr.s do p[#p + 1] = tr.s[i] end
+    return table.concat(p, " | ")
 end
 
 
@@ -238,15 +339,36 @@ local function reg_cmds()
 
     M.reg("W:CFG", function(arg)
         if blocked_while_detecting("CFG") then return end
+        trc_begin(#arg)
+
+
+
+
+
+
+        if #arg > 4096 then collectgarbage("collect") end
+        trc_sample("gc")
         local t = jdecode(arg)
+        trc_sample("decoded")
         if not t then return M.reply("RET:FAIL:CFG:bad json") end
         local n, err = cfgstore.normalize_poll(t)
+
+        trc_sample("norm")
+        t = nil -- 解码表就此不可达, 归一化结果只留 n 一份
+
+
         if not n then return M.reply("RET:FAIL:CFG:" .. tostring(err)) end
+        trc_regs(n)
+        trc_freed()
         local cur_mode = ctrl.get_mode()
         local slot = (cur_mode == "platform") and SLOT_PULL or SLOT_POLL
         local ok, serr
-        if slot == SLOT_PULL then ok, serr = cfgstore.save_pull(t)
-        else ok, serr = cfgstore.save_poll(t) end
+
+
+        if slot == SLOT_PULL then ok, serr = cfgstore.save_pull_norm(n)
+        else ok, serr = cfgstore.save_poll_norm(n) end
+
+        trc_sample("saved")
         if not ok then return M.reply("RET:FAIL:CFG:" .. tostring(serr)) end
 
 
@@ -278,6 +400,9 @@ local function reg_cmds()
             end
         end
         if iot and iot.reply_config then pcall(iot.reply_config) end
+
+
+        trc_sample("done")
         M.reply("RET:CFG=OK")
     end)
 
@@ -401,6 +526,32 @@ local function reg_cmds()
             err = e.err,
             stat = iot and iot.status() or nil,
         }))
+    end)
+
+
+    M.reg("R:NET", function()
+        if not mobile then return M.reply("RET:NET=mobile unavailable") end
+        local st = mobile.status() or -1
+        local c = (st==1 or st==5) and mobile.scell() or nil
+        M.reply(string.format("RET:NET=iccid:%s;imsi:%s;imei:%s;num:%s;status:%d;csq:%s;rsrp:%s;rsrq:%s;snr:%s;band:%s;tac:%s;eci:%s;ip:%s",
+            tostring(mobile.iccid()), tostring(mobile.imsi()), tostring(mobile.imei()),
+            tostring(mobile.number()), st,
+            tostring(mobile.csq()), tostring(mobile.rsrp()), tostring(mobile.rsrq()),
+            tostring(mobile.snr()),
+            tostring(c and c.band), tostring(c and c.tac), tostring(c and c.eci),
+            tostring(socket.localIP() or "-")))
+    end)
+
+
+    M.reg("R:IOT", function()
+        if not iot then return M.reply("RET:IOT=iot unavailable") end
+        local s = iot.status()
+        M.reply(string.format("RET:IOT=want:%d;conn:%d;sub:%d;sn:%s;host:%s:%s;manual:%d;pub:%s;subt:%s;ok:%d;fail:%d;bo:%d;err:%s;last:%s",
+            s.want_run and 1 or 0, s.connected and 1 or 0, s.subscribed and 1 or 0,
+            tostring(s.device_id), tostring(s.host), tostring(s.port),
+            s.manual_on and 1 or 0, tostring(s.pub), tostring(s.sub),
+            s.published or 0, s.failed or 0, s.backoff or 0,
+            tostring(s.last_err or s.reject_reason or "-"), tostring(s.last_pub or "-")))
     end)
 
     M.reg("W:MQTT", function(arg)
@@ -606,13 +757,215 @@ end
 
 
 
+
+
+
+
+
+
 local function reg_debug_cmds()
+    TR_ON = true                   -- 打开 W:CFG 的分阶段采样(见文件顶部说明)
     M.reg("W:GC", function()
         collector.trim_cache()
         collectgarbage("collect")
         collectgarbage("collect")
         if iot then iot.kick() end
         M.reply("RET:GC=OK")
+    end)
+
+
+
+
+
+
+
+
+
+
+
+
+
+    M.reg("R:MEM", function()
+        local p = {}
+        p[#p + 1] = string.format("lua:%dK", math.floor(collectgarbage("count")))
+        if rtos then
+
+
+            for _, k in ipairs({ "lua", "sys" }) do
+                local ok, total, used = pcall(rtos.meminfo, k)
+                if ok and type(total) == "number" and type(used) == "number" then
+                    p[#p + 1] = string.format("%s:%d/%d", k, used, total)
+                end
+            end
+        end
+        local last_ok, first_fail = 0, 0
+        local steps = { 1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384 }
+        for i = 1, #steps do
+            local n = steps[i]
+            collectgarbage("collect")
+            local ok, s = pcall(string.rep, "x", n)
+            if ok and type(s) == "string" and #s == n then
+                last_ok = n
+            else
+                first_fail = n
+                break
+            end
+        end
+        p[#p + 1] = string.format("max:%d fail:%d", last_ok, first_fail)
+        M.reply("RET:MEM=" .. table.concat(p, " "))
+    end)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    M.reg("W:FS", function()
+        local p, verdict = {}, "?"
+        local io_lib, os_lib = rawget(_G, "io"), rawget(_G, "os")
+        local function fn(t, n)
+            if type(t) ~= "table" then return "no-lib" end
+            return tostring(type(t[n]))
+        end
+        p[#p + 1] = "open:" .. fn(io_lib, "open")
+        p[#p + 1] = "fsstat:" .. fn(io_lib, "fsstat")
+        p[#p + 1] = "exist:" .. fn(io_lib, "exists")
+        p[#p + 1] = "fsize:" .. fn(io_lib, "fileSize")
+        p[#p + 1] = "rm:" .. fn(io_lib, "remove")
+        p[#p + 1] = "ren:" .. fn(os_lib, "rename")
+        if rtos then p[#p + 1] = "rtos.fsinfo:" .. tostring(type(rtos.fsinfo)) end
+
+
+
+        local function nums(t)
+            local out = {}
+            for i = 1, #t do
+                if type(t[i]) == "number" then out[#out + 1] = t[i] end
+            end
+            return out
+        end
+        local space = "?"
+        if type(io_lib) == "table" and type(io_lib.fsstat) == "function" then
+            local pack = { pcall(io_lib.fsstat, "/") }
+            local n = nums(pack)
+            if #pack >= 1 and pack[1] and #n >= 2 then
+
+
+                local tot, free
+                if #n >= 3 then
+                    tot, free = n[1] * n[3], (n[1] - n[2]) * n[3]
+                else
+                    tot, free = n[1], n[1] - n[2]
+                end
+                if free < 0 then free = -1 end
+                space = string.format("%dK/%dK", math.floor(free / 1024),
+                    math.floor(tot / 1024))
+                local raw = {}
+                for i = 1, #n do raw[i] = tostring(n[i]) end
+                p[#p + 1] = "fs=" .. table.concat(raw, ",")
+            else
+                space = "stat-fail"
+            end
+        end
+        p[#p + 1] = "free:" .. space
+
+
+        local blob = nil
+        if type(io_lib) ~= "table" or type(io_lib.open) ~= "function" then
+
+
+            p[#p + 1] = "blob:skip"
+            verdict = "B:NO(没有io.open)"
+        else
+            local ok, s = pcall(string.rep, "x", 8192)
+            if ok and type(s) == "string" and #s == 8192 then blob = s end
+            if not blob then
+                p[#p + 1] = "blob:FAIL-8K"
+                verdict = "B:NO-MEM(8KB申请不到)"
+            else
+                local done, open_nil = false, false
+                for _, tmp in ipairs({ "/vk_probe.tmp", "vk_probe.tmp" }) do
+                    if not done then
+                        local bin = tmp:gsub("tmp$", "bin")
+                        local r = { path = tmp:sub(1, 1) }
+                        local f = io_lib.open(tmp, "wb")
+                        if not f then
+                            r.w = "open-nil"
+                            open_nil = true
+                        else
+                            local wok = f:write(blob)
+                            f:close()
+                            r.w = wok and "ok" or "write-fail"
+                            local sz = io_lib.fileSize and io_lib.fileSize(tmp) or -1
+                            r.wsz = tostring(sz)
+                            if type(os_lib) == "table" and type(os_lib.rename) == "function" then
+                                r.ren = tostring(os_lib.rename(tmp, bin))
+                            else
+                                r.ren = "no-rename"
+                            end
+                            local g = io_lib.open(bin, "rb")
+                            if g then
+                                local got = g:read("*a") or ""
+                                g:close()
+                                r.rsz = tostring(#got)
+                            else
+                                r.rsz = "read-fail"
+                            end
+                            if io_lib.remove then
+                                io_lib.remove(bin)
+                                io_lib.remove(tmp)
+                            end
+                            if io_lib.exists then
+                                r.left = tostring(io_lib.exists(tmp) or io_lib.exists(bin))
+                            end
+
+
+
+                            done = (r.w == "ok" and r.rsz == "8192")
+                        end
+                        local q = {}
+                        for k, v in pairs(r) do q[#q + 1] = k .. "=" .. v end
+                        table.sort(q)
+                        p[#p + 1] = "probe:" .. table.concat(q, " ")
+                    end
+                end
+                if done then
+                    verdict = "B:YES"
+                elseif open_nil then
+                    verdict = "B:NO(open返回nil)"
+                else
+                    verdict = "B?:写了没读回8192"
+                end
+            end
+        end
+        log.info("fs", "probe", verdict, space)
+        M.reply("RET:FS=" .. table.concat(p, " ") .. " =>" .. verdict)
+    end)
+
+
+
+
+
+
+
+
+    M.reg("R:CTRACE", function()
+        if not TR then return M.reply("RET:CTRACE=empty (还没发过 W:CFG)") end
+        local one = trc_line(TR_LAST, "#1")
+        if one then M.reply("RET:CTRACE=" .. one) end
+        M.reply("RET:CTRACE=" .. trc_line(TR, "#2"))
     end)
 
     M.reg("W:RAWTEST", function(arg)
@@ -654,14 +1007,23 @@ end -- R:FRAMES/R:INFER/R:AUTODETECT 已转正到 reg_cmds (2026-10, 见上面�
 
 function M.handle(line)
     if type(line) ~= "string" then return false end
-    line = line:gsub("[\r\n]", "")
-    local fn = g_cmds[line]
-    if not fn then
-        local cmd, arg = line:match("^%s*([%w:]+)%s*=%s*(.-)%s*$")
-        if cmd then fn = g_cmds[cmd]; line = arg end
+
+
+
+
+
+
+    local eq = line:find("=", 1, true)
+    local fn, arg
+    if eq then
+        fn = g_cmds[line:sub(1, eq - 1)]
+        if fn then arg = line:sub(eq + 1) end
+    else
+        fn = g_cmds[line]
+        arg = line
     end
     if not fn then return false end
-    local ok, err = pcall(fn, line)
+    local ok, err = pcall(fn, arg)
     if not ok then
         M.reply("RET:FAIL:handler error:" .. tostring(err))
     end

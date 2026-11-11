@@ -55,15 +55,30 @@ local cfg_ver = 0
 
 function M.version() return cfg_ver end
 
+
+
+
+
+
+
+local FSKV_VALUE_MAX = 4096
+
 local function kv_set(k, s)
-    if not fskv then return false end
+    if not fskv then return false, "no fskv" end
+    local n = type(s) == "string" and #s or 0
+    if n > FSKV_VALUE_MAX then
+        log.warn("cfg", "value too big", k, n, "max", FSKV_VALUE_MAX)
+        return false, "配置 " .. n .. "B 超 fskv 单值上限 " .. FSKV_VALUE_MAX .. "B"
+    end
+    local ok, ret = pcall(fskv.set, k, s)
+    if not ok or ret == false then
+        log.warn("cfg", "fskv.set failed:", k, n .. "B", tostring(ret))
+        return false, "fskv.set 拒写(值 " .. n .. "B)"
+    end
+
+
     json_cache[k] = nil   -- 12-fix-3: 写盘了, 解码缓存必须失效
     cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号跟着涨(别名映射缓存靠它失效)
-    local ok, err = pcall(fskv.set, k, s)
-    if not ok then
-        log.warn("cfg", "fskv.set failed:", k, tostring(err))
-        return false
-    end
     if fskv.save then pcall(fskv.save) end
     return true
 end
@@ -164,7 +179,7 @@ function M.normalize_alias(c)
                         if not seen[key] then
                             seen[key] = true
                             out.regs[#out.regs + 1] = { key = key, id = id, name = nm }
-                            if #out.regs >= MAX_ALIAS then return nil, "别名条数过多" end
+                            if #out.regs > MAX_ALIAS then return nil, "别名条数过多" end
                         end
                     end
                 end
@@ -274,7 +289,7 @@ function M.normalize_poll(c)
         for _, r in ipairs(regs) do
             local nr, err = normalize_reg(r)
             if not nr then return nil, err end
-            if #out.regs >= cfg.MAX_REGS then return nil, "too many regs" end
+            if #out.regs > cfg.MAX_REGS then return nil, "too many regs" end
 
 
 
@@ -323,7 +338,7 @@ function M.normalize_infer(c)
                 if not seen[key] then
                     seen[key] = true
                     out.regs[#out.regs + 1] = nr
-                    if #out.regs >= MAX_ALIAS then break end
+                    if #out.regs > MAX_ALIAS then break end
                 end
             end
         end
@@ -366,6 +381,13 @@ for name, sec in pairs(SECTIONS) do
     M["save_" .. name] = function(c)
         local n, err = sec.norm(c)
         if not n then return false, err end
+        return save_json(sec.key, n)
+    end
+
+
+
+
+    M["save_" .. name .. "_norm"] = function(n)
         return save_json(sec.key, n)
     end
 end

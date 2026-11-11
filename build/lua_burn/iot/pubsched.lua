@@ -55,7 +55,8 @@ M.PUB_MIN_MS = (cfg.MQTT_MIN_S or 60) * 1000
 local CH = {
     meta = { min_ms = M.PUB_MIN_MS },            -- U2 元数据
     prop = { min_ms = M.PUB_MIN_MS },            -- U4 子设备数据
-    topo = { min_ms = cfg.TOPO_REBUILD_MS or M.PUB_MIN_MS },  -- U2 拓扑
+    topo = { min_ms = cfg.TOPO_REBUILD_MS or M.PUB_MIN_MS },  -- U2 拓扑（带 nodes，事件触发）
+    topo_keepalive = { min_ms = M.PUB_MIN_MS },  -- V1-4 拆分: 空拓扑保活（不带 nodes，定时发送）
 }
 
 

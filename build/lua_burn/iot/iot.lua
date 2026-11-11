@@ -783,7 +783,8 @@ end
 
 
 
-local MAX_PROPS = 64
+
+local MAX_PROPS = 128
 
 
 
@@ -887,6 +888,8 @@ local function build_topo(only_ids, max_props, skip_ids)
 
     for i = 1, #parts do parts[i] = nil end
     for i = 1, #prop_ids do prop_ids[i] = nil end
+
+    local pos = {}
     if mode == "sniff" then
 
 
@@ -941,6 +944,7 @@ local function build_topo(only_ids, max_props, skip_ids)
                 g.addrs[#g.addrs + 1] = r.addr
                 g.props[#g.props + 1] = topo.prop(id, nm, "uint16", r.slave, r.addr, 1)
                 prop_ids[#prop_ids + 1] = id  -- topo-ack-filter: 记录属性 ID
+                pos[r.addr] = #prop_ids  -- V2: 记录位置
             end
         end
 
@@ -950,10 +954,7 @@ local function build_topo(only_ids, max_props, skip_ids)
             local id, nm = prop_id_name(r)
             local prop = topo.prop(id, nm, r.dtype or "uint16", pc.slave, r.addr, r.count or 1)
 
-            local hit = 0
-            for i = 1, #g.addrs do
-                if g.addrs[i] == r.addr then hit = i break end
-            end
+            local hit = pos[r.addr] or 0
             if hit > 0 then
 
 
@@ -965,7 +966,7 @@ local function build_topo(only_ids, max_props, skip_ids)
 
                 else
                     g.props[hit] = prop
-                    prop_ids[hit] = id  -- topo-ack-filter: 覆盖旧的 ID
+                    prop_ids[hit] = id  -- V2: 用 pos 定位，覆盖正确的 ID
                 end
             else
 
@@ -1148,14 +1149,17 @@ end
 
 
 
-local function send_topo(parts_in)
+
+
+
+local function send_topo(parts_in, empty)
     local did = cur_did()
     if not did then return false, "无 SN" end
 
 
     if pub_blocked() then return false, "识别未完成" end
     local parts = parts_in
-    if not parts then
+    if not parts and not empty then
         local p, err = build_topo()
         if not p then return false, err end
         parts = p
@@ -1171,7 +1175,9 @@ local function send_topo(parts_in)
         ',"ts":"', MqttUtil.ms_of(os.time()), '"',
         ',"nodes":[',
     }
-    for i = 1, #parts do b[#b + 1] = parts[i] end
+    if parts then
+        for i = 1, #parts do b[#b + 1] = parts[i] end
+    end
     b[#b + 1] = ']}'
     local body = table.concat(b)
     return pub(string.format(cfg.PLATFORM_INFO_TOPIC, did), body, 1)
@@ -2481,6 +2487,7 @@ local function task_main()
                 if pubsched.ready("topo") then
 
                     local cur_pids = {}
+                    local cur_slaves = {}  -- V2: 收集从机 ID
                     local smap = cfgstore.alias_map()
                     local mode = get_mode()
                     if mode == "sniff" then
@@ -2488,11 +2495,13 @@ local function task_main()
                             local sa = smap["reg" .. tostring(r.addr or "")]
                             local id = (sa and sa.id ~= "" and sa.id) or "reg" .. tostring(r.addr or "")
                             cur_pids[id] = true
+                            if r.slave then cur_slaves[r.slave] = true end  -- V2
                         end
                         local pc = cfgstore.load_pull()
                         for _, r in ipairs((pc and pc.regs) or {}) do
                             local id, _ = prop_id_name(r)
                             cur_pids[id] = true
+                            if pc.slave then cur_slaves[pc.slave] = true end  -- V2
                         end
                     else
                         local c = active_cfg()
@@ -2501,12 +2510,17 @@ local function task_main()
                                 local id, _ = prop_id_name(r)
                                 cur_pids[id] = true
                             end
+                            if c.slave then cur_slaves[c.slave] = true end  -- V2
                         end
                     end
                     local pid_list = {}
                     for id in pairs(cur_pids) do pid_list[#pid_list + 1] = id end
                     table.sort(pid_list)
-                    local prop_sig = table.concat(pid_list, ",")
+
+                    local slave_list = {}
+                    for s in pairs(cur_slaves) do slave_list[#slave_list + 1] = tostring(s) end
+                    table.sort(slave_list)
+                    local prop_sig = table.concat(pid_list, ",") .. "|slave=" .. table.concat(slave_list, ",")
 
                     log.info("iot", "topo check: cur=" .. #pid_list .. " cached_sig=" .. tostring(S.topo_prop_sig and "yes" or "no") .. " sent_sig=" .. tostring(S.topo_sent_sig and "yes" or "no"))
                     local need_rebuild = true
@@ -2545,7 +2559,7 @@ local function task_main()
                                 nodes_json = n
                                 prop_ids = pids
                                 S.topo_at = os.clock()
-                                S.topo_prop_sig = prop_sig
+
                                 S.topo_prop_ids = prop_ids
                                 log.info("iot", "topo rebuilt: props=" .. #pids .. " sig=" .. tostring(s))
 
@@ -2617,6 +2631,7 @@ local function task_main()
                                     S.topo_fail_at = nil
                                     S.topo_fail_n = 0
                                     S.topo_sent_sig = sig
+                                    S.topo_prop_sig = prop_sig  -- V2: 全部批次成功后才更新签名
                                     pubsched.sent("topo")
                                 end
                             else
@@ -2661,6 +2676,18 @@ local function task_main()
                             S.topo_fail_n = (S.topo_fail_n or 0) + 1
                         end
                     end
+                end
+            end
+
+
+
+            if get_mode() ~= "idle" and pubsched.due("topo_keepalive", c.interval_s) then
+                local pok, sent, e = pcall(send_topo, nil, true)
+                if pok and sent then
+                    pubsched.sent("topo_keepalive")
+                    log.info("iot", "topo keepalive posted (empty)")
+                else
+                    log.warn("iot", "topo keepalive failed: " .. tostring(e))
                 end
             end
 

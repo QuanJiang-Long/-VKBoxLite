@@ -322,30 +322,56 @@ do
     local f_ok244, f_bad246 = rsp(244), rsp(246)
     check("S1 bc=244(qty122) 能定帧", mbus.try_extract_len(f_ok244) == #f_ok244,
         mbus.try_extract_len(f_ok244))
-    check("S1 bc=246(qty123) 定不了帧", mbus.try_extract_len(f_bad246) == nil,
+    check("S1 bc=246(qty123) 0xFA 后能定帧", mbus.try_extract_len(f_bad246) == #f_bad246,
         tostring(mbus.try_extract_len(f_bad246)))
-    check("S1 bc=250(qty125, 规范上限) 定不了帧", mbus.try_extract_len(rsp(250)) == nil)
-    print(string.format("     定帧上限: bc<=244 → qty<=122; 而 build_read/MAX_BLOCK_QTY 允许 qty=125"))
+    check("S1 bc=250(qty125, 规范上限) 0xFA 后能定帧", mbus.try_extract_len(rsp(250)) == #rsp(250))
+    print("     定帧上限: 11-11 从 bc<=0xF4(122字) 放到 0xFA(125字), 与 build_read/normalize_reg 的 qty=125 对齐 (缺陷①治本)")
+    print("     poll 的合并块同时收到 MAX_BLOCK_QTY=96 留余量; 单行大 count 也已封住(S2b)")
 end
 
--- S2 128 点连续(正好 125+3): 首块 125 字 → 定帧门拒收 → 该块每轮全丢
+-- S2 128 点连续: MAX_BLOCK_QTY=96 → 计划排成 96+32 两帧, 全表采满
 do
     new_slave({ max_qty = 125, over = "ignore" })
     local rs = {}
     for i = 1, 128 do rs[i] = R(40000 + i) end
     fill_words(40001, 40128)
     local plan = poll._build_plan(rs)
-    check("S2 计划把 128 点并成 2 帧(125+3)", #plan == 2 and plan[1].qty == 125 and plan[2].qty == 3,
+    check("S2 计划把 128 点并成 2 帧(96+32)", #plan == 2 and plan[1].qty == 96 and plan[2].qty == 32,
         plan and string.format("%d+%d", plan[1].qty, plan[2].qty))
     local m = run_round(cfg_of(rs), 1)
-    known_bug("S2 125 字合并块每轮超时(缺陷①: try_extract_len 的 bc 上限 244 卡死规范上限帧)",
-        m and m.timeout == 1 and m.ok == 1 and m.pushes == 3,
-        m and string.format("帧=%d ok=%d timeout=%d 值=%d/128", m.frames, m.ok, m.timeout, m.pushes))
-    check("S2 后一块(qty=3)的 3 个值正确", m and push_map[40126] == w16(40126)
-        and push_map[40128] == w16(40128), m and push_map[40128])
+    check("S2 128 点一轮无超时无异常", m and m.ok == 2 and m.timeout == 0 and m.werr == 0,
+        m and string.format("帧=%d ok=%d to=%d err=%d", m.frames, m.ok, m.timeout, m.werr))
+    check("S2 128 个值全部采到(缺陷①已修)", m and m.pushes == 128,
+        m and string.format("值=%d/128 timeout=%d", m.pushes, m.timeout))
+    local bad, first = 0, nil
+    for i = 1, #rs do
+        local r = rs[i]
+        if push_map[r.addr] ~= w16(r.addr) then
+            bad = bad + 1
+            first = first or string.format("addr=%d 期望=%s 实得=%s", r.addr,
+                tostring(w16(r.addr)), tostring(push_map[r.addr]))
+        end
+    end
+    check("S2 128 个值逐个等于从站内容", bad == 0, first)
+    print(string.format("     总线时间: 128 点 / 2 帧 / %d ms @9600 (96+32 与 125+3 帧数相同)", m and m.ms))
 end
 
--- S3 128 点分 2 块 x 64 字(绕开缺陷①): 全表 128 值一个不差
+-- S2b 单独一行自己写大 count: 原来超过定帧上限 122 每轮超时, 11-11 mbus 放到 0xFA 后封住
+--     (计划里首行 qty 直接取 count, 不受 MAX_BLOCK_QTY 约束; normalize_reg 允许 1..125)
+do
+    new_slave({ max_qty = 125, over = "ignore" })
+    fill_words(42001, 42125)
+    local rs = { R(42001, 125, "uint16") }
+    local plan = poll._build_plan(rs)
+    check("S2b 单行 count=125 排成 qty=125 一帧(未被 96 约束)",
+        #plan == 1 and plan[1].qty == 125, plan and plan[1].qty)
+    local m = run_round(cfg_of(rs), 1)
+    check("S2b 单行 count=125 定帧门 0xFA 后一轮采满(缺陷①治本)",
+        m and m.ok == 1 and m.timeout == 0 and m.pushes == 125,
+        m and string.format("ok=%d timeout=%d 值=%d/125", m.ok, m.timeout, m.pushes))
+end
+
+-- S3 128 点分 2 块 x 64 字(块间留空隙): 全表 128 值一个不差
 do
     new_slave({ max_qty = 125, over = "ignore" })
     fill_words(41001, 41130)
@@ -379,7 +405,8 @@ do
     print(string.format("     总线时间: 128 点 / 2 帧 / %d ms @9600 (间隔 0, 纯总线)", m and m.ms))
 end
 
--- S4 混合宽度(通用点位表): 30x uint16 + 20x uint32 + 15x float32 = 100 字 1 帧
+-- S4 混合宽度(通用点位表): 30x uint16 + 20x uint32 + 15x float32 = 100 字
+--    96 字上限下断在行边界 → 96+4 两帧, 32 位行不会被切成半行
 do
     new_slave({ max_qty = 125, over = "ignore" })
     fill_words(41001, 41100)
@@ -395,8 +422,18 @@ do
     end                                                                   -- 30 字
     local plan = poll._build_plan(rs)
     local m = run_round(cfg_of(rs), 1)
-    check("S4 65 点(100 字)并成 1 帧", m and m.frames == 1 and #plan == 1 and plan[1].qty == 100,
-        string.format("帧=%d 计划%d qty=%d", m and m.frames, #plan, plan[1].qty))
+    check("S4 65 点(100 字)因 96 字上限断成 2 帧(96+4)",
+        m and m.frames == 2 and #plan == 2 and plan[1].qty == 96 and plan[2].qty == 4,
+        string.format("帧=%d 计划=%d qty=%d", m and m.frames, #plan, plan[1] and plan[1].qty))
+    check("S4 断点只落在行边界(没有半行 32 位量)",
+        (function()
+            for _, b in ipairs(plan) do
+                for _, row in ipairs(b.rows) do
+                    if row.off + (row.r.count or 1) > b.qty then return false end
+                end
+            end
+            return true
+        end)(), "某行跨过块尾")
     check("S4 65 个值全部采到", m and m.pushes == 65, m and m.pushes)
     local bad = 0
     for _, r in ipairs(rs) do
@@ -488,7 +525,7 @@ do
     fill_words(41001, 41140)
     print("     块大小 → 128 点一轮总线时间 @9600 8N1, 从站延迟 5ms, 轮间隔算 0:")
     local rows = { { 1, "每点一帧" }, { 8, "8 字/块" }, { 16, "16 字/块" },
-                   { 64, "64 字/块" }, { 122, "122 字/块(定帧上限)" }, { 125, "125 字/块(规范上限)" } }
+                   { 32, "32 字/块" }, { 64, "64 字/块" }, { 96, "96 字/块(现上限)" } }
     local res = {}
     for _, it in ipairs(rows) do
         local blk = it[1]
@@ -508,20 +545,20 @@ do
     check("S9 合并读比每点一帧快 3 倍以上", ms_of("每点一帧") and ms_of("64 字/块")
         and ms_of("64 字/块") * 3 < ms_of("每点一帧"),
         string.format("%s vs %s", tostring(ms_of("每点一帧")), tostring(ms_of("64 字/块"))))
-    check("S9 122 字/块能采满 128 点(把 MAX_BLOCK_QTY 收到 122 即可用)",
+    check("S9 96 字/块(现上限)能采满 128 点",
         (function()
             for _, r in ipairs(res) do
-                if r.blk == 122 then return r.m and r.m.pushes == 128 and r.m.timeout == 0 end
+                if r.blk == 96 then return r.m and r.m.pushes == 128 and r.m.timeout == 0 end
             end
             return false
-        end)(), "122 字/块没采满")
-    known_bug("S9 125 字/块采不满(同一缺陷①的另一面)",
+        end)(), "96 字/块没采满")
+    check("S9 每种块大小都采满 128 点(缺陷①修掉后不该再有丢值)",
         (function()
             for _, r in ipairs(res) do
-                if r.blk == 125 then return r.m and r.m.pushes < 128 and r.m.timeout == 1 end
+                if not r.m or r.m.pushes ~= 128 or r.m.timeout ~= 0 then return false end
             end
-            return false
-        end)(), "见 S9 表格 timeout 列")
+            return true
+        end)(), "见 S9 表格 值/timeout 列")
 end
 
 -- S10 波特率账: 9600 vs 115200 下 128 点合并一轮

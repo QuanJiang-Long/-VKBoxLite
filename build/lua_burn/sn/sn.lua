@@ -24,6 +24,18 @@ local function flush()
     if fskv and fskv.save then pcall(fskv.save) end
 end
 
+
+
+
+local function kv_put(k, v)
+    local ok, ret = pcall(fskv.set, k, v)
+    if not ok or ret == false then
+        log.warn("sn", "fskv.set failed:", k, tostring(ret))
+        return false
+    end
+    return true
+end
+
 function M.locked()
     return kv_get(K_LOCK) == "1"
 end
@@ -37,10 +49,10 @@ function M.load()
 end
 
 function M.save(sn)
-    fskv.set(K_SN, sn)
+    kv_put(K_SN, sn)
     local m = M.meta()
-    fskv.set(K_BURN, m.burn + 1)
-    if m.btime == 0 then fskv.set(K_BTIME, os.time()) end
+    kv_put(K_BURN, m.burn + 1)
+    if m.btime == 0 then kv_put(K_BTIME, os.time()) end
     flush()
 end
 
@@ -63,8 +75,15 @@ function M.clear()
 end
 
 function M.set_lock()
-    fskv.set(K_LOCK, "1")
+    local ok = kv_put(K_LOCK, "1")
     flush()
+
+
+    if not ok or not M.locked() then
+        log.error("sn", "lock NOT persisted")
+        return false
+    end
+    return true
 end
 
 function M.clear_lock()

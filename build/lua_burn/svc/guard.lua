@@ -10,6 +10,8 @@ local M = {}
 
 local ticks, last_alive = 0, 0
 
+local was_running, was_mode = false, ""
+
 local function wdt_ok()
     if not wdt then return false end
     return type(wdt.feed) == "function"
@@ -72,9 +74,23 @@ local function collector_running(mode)
 end
 
 
+
+
+
+
+
+
+local function sync_running(mode)
+    local r = collector_running(mode)
+    if r and (not was_running or mode ~= was_mode) then last_alive = ticks end
+    was_running, was_mode = r, mode
+    return r
+end
+
+
 local function stall_of(mode)
     if not is_active_mode(mode) then return nil end
-    if not collector_running(mode) then return nil end
+    if not sync_running(mode) then return nil end
     return ticks - last_alive
 end
 

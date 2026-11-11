@@ -274,7 +274,7 @@ function M.switch_mode(mode, from_boot)
                 if iot then pcall(iot.pull_start) end
 
                 if cfgstore and mon.load_infer then
-                    pcall(mon.load_infer, c and c.regs or {})
+                    pcall(mon.load_infer, c and c.regs or {}, c and c.slave or 1)
                 end
                 S.cur = "sniff"
                 return true, "OK sniff started (from persist)"
@@ -299,16 +299,14 @@ function M.switch_mode(mode, from_boot)
         if pm3 then pm3.stop() end
         stop_sniff()
 
-
-        log.info("ctrl", "switch_mode idle: from_boot=" .. tostring(from_boot))
         local cleared = {}
         if not from_boot then
-            log.info("ctrl", "switch_mode idle: clearing config (manual switch)")
             cleared = M.reset_user_cfg()
+            log.info("ctrl", "idle: cleared " .. table.concat(cleared, "+"))
         else
-            log.info("ctrl", "switch_mode idle: preserving config (boot)")
+            log.debug("ctrl", "idle(boot): preserving config")
         end
-        S.cur = "idle"  -- 34-fix: 记下当前 mode
+        S.cur = "idle"
 
 
         return true, "OK idle (bus released)", cleared
