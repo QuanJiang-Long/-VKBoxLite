@@ -73,7 +73,7 @@ if (-not (Test-Path (Join-Path $scr "luatos-pc.exe"))) {
     Write-Host "[setup] 复制模拟器到 $scr (只做一次, 慢)"
     robocopy $sim $scr /E /XD demo pclogs | Out-Null
 }
-$dst = Join-Path $scr "lua"
+$dst = Join-Path $scr "firmware"
 if (Test-Path $dst) { Remove-Item $dst -Recurse -Force -ErrorAction SilentlyContinue }
 robocopy $srcFull $dst /E /NJH /NJS /NDL /NFL | Out-Null
 
