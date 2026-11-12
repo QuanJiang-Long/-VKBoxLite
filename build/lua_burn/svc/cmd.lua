@@ -331,7 +331,16 @@ local function reg_cmds()
     M.reg("R:CFG", function()
 
         local slot = (ctrl.get_mode() == "platform") and SLOT_PULL or SLOT_POLL
-        local cfg = (slot == SLOT_PULL) and cfgstore.load_pull() or cfgstore.load_poll()
+
+
+
+        local loader = (slot == SLOT_PULL) and cfgstore.load_pull or cfgstore.load_poll
+        local cfg, lerr = loader()
+
+
+
+
+        if lerr then return M.reply("RET:FAIL:CFG:" .. lerr) end
 
 
 

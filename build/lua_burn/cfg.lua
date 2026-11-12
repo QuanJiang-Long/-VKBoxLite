@@ -36,6 +36,16 @@ local function str(v, d)
     return v
 end
 
+
+
+
+local function brief(v, n)
+    local s = tostring(v):gsub("[\r\n]", " ")
+    n = n or 80
+    if #s > n then s = s:sub(1, n) end
+    return s
+end
+
 local function kv_get(k)
     if not fskv then return nil end
     local ok, v = pcall(fskv.get, k)
@@ -72,11 +82,11 @@ local function kv_set(k, s)
     end
     local ok, ret = pcall(fskv.set, k, s)
     if not ok or ret == false then
-        log.warn("cfg", "fskv.set failed:", k, n .. "B", tostring(ret))
+        log.warn("cfg", "fskv.set failed:", k, n .. "B", brief(ret))
 
 
 
-        return false, "fskv.set 拒写(值 " .. n .. "B): " .. tostring(ret)
+        return false, "fskv.set 拒写(值 " .. n .. "B): " .. brief(ret)
     end
 
 
@@ -126,7 +136,13 @@ end
 local function save_json(k, t)
     if not json then return false, "no json lib" end
     local ok, s = pcall(json.encode, t)
-    if not ok or not s then return false, "encode fail" end
+
+
+
+
+
+    if not ok then return false, "encode fail: " .. brief(s) end
+    if not s then return false, "encode fail(无返回)" end
 
 
 
@@ -413,12 +429,22 @@ local SECTIONS = {
 for name, sec in pairs(SECTIONS) do
     M["load_" .. name] = function()
         local raw = load_json(sec.key, {})
-        local ok, c = pcall(sec.norm, raw)
-        if not ok or not c then
-            log.warn("cfg", name, "normalize fail, use default")
-            return sec.default
+        local ok, c, err = pcall(sec.norm, raw)
+        if ok and c then return c end
+
+
+
+
+
+
+
+
+        if not ok then
+            log.error("cfg", name, "normalize raised:", brief(c))
+            return sec.default, "内存/内部异常: " .. brief(c)
         end
-        return c
+        log.warn("cfg", name, "normalize fail, use default")
+        return sec.default, tostring(err)
     end
     M["save_" .. name] = function(c)
         local n, err = sec.norm(c)
