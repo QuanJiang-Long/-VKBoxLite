@@ -2322,3 +2322,41 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
   绕了一圈）。现在原样带回 `RET:FAIL:CFG:...`；`cfg.js` 的 `CFG_ERR` 不认这个
   前缀，走的正是"查不到就原样显示"那条分支。
 
+- **第二刀复测已验（2026-11-12 晚，日志 4，同一条 56 点）**。`norm` 段：
+  `decoded 281144 → norm 282432` = **+1288**（改前 +13048）；第二次保存
+  `decoded 298072 → norm 299392` = **+1320**（改前 +13056）。剩下这一千多字节
+  是建块计划本身，不是第三张表。整条保存瞬时 `265984 → 288168` = **+22184B**
+  （改前 41896），峰 288168。`I/user.poll started(poll), regs=56` 同时证明
+  `poll.start(src, c)` 那条也没回头解第二遍。
+  **失败点挪到了上一格**：第二次保存（切 idle 再切回 manual，`enter 293288/305064`
+  ⇒ 池里只剩 13.9KB）死在 `saved` 段，应答 `RET:FAIL:CFG:encode fail`，同一毫秒
+  设备日志 `E/mem memory allocation failed total 307192, used 298576, alloc 3791`
+  —— 是 `json.encode` 要那块 3791B 连续块拿不到，不是 fskv 拒写。
+  **GC 这条路当场量死**：四次 `R:MEM` 全是 `max:6144 fail:8192`，`W:GC` 前后
+  `lua:` 只从 279704 降到 279176、`max` 一个字没动 → 连续块切不出来跟碎片无关，
+  挪 `#arg>4096` 那道入口 GC 闸门的阈值不会有任何收益（这条杠杆作废）。
+
+- **第三刀：失败原因分两种说法（2026-11-12 改）**。同一个毛病在保存路径上还有
+  两处，都不许再只报"失败了"：
+  ① `save_json` 原先 `if not ok or not s then return false, "encode fail" end`，
+  把 `pcall` 的第二返回值扔了。现在 raise（内存）与"不 raise 只回 nil"（内容编码
+  不了）分开报成 `encode fail: <C 层原话>` / `encode fail(无返回)`，
+  **`encode fail` 这个前缀一个字没动** —— `sn-tools/pc_tool` 按它认这条失败。
+  ② `SECTIONS` 里的 `load_*` 原先把两种失败混成一句 `normalize fail, use default`
+  再回 `sec.default`：`pcall` 拿到【异常】(`ok==false`，那次是连 `alloc 160`
+  都失败) 和归一化【判非法】(`ok==true, c==nil`) 说的是两件事，可 R:CFG 拿到的
+  都是出厂默认表，前端于是显示空表 —— 用户以为刚保存的 56 行没了，实际 fskv 里
+  一个字没少。现在第一个返回值【仍然回表】(`main.lua` 靠它起机，回 nil 等于设备
+  起不来)，原因作为【第二个返回值】交给调用方；`cmd.lua` 的 R:CFG 见原因非 nil
+  就改回 `RET:FAIL:CFG:<原因>`，一个字节假配置都不许多发。
+  所有往外抛的原因都过 `brief()`：换行压成空格、截到 80 字节 —— 应答是【一整行】，
+  混进 `\r`/`\n` 会把后面所有帧的解析搅乱。
+  ⚠️ 写这条时踩到的坑，测试里钉着：`local c, e = (x) and a() or b()` **拿不到第二个
+  返回值** —— 括号表达式在 Lua 里截断成单值，那道闸永远不放行，假配置照样发出去。
+  要先取函数再调用。
+  护栏 `tests/lua/test_cfg_reason.lua`（真 `cfg.lua` + 假 fskv/json：raise 与 nil
+  两种 encode 失败、超长带换行的原因、判非法 vs 抛异常、空槽不误报）和
+  `tests/lua/test_cmd_cfgfail.lua`（R:CFG 两个槽、假配置一个字节都不发）。
+  `mqttcfg.lua` 那句 `encode fail` 故意没动：它管的是 ≤2KB 的 MQTT 配置，现场从没
+  在这上面 OOM 过，而 `pc_tool` 的 `_st_mqtt.py` 按【全等】匹配这个 reason。
+

@@ -331,7 +331,16 @@ local function reg_cmds()
     M.reg("R:CFG", function()
         -- 按当前运行模式取对应的配置槽
         local slot = (ctrl.get_mode() == "platform") and SLOT_PULL or SLOT_POLL
-        local cfg = (slot == SLOT_PULL) and cfgstore.load_pull() or cfgstore.load_poll()
+        -- ⚠️ 必须先取【函数】再调用, 不能写成 local c, e = (x) and a() or b():
+        --   括号表达式在 Lua 里只保留第一个返回值, 第二个返回值(原因)会被静默
+        --   截成 nil —— 那样下面那道闸永远不放行, 假配置照样发出去
+        local loader = (slot == SLOT_PULL) and cfgstore.load_pull or cfgstore.load_poll
+        local cfg, lerr = loader()
+        -- 第二个返回值 = 归一化没能跑完的原因(见 cfg.lua 的 load_*)。这时候
+        --   cfg 是【出厂默认表】, 不是设备里那份 —— 以前照样回 RET:CFG=,
+        --   前端把默认表填进表单, 用户以为保存的那 56 行没了。
+        --   11-12 现场那条 E/mem alloc 160 就是这么被说成"设备里没有配置"的。
+        if lerr then return M.reply("RET:FAIL:CFG:" .. lerr) end
         -- src 必须反映本次 cfg 实际所在槽: pollpull 档下 ds_poll 空着但
         -- ds_pull 已被平台覆盖的情况很常见 (老用户从 poll 切到 pollpull),
         -- 之前这里写 poll_src() 永远查 K_POLL, 前端拿 src='default' 误判

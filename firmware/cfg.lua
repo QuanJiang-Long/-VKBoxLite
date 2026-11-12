@@ -36,6 +36,16 @@ local function str(v, d)
     return v
 end
 
+-- 往外报的"原因"先过这一道: 应答是【一整行】的, 原因里带换行会把后面所有
+-- 帧的解析搅乱; 太长会顶到 prov 的行缓冲。C 层那句话(内存/参数)都是 ASCII,
+-- 80 字节截断不会切断多字节字符
+local function brief(v, n)
+    local s = tostring(v):gsub("[\r\n]", " ")
+    n = n or 80
+    if #s > n then s = s:sub(1, n) end
+    return s
+end
+
 local function kv_get(k)
     if not fskv then return nil end
     local ok, v = pcall(fskv.get, k)
@@ -72,11 +82,11 @@ local function kv_set(k, s)
     end
     local ok, ret = pcall(fskv.set, k, s)
     if not ok or ret == false then
-        log.warn("cfg", "fskv.set failed:", k, n .. "B", tostring(ret))
+        log.warn("cfg", "fskv.set failed:", k, n .. "B", brief(ret))
         -- 原因必须一起带回应答里: 只报"拒写"前端分不清是超限还是内存不足。
         --   11-12 现场 3774B(远小于 4096)保存失败, 真原因是 C 层 raise 的
         --   "not enough memory for buffer allocation" —— 那句话原先只进设备日志。
-        return false, "fskv.set 拒写(值 " .. n .. "B): " .. tostring(ret)
+        return false, "fskv.set 拒写(值 " .. n .. "B): " .. brief(ret)
     end
     -- 只有真写进去了才动缓存/版本号: 写失败时 fskv 里的内容没变,
     -- 清缓存+涨版本号等于白让所有下游解码缓存失效一遍
@@ -126,7 +136,13 @@ end
 local function save_json(k, t)
     if not json then return false, "no json lib" end
     local ok, s = pcall(json.encode, t)
-    if not ok or not s then return false, "encode fail" end
+    -- ⚠️ "encode fail" 这个前缀一个字都不能动: 上位机按它认这条失败。
+    --   后面必须跟真原因 —— 11-12 现场第二次保存死在这里(不是 fskv):
+    --     used 298576/307192, json.encode 要一块 3791B 连续块拿不到,
+    --   设备日志打了 E/mem, 应答却只有光秃秃一句 encode fail。
+    --   encode 有两种失败: raise(内存) / 不 raise 只回 nil(内容编码不了), 分开报
+    if not ok then return false, "encode fail: " .. brief(s) end
+    if not s then return false, "encode fail(无返回)" end
     -- 上限必须和 prov.lua 的 MAX_BUF 对齐: W:CFG 是【一整行】下发,
     -- 行超过 MAX_BUF 会被整缓冲丢弃, 存得下也传不过来。
     -- 128 条寄存器最坏约 12.7KB, 两侧都取 16KB。
@@ -413,12 +429,22 @@ local SECTIONS = {
 for name, sec in pairs(SECTIONS) do
     M["load_" .. name] = function()
         local raw = load_json(sec.key, {})
-        local ok, c = pcall(sec.norm, raw)
-        if not ok or not c then
-            log.warn("cfg", name, "normalize fail, use default")
-            return sec.default
+        local ok, c, err = pcall(sec.norm, raw)
+        if ok and c then return c end
+        -- ⚠️ 两种失败【话不一样】, 不能混成一句"配置坏了"(2026-11-12 现场):
+        --   ok==false      = 归一化【抛异常】。那次是 used 304848/307192 时连
+        --                    160B 都分配不出来 —— flash 里那 56 行一个字没少。
+        --   ok==true,c==nil = 归一化【判非法】, err 是原因, 存的内容真有问题。
+        -- 两种都回默认值(main.lua 靠这个起机, 回 nil 等于设备起不来), 但把原因
+        -- 作为【第二个返回值】交给调用方。以前只打一行 warn 就把 default 当设备
+        -- 配置返回, R:CFG 于是把"池子不够"报成"这份配置坏了/是空的",
+        -- 用户看到的是"我填的 56 行消失了"。
+        if not ok then
+            log.error("cfg", name, "normalize raised:", brief(c))
+            return sec.default, "内存/内部异常: " .. brief(c)
         end
-        return c
+        log.warn("cfg", name, "normalize fail, use default")
+        return sec.default, tostring(err)
     end
     M["save_" .. name] = function(c)
         local n, err = sec.norm(c)
