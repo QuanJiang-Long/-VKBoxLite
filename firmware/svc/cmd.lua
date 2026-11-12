@@ -384,10 +384,11 @@ local function reg_cmds()
                 poll.stop()
                 poll.apply_cfg(n)
                 -- ⚠️ 必须带槽: poll.start() 不传 src 会把 curSlot 强制置成 "poll"
-                poll.start(slot)
+                -- 第二个参数 = 刚归一化好的那份, start 里就不再 reload_cfg 了
+                poll.start(slot, n)
             else
                 poll.apply_cfg(n)
-                if in_poll_mode then poll.start(slot) end
+                if in_poll_mode then poll.start(slot, n) end
             end
         else
             poll.apply_cfg(n)
@@ -396,12 +397,14 @@ local function reg_cmds()
                 --   manual 档进入时空 ds_poll → 34-fix 不起 → 用户添
                 --   寄存器表但 baud/slave 没动 → needs_restart=false →
                 --   之前没人调 poll.start). 补起
-                poll.start(slot)
+                poll.start(slot, n)
             end
         end
         if iot and iot.reply_config then pcall(iot.reply_config) end
-        -- 重启轮询(建块计划)之后采一次: n 还要经过 apply_cfg 才被 poll 持有,
-        -- 这一步涨了说明 poll 那边又留了一份表
+        -- 重启轮询(建块计划)之后采一次。11-12 起 start 拿得到 n, 不再回头
+        --   reload_cfg 解第二遍, 这一段应当只剩建块计划那点(几 KB 量级);
+        --   还是 +15KB 往上跳就说明没走到传 n 的那条路(旧版这里 +26992B,
+        --   池子 306168/307192 只剩 1024B —— 见 README 的 CTRACE 现场表)
         trc_sample("done")
         M.reply("RET:CFG=OK")
     end)

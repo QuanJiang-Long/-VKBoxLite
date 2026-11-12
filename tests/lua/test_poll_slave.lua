@@ -41,6 +41,7 @@ local BUS = {
 local pushed, push_map, logs, alive = {}, {}, {}, 0
 local slave = nil
 local CURCFG = nil
+local LOAD_POLL_CALLS = 0   -- S11: 数 start() 有没有回头解第二份配置
 
 local function byte_ms(n)
     local bits = 1 + BUS.databits + BUS.stopbits + (BUS.parity > 0 and 1 or 0)
@@ -168,7 +169,10 @@ end
 mbus = require "bus/mbus"   -- _G.uart 已就位, mbus 加载时 util.try("uart") 拿得到桩
 
 package.preload["cfg"] = function()
-    return { load_poll = function() return CURCFG end, load_pull = function() return nil end }
+    return { load_poll = function()
+        LOAD_POLL_CALLS = LOAD_POLL_CALLS + 1
+        return CURCFG
+    end, load_pull = function() return nil end }
 end
 package.preload["data/collector"] = function()
     return { push_data = function(addr, alias, hx, value, ts, dtype)
@@ -616,6 +620,36 @@ do
         string.format("9600=%dms 115200=%dms", a and a.ms, b and b.ms))
     print(string.format("     128 点/2 帧: 9600 = %d ms, 115200 = %d ms (差值就是字节时间, 剩下是 5ms 从站延迟 + poll 的 5ms 步进)",
         a and a.ms, b and b.ms))
+end
+
+-- S11 start(src, c) 的传参契约 (2026-11-12 现场 CTRACE: 56 点保存, done 段
+--   一次涨 26992B, 池子 306168/307192 只剩 1024B)。其中约 15KB 是 W:CFG 已经
+--   手上握着一份归一化好的 n, poll.start 又回头 load_poll 解了【第二遍】。
+--   这条断言钉住: 给了 c 就绝不碰配置存储; 没给(开机/切档/拉配置)照旧解。
+do
+    new_slave({ max_qty = 125, over = "ignore", delay_ms = 0 })
+    fill_words(41001, 41010)
+    if poll.is_running() then poll.stop() end
+
+    CURCFG = cfg_of(regs_blocked(3, 41001, 3))
+    LOAD_POLL_CALLS = 0
+    poll.start("poll")
+    check("S11 start(src) 没配置来源时照旧解一遍",
+        LOAD_POLL_CALLS == 1 and #poll.get_regs() == 3,
+        string.format("calls=%d regs=%d", LOAD_POLL_CALLS, #poll.get_regs()))
+    poll.stop()
+
+    local hand = cfg_of(regs_blocked(5, 41001, 5))
+    CURCFG = cfg_of(regs_blocked(3, 41001, 3))   -- 存储里那份故意是另一张表
+    LOAD_POLL_CALLS = 0
+    poll.start("poll", hand)
+    check("S11 start(src, c) 不再回头解第二份配置", LOAD_POLL_CALLS == 0,
+        "load_poll 被叫了 " .. LOAD_POLL_CALLS .. " 次")
+    check("S11 start(src, c) 装的是传进来的那张表",
+        poll.get_regs() == hand.regs and poll.status().interval == hand.interval_ms,
+        string.format("regs=%s interval=%s",
+            tostring(poll.get_regs() == hand.regs), tostring(poll.status().interval)))
+    poll.stop()
 end
 
 print(string.format("== 结论: %d 项断言失败, %d 条已知缺陷被钉住", failed, bugpin))

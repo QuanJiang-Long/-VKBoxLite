@@ -599,10 +599,22 @@ function M.status()
     return st
 end
 
-function M.start(src)
+function M.start(src, c)
     if running then return true end
     curSlot = (src == "pull") and "pull" or "poll"
-    M.reload_cfg(curSlot)
+    -- 手上已经有【归一化好的】配置就直接用, 别再从 fskv 解第二遍。
+    --   2026-11-12 现场 CTRACE(56 点, arg=3800B): W:CFG 先 apply_cfg(n) 再调
+    --   这句, reload_cfg 走 load_poll() = 解码整份 + normalize_poll 再来一遍
+    --   (kv_set 刚把解码缓存清掉, 一点缓存都捡不到), 而 n 还被 cmd.lua 的
+    --   local 攥着到 handler 返回 —— 两张 ~15KB 的表同时在世, done 段一次涨
+    --   26992B, 池子 306168/307192 只剩 1024B。n 和 load_poll() 的返回同为
+    --   normalize_poll 的产物, 内容逐字段一样(落盘写的就是 n)。
+    --   开机/切档/拉配置这些没有现成配置的调用方照旧走 reload_cfg。
+    if c then
+        M.apply_cfg(c)
+    else
+        M.reload_cfg(curSlot)
+    end
     if gpio then
         pcall(gpio.setup, mbus.DE_PIN, 0)
         pcall(gpio.set, mbus.DE_PIN, 0)
