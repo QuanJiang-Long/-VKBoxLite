@@ -177,6 +177,19 @@ check("单行读仍取整段 data 的 hex",
         poll._extract_row(string.char(0, 20, 0, 21), 0, R(101, 2, "uint16"))
         return pushed[1].hex == hex_of(string.char(0, 20, 0, 21))
     end)(), "单行 hex 变了")
+-- 缺陷③ (11-12, 现场 2026-11-12 的 52 行/2 行块日志钉出): 合并块【首行】的 hex
+--   原来是整块(base==0 那条特例是给单行读写的)。值取自各自的字所以没错, 但
+--   调试日志里首行挂着 208 个字符(52 字块)/"00010014"(2 字块), 读的人以为
+--   这一个点回了整帧。现在一律只取本行那几字。
+check("块里首行(off=0)的 hex 只有自己的字", merged[1].hex == hex_of(string.char(0, 10)),
+    merged[1].hex)
+check("单行读多回字时 hex 只取本行的字",
+    (function()
+        pushed = {}
+        -- 请求 1 字却回 2 字: 尾巴不该混进这个点的 hex
+        poll._extract_row(string.char(0, 20, 0, 99), 0, R(101, 1, "uint16"))
+        return pushed[1].hex == hex_of(string.char(0, 20))
+    end)(), "单行 hex 把多回的字带上来了")
 check("块里 3 行各 push 一次", #merged == 3, #merged)
 check("块里 addr 序列 100/101/102", merged[1].addr == 100 and merged[2].addr == 101
     and merged[3].addr == 102, plan_str(blk))

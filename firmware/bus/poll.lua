@@ -193,8 +193,15 @@ local function extract_row(data, base, r)
     local avail = math.floor(#data / 2)
     local span = r.count or 1
     if base + span > avail then span = math.max(0, avail - base) end
-    -- 单行读的 hex 保持整段 data(和今天一字不差); 合并块里只取本行那几字
-    local hx = base == 0 and hexs(data) or hexs(data:sub(base * 2 + 1, (base + span) * 2))
+    -- 缺陷③ (11-12): hex 一律只取【本行那几字】, 不再有 base==0 拿整段的特例。
+    --   原来那句 `base == 0 and hexs(data)` 是给单行读写的(单行读的 data 本来就
+    --   只有它自己), 但合并块的 off=0 那行 base 也是 0, 于是首行拿到的是整块的
+    --   串 —— 现场 2 行块打成 `Rx addr=141 hex=00010014`(4 字节, 该只有 2),
+    --   52 行块打成 208 个字符。值本身没受影响(parse_value 按 off 取字),
+    --   脏的只有这条调试日志(collector 从 12-fix-9 起不存 hex, R:VAL/U4 读不到)。
+    --   切片在单行读时和整段逐字节相同(span 就是 avail), 所以这么一改
+    --   单行读的日志一个字都不变, 少回/多回字时反而更准。
+    local hx = hexs(data:sub(base * 2 + 1, (base + span) * 2))
     local vb, n = {}, 0
     local name = r.name or ("r" .. r.addr)
     for off = base, base + span - w, w do
