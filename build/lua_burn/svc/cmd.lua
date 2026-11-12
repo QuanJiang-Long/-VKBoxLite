@@ -853,10 +853,44 @@ local function reg_debug_cmds()
 
     M.reg("W:FS", function()
         local p, verdict = {}, "?"
-        local io_lib, os_lib = rawget(_G, "io"), rawget(_G, "os")
+
+
+
+
+
+
+
+
+
+
+
+
+        local ENV = _ENV or _G -- 5.1 上没有 _ENV(取到 nil), 退回 _G
+        local function env_get(n)
+            local ok, v = pcall(function() return ENV[n] end)
+            if not ok then return nil, "raise" end
+            return v, type(v)
+        end
+        local function look(n)
+            local _, t = env_get(n)
+            local tr = util.try(n)
+            return n .. "(env:" .. t .. " raw:" .. type(rawget(ENV, n))
+                .. " try:" .. type(tr) .. ")"
+        end
+        p[#p + 1] = look("io")
+        p[#p + 1] = look("os")
+        local io_lib = (env_get("io"))
+        local os_lib = (env_get("os"))
+
+        local function is_lib(t)
+            return type(t) == "table" or type(t) == "userdata"
+        end
         local function fn(t, n)
-            if type(t) ~= "table" then return "no-lib" end
-            return tostring(type(t[n]))
+            if not is_lib(t) then return "no-lib" end
+
+            local ok, v = pcall(function() return t[n] end)
+            if not ok then return "index-raise" end
+            return tostring(type(v))
         end
         p[#p + 1] = "open:" .. fn(io_lib, "open")
         p[#p + 1] = "fsstat:" .. fn(io_lib, "fsstat")
@@ -876,7 +910,7 @@ local function reg_debug_cmds()
             return out
         end
         local space = "?"
-        if type(io_lib) == "table" and type(io_lib.fsstat) == "function" then
+        if fn(io_lib, "fsstat") == "function" then
             local pack = { pcall(io_lib.fsstat, "/") }
             local n = nums(pack)
             if #pack >= 1 and pack[1] and #n >= 2 then
@@ -902,7 +936,7 @@ local function reg_debug_cmds()
 
 
         local blob = nil
-        if type(io_lib) ~= "table" or type(io_lib.open) ~= "function" then
+        if fn(io_lib, "open") ~= "function" then
 
 
             p[#p + 1] = "blob:skip"
@@ -929,7 +963,7 @@ local function reg_debug_cmds()
                             r.w = wok and "ok" or "write-fail"
                             local sz = io_lib.fileSize and io_lib.fileSize(tmp) or -1
                             r.wsz = tostring(sz)
-                            if type(os_lib) == "table" and type(os_lib.rename) == "function" then
+                            if fn(os_lib, "rename") == "function" then
                                 r.ren = tostring(os_lib.rename(tmp, bin))
                             else
                                 r.ren = "no-rename"
