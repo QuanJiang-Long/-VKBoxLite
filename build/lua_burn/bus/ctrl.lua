@@ -164,11 +164,11 @@ function M.switch_mode(mode, from_boot)
 
 
 
-        local have_cfg = true
+        local have_cfg, why = true, nil
         if mode == "manual" then
-            have_cfg = cfgstore and cfgstore.has_poll_cfg and cfgstore.has_poll_cfg()
+            have_cfg, why = cfgstore and cfgstore.has_poll_cfg and cfgstore.has_poll_cfg()
         elseif mode == "platform" then
-            have_cfg = cfgstore and cfgstore.has_pull_cfg and cfgstore.has_pull_cfg()
+            have_cfg, why = cfgstore and cfgstore.has_pull_cfg and cfgstore.has_pull_cfg()
         end
         if have_cfg then
 
@@ -180,9 +180,18 @@ function M.switch_mode(mode, from_boot)
 
             if not (pm and pm.start(slot)) then return false, "FAIL poll start" end
         else
-            log.info("ctrl", string.format(
-                "%s 档: %s 槽空, 暂不起轮询, 等配置就位后由 W:CFG / auto_apply 补起",
-                mode, slot))
+
+
+
+
+            if why then
+                log.warn("ctrl", string.format(
+                    "%s 档: %s 槽读不出来(%s), 本次不起轮询", mode, slot, why))
+            else
+                log.info("ctrl", string.format(
+                    "%s 档: %s 槽空, 暂不起轮询, 等配置就位后由 W:CFG / auto_apply 补起",
+                    mode, slot))
+            end
         end
         if mode == "platform" then
 
@@ -223,7 +232,17 @@ function M.switch_mode(mode, from_boot)
 
 
 
-        local infer_cfg = cfgstore and cfgstore.has_infer_cfg and cfgstore.has_infer_cfg()
+
+
+
+
+        local infer_cfg, infer_why
+        if cfgstore and cfgstore.has_infer_cfg then
+            infer_cfg, infer_why = cfgstore.has_infer_cfg()
+        end
+        if infer_why then
+            log.warn("ctrl", "sniff: ds_infer 读不出来(" .. tostring(infer_why) .. "), 本轮重新识别")
+        end
         local start_params = nil
         if infer_cfg then
             local c = cfgstore.load_infer()
@@ -299,17 +318,22 @@ function M.switch_mode(mode, from_boot)
         if pm3 then pm3.stop() end
         stop_sniff()
 
-        local cleared = {}
+        local cleared, notcleared = {}, {}
         if not from_boot then
-            cleared = M.reset_user_cfg()
+            cleared, notcleared = M.reset_user_cfg()
             log.info("ctrl", "idle: cleared " .. table.concat(cleared, "+"))
+
+
+            if #notcleared > 0 then
+                log.warn("ctrl", "idle: NOT cleared " .. table.concat(notcleared, "+"))
+            end
         else
             log.debug("ctrl", "idle(boot): preserving config")
         end
         S.cur = "idle"
 
 
-        return true, "OK idle (bus released)", cleared
+        return true, "OK idle (bus released)", cleared, notcleared
 
     else
         return false, "FAIL unknown mode (use manual/platform/sniff/idle)"
@@ -323,8 +347,10 @@ end
 
 
 
+
+
 function M.reset_user_cfg()
-    local cleared = cfgstore.reset_user()
+    local cleared, failed = cfgstore.reset_user()
 
     local ok, err, wrote = mqttcfg.clear_manual()
     if ok then
@@ -333,10 +359,11 @@ function M.reset_user_cfg()
 
 
         log.warn("ctrl", "reset mqtt_manual fail:", tostring(err))
+        failed[#failed + 1] = "mqtt_manual:" .. tostring(err)
     end
 
     if wrote and iot then pcall(iot.kick) end
-    return cleared
+    return cleared, failed
 end
 
 

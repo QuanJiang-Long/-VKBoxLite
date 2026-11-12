@@ -46,11 +46,23 @@ local function brief(v, n)
     return s
 end
 
-local function kv_get(k)
-    if not fskv then return nil end
+
+
+
+
+
+
+
+local function kv_read(k)
+    if not fskv then return nil, nil end
     local ok, v = pcall(fskv.get, k)
-    if ok and type(v) == "string" and v ~= "" then return v end
-    return nil
+    if not ok then return nil, "读不出来: " .. brief(v) end
+    if v == nil or v == "" then return nil, nil end
+    return v, nil
+end
+
+local function kv_get(k)
+    return (kv_read(k))
 end
 
 
@@ -73,7 +85,7 @@ function M.version() return cfg_ver end
 
 local FSKV_VALUE_MAX = 4096
 
-local function kv_set(k, s)
+local function kv_set(k, s, noflush)
     if not fskv then return false, "no fskv" end
     local n = type(s) == "string" and #s or 0
     if n > FSKV_VALUE_MAX then
@@ -92,7 +104,9 @@ local function kv_set(k, s)
 
     json_cache[k] = nil   -- 12-fix-3: 写盘了, 解码缓存必须失效
     cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号跟着涨(别名映射缓存靠它失效)
-    if fskv.save then pcall(fskv.save) end
+
+
+    if fskv.save and not noflush then pcall(fskv.save) end
     return true
 end
 
@@ -115,26 +129,187 @@ end
 
 
 
-local function load_json(k, default)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+local SHARD_ROWS = 16
+local SHARD_MAX = 1024
+local SHARD_VER = 1
+local SHARD_W, SHARD_R = "w", "r"
+
+local function shard_key(k, i) return k .. "." .. i end
+
+local function dec_json(s)
+    if not s or not json then return nil end
+    local ok, t = pcall(json.decode, s)
+    if ok and type(t) == "table" then return t end
+    return nil
+end
+
+
+
+local function shard_of(h)
+    if type(h) ~= "table" or h.v ~= SHARD_VER then return nil end
+    local n = tonumber(h.n)
+    if not n then return nil end
+    return math.floor(n), tostring(h.st)
+end
+
+
+
+local function shards_load(k, t)
+    local n, st = shard_of(t)
+    if st ~= SHARD_R then
+        return nil, "分片未提交(应有 " .. n .. " 段, st=" .. st .. ")"
+    end
+    if not fskv then return nil, "fskv 不可用, 段取不到" end
+    local rows = {}
+    for i = 1, n do
+
+
+
+        local ok, cs = pcall(fskv.get, shard_key(k, i))
+        if not ok then return nil, "分片" .. i .. "读不出来: " .. brief(cs) end
+        if cs == nil or cs == "" then return nil, "分片不全(" .. (i - 1) .. "/" .. n .. ")" end
+        local ct = dec_json(cs)
+        if ct == nil then return nil, "分片" .. i .. "解码失败" end
+        for j = 1, #ct do rows[#rows + 1] = ct[j] end
+    end
+    t.regs = rows
+    return t
+end
+
+local function put_json(k, v, noflush)
+    local ok, s = pcall(json.encode, v)
+    if not ok then return false, "encode fail: " .. brief(s) end
+    if not s then return false, "encode fail(无返回)" end
+    if #s > FSKV_VALUE_MAX then
+        return false, "段 " .. #s .. "B 超 fskv 单值上限 " .. FSKV_VALUE_MAX .. "B"
+    end
+    return kv_set(k, s, noflush)
+end
+
+
+
+local function shards_save(k, t)
+    local rows = (type(t.regs) == "table") and t.regs or {}
+    local segs, cur, cur_sz = {}, {}, 2
+    local function close_seg()
+        if #cur == 0 then return true end
+        segs[#segs + 1] = cur
+        cur, cur_sz = {}, 2
+        return true
+    end
+    for i = 1, #rows do
+        local ok, e = pcall(json.encode, rows[i])
+
+
+
+        if not ok then return false, "encode fail: " .. brief(e) end
+        if not e then return false, "encode fail(无返回)" end
+
+        if #cur > 0 and (cur_sz + #e + 1 > SHARD_MAX or #cur >= SHARD_ROWS) then
+            close_seg()
+        end
+        cur[#cur + 1] = rows[i]
+        cur_sz = cur_sz + #e + (#cur > 1 and 1 or 0)
+    end
+    close_seg()
+
+    local n = #segs
+    local head = {}
+    for key, val in pairs(t) do
+        if key ~= "regs" then head[key] = val end
+    end
+
+
+    local old_n = 0
+    local oh = dec_json(kv_get(k))
+    if oh then
+        local on = shard_of(oh)
+        if on and on > 0 then old_n = on end
+    end
+
+    head.v, head.n, head.st = SHARD_VER, n, SHARD_W
+    local ok1, err1 = put_json(k, head, true)
+    if not ok1 then return false, err1 end
+    for i = 1, n do
+        local ok2, err2 = put_json(shard_key(k, i), segs[i], true)
+        if not ok2 then
+            return false, "分片" .. i .. "/" .. n .. "写入失败: " .. tostring(err2)
+        end
+    end
+    head.st = SHARD_R
+    local ok3, err3 = put_json(k, head) -- 提交: 只有这一次 flush
+    if not ok3 then return false, "分片提交失败: " .. tostring(err3) end
+
+
+
+    for i = n + 1, old_n do pcall(fskv.set, shard_key(k, i), "") end
+    return true
+end
+
+local function load_json(k, default, shard)
     local cached = json_cache[k]
     if cached ~= nil then return cached end
-    local s = kv_get(k)
+    local s, rerr = kv_read(k)
+    if rerr then
+
+
+        return nil, rerr
+    end
     if not s or not json then
         json_cache[k] = default
         return default
     end
-    local ok, t = pcall(json.decode, s)
-    if ok and type(t) == "table" then
-        json_cache[k] = t
-        return t
+    local t = dec_json(s)
+    if t == nil then
+        log.warn("cfg", "decode fail", k)
+        json_cache[k] = default
+        return default
     end
-    log.warn("cfg", "decode fail", k)
-    json_cache[k] = default
-    return default
+
+
+
+
+
+
+    local pok, c, perr = pcall(function()
+        if not shard or not shard_of(t) then return t end
+        return shards_load(k, t)
+    end)
+    if not pok then
+
+
+        return nil, "内存/内部异常: " .. brief(c)
+    end
+    if c == nil then return nil, perr end
+    json_cache[k] = c
+    return c
 end
 
-local function save_json(k, t)
+local function save_json(k, t, shard)
     if not json then return false, "no json lib" end
+    if shard then return shards_save(k, t) end
     local ok, s = pcall(json.encode, t)
 
 
@@ -418,17 +593,33 @@ end
 
 
 
+
+
+
+
+
+
+
 local SECTIONS = {
-    poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll },
-    pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll },
+    poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll, shard = true },
+    pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll, shard = true },
     sys = { key = K_SYS, norm = M.normalize_sys, default = M.default_sys },
     alias = { key = K_ALIAS, norm = M.normalize_alias, default = M.default_alias },
-    infer = { key = K_INFER, norm = M.normalize_infer, default = M.default_infer },
+    infer = { key = K_INFER, norm = M.normalize_infer, default = M.default_infer, shard = true },
 }
 
 for name, sec in pairs(SECTIONS) do
     M["load_" .. name] = function()
-        local raw = load_json(sec.key, {})
+        local raw, serr = load_json(sec.key, {}, sec.shard)
+        if serr then
+
+
+
+
+
+            log.error("cfg", name, "read fail:", brief(serr))
+            return sec.default, brief(serr)
+        end
         local ok, c, err = pcall(sec.norm, raw)
         if ok and c then return c end
 
@@ -449,33 +640,44 @@ for name, sec in pairs(SECTIONS) do
     M["save_" .. name] = function(c)
         local n, err = sec.norm(c)
         if not n then return false, err end
-        return save_json(sec.key, n)
+        return save_json(sec.key, n, sec.shard)
     end
 
 
 
 
     M["save_" .. name .. "_norm"] = function(n)
-        return save_json(sec.key, n)
+        return save_json(sec.key, n, sec.shard)
     end
 end
 
 
-function M.poll_src()
-    if not fskv then return "default" end
-    local v = fskv.get(K_POLL)
-    if v == nil or v == "" then return "default" end
+
+
+
+
+
+local function src_of(k)
+    local v, why = kv_read(k)
+    if why then return "read-fail", why end
+    if not v then return "default" end
     return "fskv"
 end
 
 
+function M.poll_src() return (src_of(K_POLL)) end
 
-function M.pull_src()
-    if not fskv then return "default" end
-    local v = fskv.get(K_PULL)
-    if v == nil or v == "" then return "default" end
-    return "fskv"
-end
+
+
+function M.pull_src() return (src_of(K_PULL)) end
+
+
+function M.infer_src() return (src_of(K_INFER)) end
+
+
+
+
+
 
 
 
@@ -484,30 +686,68 @@ end
 
 
 function M.has_poll_cfg()
-    if M.poll_src() ~= "fskv" then return false end
-    local c = M.load_poll()
+    local src, why = src_of(K_POLL)
+    if src == "default" then return false end
+    if src ~= "fskv" then return false, why end
+    local c, w2 = M.load_poll()
+    if w2 then return false, w2 end
     return c and #(c.regs or {}) > 0
 end
 
 function M.has_pull_cfg()
-    if M.pull_src() ~= "fskv" then return false end
-    local c = M.load_pull()
+    local src, why = src_of(K_PULL)
+    if src == "default" then return false end
+    if src ~= "fskv" then return false, why end
+    local c, w2 = M.load_pull()
+    if w2 then return false, w2 end
     return c and #(c.regs or {}) > 0
 end
 
 
 function M.has_infer_cfg()
-    if M.infer_src() ~= "fskv" then return false end
-    local c = M.load_infer()
+    local src, why = src_of(K_INFER)
+    if src == "default" then return false end
+    if src ~= "fskv" then return false, why end
+    local c, w2 = M.load_infer()
+    if w2 then return false, w2 end
     return c and #(c.regs or {}) > 0
 end
 
 
-function M.infer_src()
-    if not fskv then return "default" end
-    local v = fskv.get(K_INFER)
-    if v == nil or v == "" then return "default" end
-    return "fskv"
+local SHARDED = {}
+for _, sec in pairs(SECTIONS) do SHARDED[sec.key] = sec.shard end
+
+
+
+
+
+
+
+
+
+
+
+
+
+local function slot_clear(k, shard)
+    local ok, v = pcall(fskv.get, k)
+    if not ok then return false, "读不出来: " .. brief(v) end
+    if v == nil or v == "" then return false, nil end
+    local n = 0
+    if shard then
+        local h = dec_json(v)
+        local hn = h and shard_of(h)
+        if hn and hn > 0 then n = hn end
+    end
+    local sok, serr = pcall(fskv.set, k, "")
+    if not sok then return false, "清不掉: " .. brief(serr) end
+    json_cache[k] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
+    cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号也要涨(别名映射缓存靠它失效)
+    for i = 1, n do
+        pcall(fskv.set, shard_key(k, i), "")
+        json_cache[shard_key(k, i)] = nil
+    end
+    return true
 end
 
 
@@ -533,23 +773,24 @@ local RESET_SLOTS = {
     { "sniff 推断表", K_INFER },  -- 2026-11: 切 idle 时一起清
 }
 
+
+
 function M.reset_user()
-    local cleared = {}
-    if not fskv then return cleared end
+    local cleared, failed = {}, {}
+    if not fskv then return cleared, failed end
     for _, s in ipairs(RESET_SLOTS) do
         local name, k = s[1], s[2]
 
 
-        local ok, v = pcall(fskv.get, k)
-        if ok and v ~= nil and v ~= "" then
-            fskv.set(k, "")
-            json_cache[k] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
-            cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号也要涨(别名映射缓存靠它失效)
+        local wrote, why = slot_clear(k, SHARDED[k])
+        if wrote then
             cleared[#cleared + 1] = name
+        elseif why then
+            failed[#failed + 1] = name .. ":" .. why
         end
     end
     if #cleared > 0 and fskv.save then pcall(fskv.save) end
-    return cleared
+    return cleared, failed
 end
 
 
@@ -558,14 +799,10 @@ end
 
 function M.clear_pull()
     if not fskv then return false, "fskv 不可用", false end
-    local ok, v = pcall(fskv.get, K_PULL)
-    if not ok then return false, "读 ds_pull 失败: " .. tostring(v), false end
-    if v == nil or v == "" then return true, nil, false end
-    fskv.set(K_PULL, "")
-    json_cache[K_PULL] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
-    cfg_ver = cfg_ver + 1     -- 12-fix-9: 版本号也要涨(别名映射缓存靠它失效)
-    if fskv.save then pcall(fskv.save) end
-    return true, nil, true
+    local wrote, why = slot_clear(K_PULL, SHARDED[K_PULL])
+    if why then return false, "清 ds_pull 失败: " .. why, false end
+    if wrote and fskv.save then pcall(fskv.save) end
+    return true, nil, wrote
 end
 
 
@@ -573,14 +810,10 @@ end
 
 function M.clear_infer()
     if not fskv then return false, "fskv 不可用", false end
-    local ok, v = pcall(fskv.get, K_INFER)
-    if not ok then return false, "读 ds_infer 失败: " .. tostring(v), false end
-    if v == nil or v == "" then return true, nil, false end
-    fskv.set(K_INFER, "")
-    json_cache[K_INFER] = nil
-    cfg_ver = cfg_ver + 1
-    if fskv.save then pcall(fskv.save) end
-    return true, nil, true
+    local wrote, why = slot_clear(K_INFER, SHARDED[K_INFER])
+    if why then return false, "清 ds_infer 失败: " .. why, false end
+    if wrote and fskv.save then pcall(fskv.save) end
+    return true, nil, wrote
 end
 
 
@@ -588,14 +821,10 @@ end
 
 function M.clear_poll()
     if not fskv then return false, "fskv 不可用", false end
-    local ok, v = pcall(fskv.get, K_POLL)
-    if not ok then return false, "读 ds_poll 失败: " .. tostring(v), false end
-    if v == nil or v == "" then return true, nil, false end
-    fskv.set(K_POLL, "")
-    json_cache[K_POLL] = nil
-    cfg_ver = cfg_ver + 1
-    if fskv.save then pcall(fskv.save) end
-    return true, nil, true
+    local wrote, why = slot_clear(K_POLL, SHARDED[K_POLL])
+    if why then return false, "清 ds_poll 失败: " .. why, false end
+    if wrote and fskv.save then pcall(fskv.save) end
+    return true, nil, wrote
 end
 
 return M

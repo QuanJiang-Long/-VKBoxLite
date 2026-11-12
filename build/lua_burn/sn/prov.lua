@@ -25,6 +25,8 @@ if UART_ID == nil then UART_ID = 4 end
 
 
 local rx_buf, rx_parts, rx_len = "", {}, 0
+
+local rx_lost
 local cb_registered, loop_started = false, false
 
 
@@ -180,16 +182,48 @@ end
 
 
 
+local function cat2(a, b) return a .. b end
+
 local function rx_merge()
     if #rx_parts == 0 then return end
     local has_line = false
     for i = 1, #rx_parts do
         if rx_parts[i]:find("\n", 1, true) then has_line = true break end
     end
-    if not has_line then return end
-    local joined = #rx_parts == 1 and rx_parts[1] or table.concat(rx_parts)
+    if not has_line then return true end
+
+
+
+
+
+
+
+    local joined
+    if #rx_parts == 1 then
+        joined = rx_parts[1]
+    else
+        local ok, s = pcall(table.concat, rx_parts)
+        if not ok or type(s) ~= "string" then
+            local bytes = rx_len
+            rx_parts, rx_len = {}, 0
+            return false, "concat fail, drop " .. bytes .. "B"
+        end
+        joined = s
+    end
     rx_parts, rx_len = {}, 0
-    rx_buf = rx_buf == "" and joined or rx_buf .. joined
+
+    if rx_buf == "" then
+        rx_buf = joined
+        return true
+    end
+    local ok2, nb = pcall(cat2, rx_buf, joined)
+    if not ok2 or type(nb) ~= "string" then
+
+
+        return false, "cat fail, drop " .. #joined .. "B"
+    end
+    rx_buf = nb
+    return true
 end
 
 function M.poll()
@@ -198,7 +232,8 @@ function M.poll()
 
 
 
-        rx_merge()
+        local okr, why = rx_merge()
+        if not okr then rx_lost = why end
         local nl = rx_buf:find("\n", 1, true)
         if not nl then break end
         local end_pos = nl - 1
@@ -220,6 +255,14 @@ function M.poll()
             n = n + 1
         end
     end
+
+
+
+    if rx_lost then
+        log.error("prov", "rx lost:", rx_lost)
+        pcall(reply, "RET:FAIL:rx 丢弃, 请重发")
+        rx_lost = nil
+    end
     return n
 end
 
@@ -230,6 +273,10 @@ local function rx_push(data)
     rx_len = rx_len + #data
     if rx_len + #rx_buf > MAX_BUF then
 
+
+
+
+        rx_lost = "oversize, drop " .. (rx_len + #rx_buf) .. "B > " .. MAX_BUF
         rx_parts, rx_len, rx_buf = {}, 0, ""
     end
 end

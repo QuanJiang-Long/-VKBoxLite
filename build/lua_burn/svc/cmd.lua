@@ -171,6 +171,17 @@ local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
 
 
 
+local function mode_seg(key, list)
+    if type(list) ~= "table" or #list == 0 then return nil end
+    local parts = {}
+    for i = 1, #list do
+        parts[i] = tostring(list[i]):gsub(";", " ")
+    end
+    return key .. ":" .. table.concat(parts, "+")
+end
+
+
+
 
 
 
@@ -317,14 +328,21 @@ local function reg_cmds()
         if v == "stop" then v = MODE_IDLE end
 
 
-        local ok, msg, cleared = ctrl.switch_mode(v)
+        local ok, msg, cleared, notcleared = ctrl.switch_mode(v)
         if not ok then return M.reply("RET:FAIL:MODE:" .. tostring(msg)) end
 
 
-        if cleared and #cleared > 0 then
-            M.reply("RET:MODE=OK;cleared:" .. table.concat(cleared, "+"))
-        else
+
+
+
+        local segs = {}
+        local s1, s2 = mode_seg("cleared", cleared), mode_seg("notcleared", notcleared)
+        if s1 then segs[#segs + 1] = s1 end
+        if s2 then segs[#segs + 1] = s2 end
+        if #segs == 0 then
             M.reply("RET:MODE=OK")
+        else
+            M.reply("RET:MODE=OK;" .. table.concat(segs, ";"))
         end
     end)
 
@@ -804,16 +822,29 @@ local function reg_debug_cmds()
 
 
 
+
+
+
+
+
+
     M.reg("R:MEM", function()
         local p = {}
+        p[#p + 1] = "mode:" .. tostring(ctrl.get_mode())
         p[#p + 1] = string.format("lua:%dK", math.floor(collectgarbage("count")))
         if rtos then
+
 
 
             for _, k in ipairs({ "lua", "sys" }) do
                 local ok, total, used = pcall(rtos.meminfo, k)
                 if ok and type(total) == "number" and type(used) == "number" then
-                    p[#p + 1] = string.format("%s:%d/%d", k, used, total)
+                    if k == "sys" then
+                        p[#p + 1] = string.format("%s:%d/%dK", k,
+                            math.floor(used / 1024), math.floor(total / 1024))
+                    else
+                        p[#p + 1] = string.format("%s:%d/%d", k, used, total)
+                    end
                 end
             end
         end
@@ -853,6 +884,11 @@ local function reg_debug_cmds()
 
     M.reg("W:FS", function()
         local p, verdict = {}, "?"
+
+
+
+
+
 
 
 
