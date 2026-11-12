@@ -468,8 +468,34 @@ async function saveCfg() {
     if (bad) { toast(bad); status('配置无效：' + bad, false); return; }
     const regs = collectRegs(pre);
     if (regs.length === 0) { toast('参数列表为空，请先添加寄存器'); return; }
-    const dup = regs.some((r, i) => regs.findIndex(x => x.addr === r.addr && x.name === r.name) !== i);
-    if (dup) { toast('存在重复的寄存器标识符，请检查'); return; }
+    // 标识符重复拦在这一步(不给确认)。设备端的数据点【按标识符当键】存
+    // (firmware/data/collector.lua 的 dataCache[alias])，两个点同名 = 只有一格，
+    // 后采到的顶掉先采到的：R:VAL 少一个点、前端两行显示同一个值、U4 只上报一个。
+    // 老判断写成 addr+name 双键，"addr 不同但同名"的两行正好漏过 ——
+    // 2026-11-12 现场那张 52 行表(addr=39/40 都叫 A41、A40 缺号)就是这么进的设备，
+    // 一路 RET:CFG=OK，值全是 0 才没露馅。
+    const dupTbody = E(pre, 'paramTbody');
+    if (dupTbody.querySelectorAll) {
+      const nameRows = {};
+      dupTbody.querySelectorAll('tr').forEach((tr, i) => {
+        if (!tr.querySelector('.c-addr')) return;            // 空表提示行
+        const inp = tr.querySelector('.c-name');
+        const nm = inp.value.trim();
+        (nameRows[nm] = nameRows[nm] || []).push({ n: i + 1, inp });
+      });
+      const dups = Object.keys(nameRows).filter(nm => nameRows[nm].length > 1);
+      if (dups.length) {
+        // 把重复的格子涂红：光在状态栏报一次，用户回头还是不知道改哪一行
+        dups.forEach(nm => nameRows[nm].forEach(r => {
+          r.inp.style.borderColor = '#e74c3c';
+          r.inp.title = '标识符 "' + nm + '" 被 ' + nameRows[nm].length + ' 行共用';
+        }));
+        const msg = '标识符重复：' + dups.map(nm => '"' + nm + '"(' +
+          nameRows[nm].map(r => '第 ' + r.n + ' 行').join('、') + ')').join('；') +
+          ' —— 同名点位在设备端会互相顶掉，改完再保存';
+        toast(msg); status('配置无效：' + msg, false); return;
+      }
+    }
     // 32/64 位类型：寄存器个数必须是宽度的整数倍
     const W = { uint32: 2, int32: 2, float32: 2, uint64: 4, int64: 4, float64: 4 };
     for (const r of regs) {
