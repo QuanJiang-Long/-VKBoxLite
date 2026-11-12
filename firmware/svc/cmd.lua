@@ -853,10 +853,44 @@ local function reg_debug_cmds()
     --      的结论, 正是这次要避开的第二个坑。/luadb 是只读烧录区, 不试。
     M.reg("W:FS", function()
         local p, verdict = {}, "?"
-        local io_lib, os_lib = rawget(_G, "io"), rawget(_G, "os")
+        -- ⚠️ 取库的口径必须和业务代码【一模一样】。11-12 现场这条报的是
+        --   `open:no-lib fsstat:no-lib exist:no-lib fsize:no-lib rm:no-lib ren:no-lib`
+        --   —— 六个字段齐刷刷 no-lib。可 `ren:` 那格查的是【os 库】, 而
+        --   `os.clock()`/`os.time()` 是这台设备每一轮轮询都在用的
+        --   (bus/mon.lua、data/collector.lua:98 那个 ts 就是它写的)。
+        --   原写法 `rawget(_G, "io")` 绕过了 _G 的 __index(库挂在惰性加载上时
+        --   rawget 什么也看不见) ⇒ 一条【假阴性】, 拿它下"路线 B 死了"的结论
+        --   会白扔掉整条 littlefs 路。
+        -- 现在三种口径一起报, 一次把机制钉死(顺序: env 在前, 日志只打前 80 字节):
+        --   env  直接引用 ENV[name] —— 与 os.clock() 同一条解析路径, 判定以它为准
+        --   raw  rawget(ENV, name) —— 库是否真在主全局表里(原探针的口径)
+        --   try  util.try(name) —— 项目取库的现役写法(_G 索引 + require 兜底)
+        local ENV = _ENV or _G -- 5.1 上没有 _ENV(取到 nil), 退回 _G
+        local function env_get(n)
+            local ok, v = pcall(function() return ENV[n] end)
+            if not ok then return nil, "raise" end
+            return v, type(v)
+        end
+        local function look(n)
+            local _, t = env_get(n)
+            local tr = util.try(n)
+            return n .. "(env:" .. t .. " raw:" .. type(rawget(ENV, n))
+                .. " try:" .. type(tr) .. ")"
+        end
+        p[#p + 1] = look("io")
+        p[#p + 1] = look("os")
+        local io_lib = (env_get("io"))
+        local os_lib = (env_get("os"))
+        -- 库可能是 table 也可能是 userdata(带 __index 的库对象), 两种都算"有库"
+        local function is_lib(t)
+            return type(t) == "table" or type(t) == "userdata"
+        end
         local function fn(t, n)
-            if type(t) ~= "table" then return "no-lib" end
-            return tostring(type(t[n]))
+            if not is_lib(t) then return "no-lib" end
+            -- 索引本身也可能 raise(userdata 的 __index 是 C 函数), 不能让它冒出来
+            local ok, v = pcall(function() return t[n] end)
+            if not ok then return "index-raise" end
+            return tostring(type(v))
         end
         p[#p + 1] = "open:" .. fn(io_lib, "open")
         p[#p + 1] = "fsstat:" .. fn(io_lib, "fsstat")
@@ -876,7 +910,7 @@ local function reg_debug_cmds()
             return out
         end
         local space = "?"
-        if type(io_lib) == "table" and type(io_lib.fsstat) == "function" then
+        if fn(io_lib, "fsstat") == "function" then
             local pack = { pcall(io_lib.fsstat, "/") }
             local n = nums(pack)
             if #pack >= 1 and pack[1] and #n >= 2 then
@@ -902,7 +936,7 @@ local function reg_debug_cmds()
 
         -- 真写一次: tmp → 校验长度 → rename → 校验 → 删
         local blob = nil
-        if type(io_lib) ~= "table" or type(io_lib.open) ~= "function" then
+        if fn(io_lib, "open") ~= "function" then
             -- 没有 io.open 就谈不上写, 别去 alloc —— 报成"申请不到 8K"
             -- 会把结论带歪(那是内存问题, 这是固件没编 io 库, 下一步完全不同)
             p[#p + 1] = "blob:skip"
@@ -929,7 +963,7 @@ local function reg_debug_cmds()
                             r.w = wok and "ok" or "write-fail"
                             local sz = io_lib.fileSize and io_lib.fileSize(tmp) or -1
                             r.wsz = tostring(sz)
-                            if type(os_lib) == "table" and type(os_lib.rename) == "function" then
+                            if fn(os_lib, "rename") == "function" then
                                 r.ren = tostring(os_lib.rename(tmp, bin))
                             else
                                 r.ren = "no-rename"

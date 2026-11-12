@@ -28,8 +28,14 @@ package.preload["util"] = function()
         rtos = { meminfo = function() return 307192, 50000, 60000 end },
     }
     return { log = function() return L end,
-             get = function(n) return libs[n] end,
-             try = function(n) return libs[n] end }
+             -- 与真 util.get/try 同一条口径: 先【索引】_G(会走 __index 惰性加载),
+             -- 再 require 兜底。探针原来用的是 rawget, 那条路看不见 __index
+             get = function(n)
+                 local v = libs[n] or _G[n]
+                 if not v then error("no lib " .. tostring(n)) end
+                 return v
+             end,
+             try = function(n) return libs[n] or _G[n] end }
 end
 package.preload["core/config"] = function() return { BAUD = 9600 } end
 package.preload["sn/sn"] = function()
@@ -95,15 +101,31 @@ end
 local function run(opts)
     writes = {}
     local io = make_io(opts)
-    _G.io = io
-    _G.os = { rename = function(a, b)
+    local os_t = { rename = function(a, b)
         if opts.no_rename or io == nil then return nil end
         if io._files[a] == nil then return nil end
         io._files[b] = io._files[a]; io._files[a] = nil
         return true
     end }
+    local gm = getmetatable(_G)
+    if opts.lazy then
+        -- 11-12 现场那台的形状: 库【没有 rawset 进 _G】, 只有 _G 的 __index
+        -- 惰性提供 —— 于是 rawget(_G,"io") 什么都看不见, 六个字段齐刷刷 no-lib,
+        -- 连每轮都在用的 os 也报成"没有库"。探针必须在这种固件上照样给出结论。
+        _G.io, _G.os = nil, nil
+        setmetatable(_G, { __index = function(_, k)
+            if k == "io" then return io end
+            if k == "os" then return os_t end
+            return nil
+        end })
+    else
+        -- io 库也可能是 userdata(带 __index 的库对象), 不能只认 table
+        _G.io = opts.io_userdata and real_io.stdout or io
+        _G.os = os_t
+    end
     local ok = pcall(cmd.handle, "W:FS")
     local out = table.concat(writes, "")
+    setmetatable(_G, gm)
     _G.io, _G.os = real_io, real_os
     return ok, out, io
 end
@@ -175,6 +197,26 @@ check("④ rename 失败不崩", ok, out)
 check("④ rename 失败 → 不给 B:YES", out:find("=>B:YES", 1) == nil, out)
 check("④ rename 失败 → 读不回", out:find("rsz=read%-fail", 1) ~= nil, out)
 check("④ 失败也要清 tmp(不留半个文件)", io4._files["/vk_probe.tmp"] == nil)
+
+------------------------------------------------------------------
+-- ⑤ 现场那台的形状: 库挂在 _G 的 __index 上, rawget 什么都看不见
+--    这条是 11-12 那条 W:FS 的回归测试 —— 当时六个字段齐刷刷 no-lib
+--    (连每轮都在用的 os 也算"没有库"), 拿它判路线 B 生死是假阴性。
+------------------------------------------------------------------
+ok, out = run({ lazy = true })
+check("⑤ 只有 __index 能取到库 → 不崩", ok, out)
+check("⑤ 照样判出 B:YES", out:find("=>B:YES", 1) ~= nil, out)
+check("⑤ open 探得到(不是 no-lib)", out:find("open:function", 1) ~= nil, out)
+check("⑤ os 也探得到(六个 no-lib 的签名不能复现)", not out:find("no%-lib", 1), out)
+check("⑤ 三口径如实报出 raw 与 env 的差别",
+    out:find("io%(env:table raw:nil try:table%)", 1) ~= nil, out)
+
+------------------------------------------------------------------
+-- ⑥ 库是 userdata(带 __index 的库对象)时也不能说成"没有库"
+------------------------------------------------------------------
+ok, out = run({ io_userdata = true })
+check("⑥ userdata 不崩", ok, out)
+check("⑥ userdata 不报 no-lib", not out:find("no%-lib", 1), out)
 
 if failed > 0 then
     print(string.format("test_cmd_fs: %d/%d 失败", failed, checked))
