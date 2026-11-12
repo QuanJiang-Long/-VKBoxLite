@@ -25,6 +25,8 @@ if UART_ID == nil then UART_ID = 4 end
 --   再抄一份 5KB 就 not enough memory。分片攒着, 只在真攒出完整一行时并
 --   一次, 单分片时一次都不抄。
 local rx_buf, rx_parts, rx_len = "", {}, 0
+-- 这一批被丢掉的原因(超限/OOM), 由 M.poll 取走并如实回一次, 不静默吞
+local rx_lost
 local cb_registered, loop_started = false, false
 
 -- V1-1 修复 (2026-11-06): SN 烧写期间暂停 INFER_PUSH 推送
@@ -180,16 +182,48 @@ end
 
 -- 把攒下的分片并进 rx_buf —— 但只在【确实攒出了完整一行】时才并, 否则
 -- 继续攒着(大命令逐片到达, 提前并等于白抄一遍)
+local function cat2(a, b) return a .. b end
+
 local function rx_merge()
     if #rx_parts == 0 then return end
     local has_line = false
     for i = 1, #rx_parts do
         if rx_parts[i]:find("\n", 1, true) then has_line = true break end
     end
-    if not has_line then return end
-    local joined = #rx_parts == 1 and rx_parts[1] or table.concat(rx_parts)
+    if not has_line then return true end
+    -- ⚠️ 并串这一步【自己】就是最容易 OOM 的地方: 一条 128 点的 W:CFG 是十几
+    --   KB 一整串, 池子高水位时 table.concat 直接抛 "not enough memory for
+    --   buffer allocation"。11-12 现场那条异常就是从 M.poll 的 while 顶上跑出去
+    --   打死整个 VM 的(prov.lua:190 → E/mem → Lua VM exit!! reboot in 15000ms),
+    --   而紧下面调 dispatch 那行是 pcall 保护的 —— 保护点恰好漏在了最该保护的
+    --   那步之外。现在并不动就整批丢掉并如实回报, 别让 VM 陪葬。
+    --   丢的只是【还没并进来的分片】, rx_buf 里已有的行不受影响。
+    local joined
+    if #rx_parts == 1 then
+        joined = rx_parts[1]
+    else
+        local ok, s = pcall(table.concat, rx_parts)
+        if not ok or type(s) ~= "string" then
+            local bytes = rx_len
+            rx_parts, rx_len = {}, 0
+            return false, "concat fail, drop " .. bytes .. "B"
+        end
+        joined = s
+    end
     rx_parts, rx_len = {}, 0
-    rx_buf = rx_buf == "" and joined or rx_buf .. joined
+    -- rx_buf 非空时这次拼接又是一整份拷贝, 同样会抛
+    if rx_buf == "" then
+        rx_buf = joined
+        return true
+    end
+    local ok2, nb = pcall(cat2, rx_buf, joined)
+    if not ok2 or type(nb) ~= "string" then
+        -- rx_buf 那份是已经在手上的, 不该跟着陪葬: 只丢并进不来的 joined,
+        -- 里面那条命令丢了就丢了, 由上面的如实回报告诉前端重发
+        return false, "cat fail, drop " .. #joined .. "B"
+    end
+    rx_buf = nb
+    return true
 end
 
 function M.poll()
@@ -198,7 +232,8 @@ function M.poll()
         -- 每轮都先并进新分片: 派活(dispatch)期间 handler 可能让出 CPU 很久
         --   (W:CFG 重启轮询要 sys.wait(500)), 那期间到的字节就躺在 rx_parts 里,
         --   并进来才能和老代码一样在同一轮 poll 里接着切下一行
-        rx_merge()
+        local okr, why = rx_merge()
+        if not okr then rx_lost = why end
         local nl = rx_buf:find("\n", 1, true)
         if not nl then break end
         local end_pos = nl - 1
@@ -220,6 +255,14 @@ function M.poll()
             n = n + 1
         end
     end
+    -- 一轮只报一次: 分片已经丢掉, 逐片刷应答会把串口堵死。如实报的价值在于
+    --   前端当场就知道"这条没进去、重发", 不用再干等到超时(11-12 那次崩之前
+    --   现场看到的正是"发了没回")
+    if rx_lost then
+        log.error("prov", "rx lost:", rx_lost)
+        pcall(reply, "RET:FAIL:rx 丢弃, 请重发")
+        rx_lost = nil
+    end
     return n
 end
 
@@ -230,6 +273,10 @@ local function rx_push(data)
     rx_len = rx_len + #data
     if rx_len + #rx_buf > MAX_BUF then
         -- 超限只能整批丢: 命令以 \n 结尾, 留着半行也没法补
+        -- ⚠️ 丢掉这件事【必须让用户知道】(和上面并串失败同一个道理):
+        --   以前静默丢完, 前端只看见"发了没回", 一路等到超时。11-10 那次
+        --   90 点 W:CFG 就是这么被读成"设备不理人了"
+        rx_lost = "oversize, drop " .. (rx_len + #rx_buf) .. "B > " .. MAX_BUF
         rx_parts, rx_len, rx_buf = {}, 0, ""
     end
 end

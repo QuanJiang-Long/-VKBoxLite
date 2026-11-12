@@ -13,6 +13,9 @@
 --   3) 处理期间的yield(W:CFG 重启轮询要 sys.wait(500))里新到的字节
 --      不丢、不乱序 —— 这条是 re-entrancy, 最容易改坏
 --   4) 超过 MAX_BUF 整批丢, 之后来了完整一行照样能解析
+--   5) 2026-11-12: 并串那一步【自己】分配失败时不许打死 VM, 而且必须如实
+--      回一条 RET:FAIL —— 现场那次是 "prov.lua:190: not enough memory for
+--      buffer allocation" 直接 Lua VM exit, 整机 15 秒后重启
 --
 -- 跑法: tools\run_lua_tests.bat test_prov_rx.lua
 
@@ -178,6 +181,47 @@ do
     local n = prov.poll()
     check("空行/纯空白行跳过", n == 1 and fed[1] == "R:BOOTMODE",
         "n=" .. n .. " " .. table.concat(fed, ","))
+end
+
+-- ===== 6) 并串时内存不足: 【不许打死 VM】, 而且要说清这条没进去 =====
+-- 现场那次(prov.lua:190)是真的整机重启:
+--   E/mem memory allocation failed total 307192, used 292688, alloc ...
+--   prov.lua:190: not enough memory for buffer allocation
+--   Lua VM exit!! reboot in 15000ms
+-- 老代码把 rx_merge 放在 dispatch 那层 pcall 【之外】, 而 table.concat 正是
+--   最可能抛的那一步 —— 保护点漏在了最该保护的地方。这里把 table.concat
+--   换成"一定抛"来复现 raise 的落点(真机上抛的是 C 层的分配失败, 位置一样)
+do
+    reset()
+    local real = table.concat
+    -- 只对【大请求】抛, 和小请求分不开 —— 真机上就是这样: max:2048 时
+    --   要 6KB 的那次失败, 要 40B 的照常成功。把 concat 全换成"一定抛"
+    --   会连测试自己的日志拼接一起打断, 那就是替身不像了
+    table.concat = function(t, ...)
+        local sz = 0
+        for i = 1, #t do if type(t[i]) == "string" then sz = sz + #t[i] end end
+        if sz > 2048 then error("not enough memory for buffer allocation") end
+        return real(t, ...)
+    end
+    local big = string.rep("1,", 1500)   -- 3000B 一片
+    prov._rx_feed('W:CFG={"regs":[' .. big)
+    prov._rx_feed(big .. '0]}\r\n')
+    local pok, perr = pcall(prov.poll)   -- 必须是"调用返回", 不是"整个进程死掉"
+    table.concat = real
+    check("并串失败不冒到外面(以前这条打死 VM)", pok, tostring(perr))
+    check("并串失败不派活", #fed == 0, "派了 " .. table.concat(fed, ","))
+    local rep = table.concat(uart_writes, "")
+    check("如实回了 RET:FAIL(前端不用干等超时)",
+        rep:find("RET:FAIL", 1, true) ~= nil, string.format("%q", rep))
+    check("一轮只回一次(不逐片刷串口)", #uart_writes == 1,
+        "写了 " .. #uart_writes .. " 段: " .. string.format("%q", rep))
+    local errs = 0
+    for _, l in ipairs(logs) do if l:find("rx lost", 1, true) then errs = errs + 1 end end
+    check("设备日志留下一句查得到的话", errs == 1, "找到 " .. errs .. " 条")
+    -- 丢完之后设备必须还能干活(分片已经清空, 不是卡在半个缓冲里)
+    reset()
+    feed_lines("R:STAT")
+    check("并串失败后下一行照常收", fed[1] == "R:STAT", tostring(fed[1]))
 end
 
 if failed > 0 then

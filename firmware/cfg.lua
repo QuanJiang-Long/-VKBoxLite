@@ -46,11 +46,23 @@ local function brief(v, n)
     return s
 end
 
-local function kv_get(k)
-    if not fskv then return nil end
+-- 读一个槽的原文, 把【读不出来】和【没写过】分开。
+--   ⚠️ 为什么单列这一步: 老固件留下的 ds_poll 是整份配置一大块(现场实测
+--   3791B), 而池子高水位时只给得出 2048 —— 那一次 fskv.get 是【抛异常】的,
+--   不是返回 nil。原来的 kv_get 把两者一起变成 nil, 于是"槽里明明有 56 行"
+--   被读成"从没配过"(11-12 现场第二个假话)。poll_src 那一族更糟: 它直接
+--   fskv.get, 抛出来没人接, 一路冒到 prov 的 pcall 才算停。
+-- 返回 (值或 nil, 原因或 nil)
+local function kv_read(k)
+    if not fskv then return nil, nil end
     local ok, v = pcall(fskv.get, k)
-    if ok and type(v) == "string" and v ~= "" then return v end
-    return nil
+    if not ok then return nil, "读不出来: " .. brief(v) end
+    if v == nil or v == "" then return nil, nil end
+    return v, nil
+end
+
+local function kv_get(k)
+    return (kv_read(k))
 end
 
 -- ⚠️ 12-fix-3 (2026-10-28): 配置解码缓存。必须声明在 kv_set 之前 ——
@@ -73,7 +85,7 @@ function M.version() return cfg_ver end
 --   写成 not ret 会把所有正常保存都判成失败。
 local FSKV_VALUE_MAX = 4096
 
-local function kv_set(k, s)
+local function kv_set(k, s, noflush)
     if not fskv then return false, "no fskv" end
     local n = type(s) == "string" and #s or 0
     if n > FSKV_VALUE_MAX then
@@ -92,7 +104,9 @@ local function kv_set(k, s)
     -- 清缓存+涨版本号等于白让所有下游解码缓存失效一遍
     json_cache[k] = nil   -- 12-fix-3: 写盘了, 解码缓存必须失效
     cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号跟着涨(别名映射缓存靠它失效)
-    if fskv.save then pcall(fskv.save) end
+    -- noflush: 分片写要连写好几个键, 逐键 flush 等于一次保存擦一遍 flash。
+    --   中间各段传 true, 由 shards_save 在"提交"那一下统一 flush
+    if fskv.save and not noflush then pcall(fskv.save) end
     return true
 end
 
@@ -115,26 +129,187 @@ end
 --      先确认那张表不在任何缓存里。
 --   ⚠️ 写盘(kv_set / reset_user / clear_pull)必须清缓存。
 
-local function load_json(k, default)
+-- ====================== 分片存储 (2026-11-12) ======================
+-- 为什么要拆段: 真机量到的是【两堵墙叠在一起】, 而且第二堵才是致命的。
+--   ① fskv 单值 4096B 硬顶 —— 128 点整份 JSON ≈ 8.6KB, 一个键装不下。
+--   ② 连续块: 56 点跑起来之后 R:MEM 实测 max 只剩 2048B(八条读数一模一样),
+--      可"读一次配置"要 fskv.get 出一整块 3791B、"写一次"要 json.encode 出
+--      同样大的一整块。11-12 现场三个后果全从这里来:
+--        R:CFG     → RET:FAIL:CFG:内存/内部异常: not enough memory(配置读不回)
+--        W:MODE=idle → alloc 3791 raise 被 pcall 吃掉, 回 OK 却没清掉
+--        W:CFG 导入  → prov.lua:190 rx_merge 的 concat OOM → Lua VM exit
+--      同一天 W:FS 证明 littlefs 能写(B:YES, 108K/128K), 但高水位那次
+--      string.rep(8192) 直接 FAIL —— 【换介质没用】, littlefs 的 read("*a")
+--      照样要一整块。唯一的出路是让每一次分配都不超过一段。
+-- 段宽为什么是 1024 而不是贴着 2048: 那 2048 是最坏读数的上限, 段内还要
+--   放解码出来的行表本身; 留一半余量。行宽有 normalize 兜着(validate_reg),
+--   单行不会超, 所以"行数上限 + 字节上限"两个闸门里字节闸先行。
+-- 写序(不能省): header(st="w", n=N) → 各段 → header(st="r", n=N)。
+--   断电停在任何一步, 读侧看见 st~="r" 就知道这份配置不完整, 报原因而不是
+--   拿半套寄存器表去起轮询。代价是多一次小写, 换来"保存一半不坏"。
+--   ⚠️ 中途【写失败】(段写不进去)也是同一条路: 老 header 已经被 st=w 顶掉,
+--   前面几段又已经换成新内容 —— 这时候回滚救不回来(旧段已经没了), 唯一不能
+--   丢的是"说出来"。所以宁可下一次读取报"分片未提交", 也不能把新旧混在一起
+--   当有效配置: 用户会看见设备在采一批他从来没配过的地址。
+local SHARD_ROWS = 16
+local SHARD_MAX = 1024
+local SHARD_VER = 1
+local SHARD_W, SHARD_R = "w", "r"
+
+local function shard_key(k, i) return k .. "." .. i end
+
+local function dec_json(s)
+    if not s or not json then return nil end
+    local ok, t = pcall(json.decode, s)
+    if ok and type(t) == "table" then return t end
+    return nil
+end
+
+-- "是不是分片格式"只看 header 那两个字段: 老的整份配置里没有 v, 所以这个
+--   判断一次段都不用读。返回 (段数, st) 或 nil
+local function shard_of(h)
+    if type(h) ~= "table" or h.v ~= SHARD_VER then return nil end
+    local n = tonumber(h.n)
+    if not n then return nil end
+    return math.floor(n), tostring(h.st)
+end
+
+-- 逐段取回, 拼成 t.regs。失败一律带原因回来 —— 调用方必须把原因传出去,
+--   不许再退回"当成没写过"那条老路(那就是 11-12 那两个假话的根)
+local function shards_load(k, t)
+    local n, st = shard_of(t)
+    if st ~= SHARD_R then
+        return nil, "分片未提交(应有 " .. n .. " 段, st=" .. st .. ")"
+    end
+    if not fskv then return nil, "fskv 不可用, 段取不到" end
+    local rows = {}
+    for i = 1, n do
+        -- 这里不用 kv_get: 它把"读不出来(raise)"和"没写过(\"\")"并成 nil。
+        --   段只有 1KB, 正常情况下两者都不会发生, 真发生时"分片不全"和
+        --   "分片读不出来"是两个不同的排查方向, 别让人往"flash 掉了"上查
+        local ok, cs = pcall(fskv.get, shard_key(k, i))
+        if not ok then return nil, "分片" .. i .. "读不出来: " .. brief(cs) end
+        if cs == nil or cs == "" then return nil, "分片不全(" .. (i - 1) .. "/" .. n .. ")" end
+        local ct = dec_json(cs)
+        if ct == nil then return nil, "分片" .. i .. "解码失败" end
+        for j = 1, #ct do rows[#rows + 1] = ct[j] end
+    end
+    t.regs = rows
+    return t
+end
+
+local function put_json(k, v, noflush)
+    local ok, s = pcall(json.encode, v)
+    if not ok then return false, "encode fail: " .. brief(s) end
+    if not s then return false, "encode fail(无返回)" end
+    if #s > FSKV_VALUE_MAX then
+        return false, "段 " .. #s .. "B 超 fskv 单值上限 " .. FSKV_VALUE_MAX .. "B"
+    end
+    return kv_set(k, s, noflush)
+end
+
+-- 按行收段: 每行先单独 encode 量一次尺寸(几百字节的小分配), 够了就封段。
+--   段字节由 json.encode(整段) 再产一次 —— 一次分配正好一个段宽。
+local function shards_save(k, t)
+    local rows = (type(t.regs) == "table") and t.regs or {}
+    local segs, cur, cur_sz = {}, {}, 2
+    local function close_seg()
+        if #cur == 0 then return true end
+        segs[#segs + 1] = cur
+        cur, cur_sz = {}, 2
+        return true
+    end
+    for i = 1, #rows do
+        local ok, e = pcall(json.encode, rows[i])
+        -- ⚠️ "encode fail" 这个前缀和 save_json 那边一样, 一个字都不能动:
+        --   上位机(sn-tools/pc_tool)按它认这条失败。分片把一次大编码拆成
+        --   逐行小编码, 失败点挪了, 认法不能跟着挪
+        if not ok then return false, "encode fail: " .. brief(e) end
+        if not e then return false, "encode fail(无返回)" end
+        -- 加这行会撑破段宽(或撑破行数)就先封段, 再把它起成新段的第一行
+        if #cur > 0 and (cur_sz + #e + 1 > SHARD_MAX or #cur >= SHARD_ROWS) then
+            close_seg()
+        end
+        cur[#cur + 1] = rows[i]
+        cur_sz = cur_sz + #e + (#cur > 1 and 1 or 0)
+    end
+    close_seg()
+
+    local n = #segs
+    local head = {}
+    for key, val in pairs(t) do
+        if key ~= "regs" then head[key] = val end
+    end
+
+    -- 旧段数(只为回收残段): 上一份本来就是分片才有, 老格式/没写过就是 0
+    local old_n = 0
+    local oh = dec_json(kv_get(k))
+    if oh then
+        local on = shard_of(oh)
+        if on and on > 0 then old_n = on end
+    end
+
+    head.v, head.n, head.st = SHARD_VER, n, SHARD_W
+    local ok1, err1 = put_json(k, head, true)
+    if not ok1 then return false, err1 end
+    for i = 1, n do
+        local ok2, err2 = put_json(shard_key(k, i), segs[i], true)
+        if not ok2 then
+            return false, "分片" .. i .. "/" .. n .. "写入失败: " .. tostring(err2)
+        end
+    end
+    head.st = SHARD_R
+    local ok3, err3 = put_json(k, head) -- 提交: 只有这一次 flush
+    if not ok3 then return false, "分片提交失败: " .. tostring(err3) end
+
+    -- 残段(n < old_n 时多出来的那几把)清掉。读侧只认 header 里的 n, 所以
+    --   残段不影响正确性, 但会白占 fskv 空间; 清失败也不该让保存失败
+    for i = n + 1, old_n do pcall(fskv.set, shard_key(k, i), "") end
+    return true
+end
+
+local function load_json(k, default, shard)
     local cached = json_cache[k]
     if cached ~= nil then return cached end
-    local s = kv_get(k)
+    local s, rerr = kv_read(k)
+    if rerr then
+        -- 读不出来 = 这一次没法知道槽里有什么。不缓存(缓存了等于把一次瞬时的
+        --   内存不足固化成"这台设备从没配过"), 把原因原样交回调用方
+        return nil, rerr
+    end
     if not s or not json then
         json_cache[k] = default
         return default
     end
-    local ok, t = pcall(json.decode, s)
-    if ok and type(t) == "table" then
-        json_cache[k] = t
-        return t
+    local t = dec_json(s)
+    if t == nil then
+        log.warn("cfg", "decode fail", k)
+        json_cache[k] = default
+        return default
     end
-    log.warn("cfg", "decode fail", k)
-    json_cache[k] = default
-    return default
+    -- 没开分片、或者那份还是老的"整份 JSON 一个键": 原样返回。老格式不做
+    --   双写兼容层 —— 读到就用, 下一次保存自然迁成分片, 迁移期最长一次保存
+    -- ⚠️ 这一整步【必须包在 pcall 里】: 判断"是不是分片"要读 header 的字段,
+    --   而读字段这一步在池子见底时一样会 raise。load_json 的调用方里
+    --   main.lua 是【开机】用的, 抛出去等于设备起不来(以前 raise 只可能发生在
+    --   归一化里, 那一层有 pcall 兜着)
+    local pok, c, perr = pcall(function()
+        if not shard or not shard_of(t) then return t end
+        return shards_load(k, t)
+    end)
+    if not pok then
+        -- raise: 连"这是不是分片"都没判出来。这和"配置内容非法"是两句话,
+        --   用和归一化异常同一个标签, 现场看到就知道是池子的问题不是表的问题
+        return nil, "内存/内部异常: " .. brief(c)
+    end
+    if c == nil then return nil, perr end
+    json_cache[k] = c
+    return c
 end
 
-local function save_json(k, t)
+local function save_json(k, t, shard)
     if not json then return false, "no json lib" end
+    if shard then return shards_save(k, t) end
     local ok, s = pcall(json.encode, t)
     -- ⚠️ "encode fail" 这个前缀一个字都不能动: 上位机按它认这条失败。
     --   后面必须跟真原因 —— 11-12 现场第二次保存死在这里(不是 fskv):
@@ -418,17 +593,33 @@ end
 -- 三套配置(poll/pull/sys)的读写除键/归一化/默认值外完全同构,
 -- 表驱动避免两处要同步改。load 失败静默退回(启动路径崩设备起不来),
 -- save 失败必须把原因带回去给 W:CFG 显示
+--
+-- shard=true 的规则: 【装寄存器表的那几个槽】才分片。poll/pull/infer 三段的
+--   norm 产物都带 regs 数组, 长度随现场点数走 —— 128 点整份 JSON ≈ 8.6KB,
+--   既是 fskv 单值 4096 顶唯一会被撞的对象, 也是"读一次要一整块连续内存"
+--   唯一躲不开的对象(见上面分片那一大段)。
+--   ds_sys 只有一个 boot_mode、ds_alias 已标"待废弃"(推断表行里自带
+--   name/id), 分片只是多两次写、给一段没人用的代码加迁移, 不动。
 local SECTIONS = {
-    poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll },
-    pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll },
+    poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll, shard = true },
+    pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll, shard = true },
     sys = { key = K_SYS, norm = M.normalize_sys, default = M.default_sys },
     alias = { key = K_ALIAS, norm = M.normalize_alias, default = M.default_alias },
-    infer = { key = K_INFER, norm = M.normalize_infer, default = M.default_infer },
+    infer = { key = K_INFER, norm = M.normalize_infer, default = M.default_infer, shard = true },
 }
 
 for name, sec in pairs(SECTIONS) do
     M["load_" .. name] = function()
-        local raw = load_json(sec.key, {})
+        local raw, serr = load_json(sec.key, {}, sec.shard)
+        if serr then
+            -- 段没取齐/还没提交。这时 flash 里那几行很可能一个字没坏, 只是
+            --   拼不出来 —— 这句话必须原样传出去, 混进"配置坏了"就等于骗用户
+            --   (11-12 现场那个"我填的 56 行消失了"就是这么来的)。
+            --   原因原文自己带阶段名("分片不全(2/4)" / "内存/内部异常: ..."),
+            --   这里不再加前缀: 加了就等于替分片之外的那两类失败也署上"分片"
+            log.error("cfg", name, "read fail:", brief(serr))
+            return sec.default, brief(serr)
+        end
         local ok, c, err = pcall(sec.norm, raw)
         if ok and c then return c end
         -- ⚠️ 两种失败【话不一样】, 不能混成一句"配置坏了"(2026-11-12 现场):
@@ -449,33 +640,39 @@ for name, sec in pairs(SECTIONS) do
     M["save_" .. name] = function(c)
         local n, err = sec.norm(c)
         if not n then return false, err end
-        return save_json(sec.key, n)
+        return save_json(sec.key, n, sec.shard)
     end
     -- 落盘【已经归一化过】的表。W:CFG 大配置(128 点)必须先 normalize 一遍
     --   校验、再落盘、再拿同一份去 apply_cfg; 走 save_xxx 会在里面再
     --   normalize 一次 —— 那 128 个寄存器表(~30KB)白造一遍, 池子只剩几 KB
     --   时就是压死的一根。n 已是 norm 的产物, 落盘内容和 save_xxx 逐字节相同
     M["save_" .. name .. "_norm"] = function(n)
-        return save_json(sec.key, n)
+        return save_json(sec.key, n, sec.shard)
     end
 end
 
--- 配置来源: fskv 里从未写过就是 default(前端据此提示"尚未保存过配置")
-function M.poll_src()
-    if not fskv then return "default" end
-    local v = fskv.get(K_POLL)
-    if v == nil or v == "" then return "default" end
+-- 三个 src 函数共用的一格: "这个槽到底算不算写过"。
+--   ⚠️ 原来每个函数都是裸 fskv.get —— 老固件那份整块配置在最坏水位下
+--   get 直接 raise, 冒到调用方(cmd.lua 的 R:CFG、main.lua 的开机日志)算运气好,
+--   冒到 prov 那层就是把整条命令打成 internal error。现在一律走 kv_read,
+--   读不出来时返回值是 "read-fail"(前端契约只看 =="fskv", 多出来的这一格
+--   不会把老前端判成别的), 第二格带原因
+local function src_of(k)
+    local v, why = kv_read(k)
+    if why then return "read-fail", why end
+    if not v then return "default" end
     return "fskv"
 end
 
+-- 配置来源: fskv 里从未写过就是 default(前端据此提示"尚未保存过配置")
+function M.poll_src() return (src_of(K_POLL)) end
+
 -- ds_pull 是否拉过平台配置。前端据此判断"拉取配置"档能不能直接起轮询
 -- (没拉过就必须先走 hello 拉一次, 否则拿 default 去轮询等于凭空造一套寄存器表)
-function M.pull_src()
-    if not fskv then return "default" end
-    local v = fskv.get(K_PULL)
-    if v == nil or v == "" then return "default" end
-    return "fskv"
-end
+function M.pull_src() return (src_of(K_PULL)) end
+
+-- ds_infer 是否写过
+function M.infer_src() return (src_of(K_INFER)) end
 
 -- 34-fix: 槽里是否真有可轮询的配置。
 --   仅 src=="fskv" 还不够, 万一上层把空配置(regs={})写进去就骗过这一道。
@@ -483,31 +680,74 @@ end
 --   不是判断依据, 真正决定"轮询一跑就能出活"的是寄存器表
 --   用途: ctrl.switch_mode 看到这个为 false 就跳过 poll.start,
 --   省掉"空配置下 for 循环空跑 + 喂狗误报"那一串副作用
+--
+-- ⚠️ 第二个返回值 = "想读却读不出来"的原因, 和"确实没配过"是两件事
+--   (2026-11-12 现场: manual 档那句 "poll 槽空, 暂不起轮询" 是假的 ——
+--   flash 里 56 行一个字没少, 是 used 304K 时 load_poll 抛了内存异常,
+--   原因躺在第二个返回值上没人接, 于是被读成了"空槽")
 function M.has_poll_cfg()
-    if M.poll_src() ~= "fskv" then return false end
-    local c = M.load_poll()
+    local src, why = src_of(K_POLL)
+    if src == "default" then return false end
+    if src ~= "fskv" then return false, why end
+    local c, w2 = M.load_poll()
+    if w2 then return false, w2 end
     return c and #(c.regs or {}) > 0
 end
 
 function M.has_pull_cfg()
-    if M.pull_src() ~= "fskv" then return false end
-    local c = M.load_pull()
+    local src, why = src_of(K_PULL)
+    if src == "default" then return false end
+    if src ~= "fskv" then return false, why end
+    local c, w2 = M.load_pull()
+    if w2 then return false, w2 end
     return c and #(c.regs or {}) > 0
 end
 
 -- sniff 推断表是否有持久化配置 (2026-11)
 function M.has_infer_cfg()
-    if M.infer_src() ~= "fskv" then return false end
-    local c = M.load_infer()
+    local src, why = src_of(K_INFER)
+    if src == "default" then return false end
+    if src ~= "fskv" then return false, why end
+    local c, w2 = M.load_infer()
+    if w2 then return false, w2 end
     return c and #(c.regs or {}) > 0
 end
 
--- ds_infer 是否写过
-function M.infer_src()
-    if not fskv then return "default" end
-    local v = fskv.get(K_INFER)
-    if v == nil or v == "" then return "default" end
-    return "fskv"
+-- 哪些槽是分片存的 —— 从 SECTIONS 推出来, 不在第二处重写一遍规则
+local SHARDED = {}
+for _, sec in pairs(SECTIONS) do SHARDED[sec.key] = sec.shard end
+
+-- 清掉一个槽(连分片一起)。返回 (真清掉了, 原因)。
+--
+-- ⚠️ 为什么要分得这么细: 老写法是
+--     local ok, v = pcall(fskv.get, k)
+--     if ok and v ~= nil and v ~= "" then ... end
+--   "读不出来"(OOM raise, ok=false)和"本来就空"(v=="")被并成同一个分支,
+--   于是 11-12 现场 used 292688 那次切 idle 回了 RET:MODE=OK;cleared:mqtt_manual,
+--   而 flash 里那 56 行一个字没少 —— 用户以为清了, 下次进 manual 起的还是旧表。
+--
+-- 为什么现在读得出段数: header 只有一两百字节, 老的这一步要 fskv.get 出
+--   一整块 3791B(整份配置的字节数), 在最坏水位(max 只剩 2048)下必然失败。
+--   分片把这一步的分配尺寸打回 header 大小, 这一类失败跟着消失。
+local function slot_clear(k, shard)
+    local ok, v = pcall(fskv.get, k)
+    if not ok then return false, "读不出来: " .. brief(v) end
+    if v == nil or v == "" then return false, nil end
+    local n = 0
+    if shard then
+        local h = dec_json(v)
+        local hn = h and shard_of(h)
+        if hn and hn > 0 then n = hn end
+    end
+    local sok, serr = pcall(fskv.set, k, "")
+    if not sok then return false, "清不掉: " .. brief(serr) end
+    json_cache[k] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
+    cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号也要涨(别名映射缓存靠它失效)
+    for i = 1, n do
+        pcall(fskv.set, shard_key(k, i), "")
+        json_cache[shard_key(k, i)] = nil
+    end
+    return true
 end
 
 -- 切回 idle 时的 485 复位: 擦掉用户改过的痕迹, 回到"从没存过配置"的状态。
@@ -533,23 +773,24 @@ local RESET_SLOTS = {
     { "sniff 推断表", K_INFER },  -- 2026-11: 切 idle 时一起清
 }
 
+-- 第二个返回值 failed: 想清却没清掉的槽(原因在里面)。调用方必须把它带到
+--   应答里去 —— 少这一句, "清了"和"没清动"在用户那边长得一模一样
 function M.reset_user()
-    local cleared = {}
-    if not fskv then return cleared end
+    local cleared, failed = {}, {}
+    if not fskv then return cleared, failed end
     for _, s in ipairs(RESET_SLOTS) do
         local name, k = s[1], s[2]
         -- 只清"写过"的槽: 没写过的槽也清一遍等于白写 fskv + 多一次 save,
         -- 而 flash 擦写次数是有限的
-        local ok, v = pcall(fskv.get, k)
-        if ok and v ~= nil and v ~= "" then
-            fskv.set(k, "")
-            json_cache[k] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
-            cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号也要涨(别名映射缓存靠它失效)
+        local wrote, why = slot_clear(k, SHARDED[k])
+        if wrote then
             cleared[#cleared + 1] = name
+        elseif why then
+            failed[#failed + 1] = name .. ":" .. why
         end
     end
     if #cleared > 0 and fskv.save then pcall(fskv.save) end
-    return cleared
+    return cleared, failed
 end
 
 -- 38-fix: 只清 ds_pull (不动 ds_poll / mqtt 凭证). 场景: 前端从 platform
@@ -558,14 +799,10 @@ end
 --   的话 wrote=false, 不报"已清空"骗用户).
 function M.clear_pull()
     if not fskv then return false, "fskv 不可用", false end
-    local ok, v = pcall(fskv.get, K_PULL)
-    if not ok then return false, "读 ds_pull 失败: " .. tostring(v), false end
-    if v == nil or v == "" then return true, nil, false end
-    fskv.set(K_PULL, "")
-    json_cache[K_PULL] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
-    cfg_ver = cfg_ver + 1     -- 12-fix-9: 版本号也要涨(别名映射缓存靠它失效)
-    if fskv.save then pcall(fskv.save) end
-    return true, nil, true
+    local wrote, why = slot_clear(K_PULL, SHARDED[K_PULL])
+    if why then return false, "清 ds_pull 失败: " .. why, false end
+    if wrote and fskv.save then pcall(fskv.save) end
+    return true, nil, wrote
 end
 
 -- 2026-11: 只清 ds_infer (不动 ds_poll / ds_pull / mqtt 凭证).
@@ -573,14 +810,10 @@ end
 --   确认后发 W:CLRINFER 调这个. 返回 (ok, err, wrote)
 function M.clear_infer()
     if not fskv then return false, "fskv 不可用", false end
-    local ok, v = pcall(fskv.get, K_INFER)
-    if not ok then return false, "读 ds_infer 失败: " .. tostring(v), false end
-    if v == nil or v == "" then return true, nil, false end
-    fskv.set(K_INFER, "")
-    json_cache[K_INFER] = nil
-    cfg_ver = cfg_ver + 1
-    if fskv.save then pcall(fskv.save) end
-    return true, nil, true
+    local wrote, why = slot_clear(K_INFER, SHARDED[K_INFER])
+    if why then return false, "清 ds_infer 失败: " .. why, false end
+    if wrote and fskv.save then pcall(fskv.save) end
+    return true, nil, wrote
 end
 
 -- 2026-11: 只清 ds_poll (不动 ds_pull / ds_infer / mqtt 凭证).
@@ -588,14 +821,10 @@ end
 --   返回 (ok, err, wrote)
 function M.clear_poll()
     if not fskv then return false, "fskv 不可用", false end
-    local ok, v = pcall(fskv.get, K_POLL)
-    if not ok then return false, "读 ds_poll 失败: " .. tostring(v), false end
-    if v == nil or v == "" then return true, nil, false end
-    fskv.set(K_POLL, "")
-    json_cache[K_POLL] = nil
-    cfg_ver = cfg_ver + 1
-    if fskv.save then pcall(fskv.save) end
-    return true, nil, true
+    local wrote, why = slot_clear(K_POLL, SHARDED[K_POLL])
+    if why then return false, "清 ds_poll 失败: " .. why, false end
+    if wrote and fskv.save then pcall(fskv.save) end
+    return true, nil, wrote
 end
 
 return M

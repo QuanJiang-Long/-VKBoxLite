@@ -164,11 +164,11 @@ function M.switch_mode(mode, from_boot)
         --   - manual: 用户在表单添寄存器表后 W:CFG 会重启 poll (见 cmd.lua W:CFG)
         --   - platform: iot.pull_start 拉到平台配置后 auto_apply 会启动 poll
         --             (见 iot.lua auto_apply)
-        local have_cfg = true
+        local have_cfg, why = true, nil
         if mode == "manual" then
-            have_cfg = cfgstore and cfgstore.has_poll_cfg and cfgstore.has_poll_cfg()
+            have_cfg, why = cfgstore and cfgstore.has_poll_cfg and cfgstore.has_poll_cfg()
         elseif mode == "platform" then
-            have_cfg = cfgstore and cfgstore.has_pull_cfg and cfgstore.has_pull_cfg()
+            have_cfg, why = cfgstore and cfgstore.has_pull_cfg and cfgstore.has_pull_cfg()
         end
         if have_cfg then
             -- 2026-11: 先加载配置到 poll 运行时, 再启动 (否则 R:REG 返回空)
@@ -180,9 +180,18 @@ function M.switch_mode(mode, from_boot)
             -- pm 为 nil = bus/poll 加载失败(模块缺失), 当成起不来
             if not (pm and pm.start(slot)) then return false, "FAIL poll start" end
         else
-            log.info("ctrl", string.format(
-                "%s 档: %s 槽空, 暂不起轮询, 等配置就位后由 W:CFG / auto_apply 补起",
-                mode, slot))
+            -- ⚠️ "没配过"和"读不出来"是两句话。11-12 现场这句 log 骗掉了
+            --   一整轮排障: used 304K 时 flash 里那 56 行一个字没少, 只是
+            --   那一次 load 抛了内存异常, 原因被丢成"空槽"。
+            --   why 由 cfg.lua 的 load_* 出来时已经过 brief()(单行、≤80 字节)
+            if why then
+                log.warn("ctrl", string.format(
+                    "%s 档: %s 槽读不出来(%s), 本次不起轮询", mode, slot, why))
+            else
+                log.info("ctrl", string.format(
+                    "%s 档: %s 槽空, 暂不起轮询, 等配置就位后由 W:CFG / auto_apply 补起",
+                    mode, slot))
+            end
         end
         if mode == "platform" then
             -- 进拉取档一律向平台报到(hello)并重新拉一次, 不再看 ds_pull
@@ -223,7 +232,17 @@ function M.switch_mode(mode, from_boot)
         -- 2026-11: sniff 持久化 - 检查 ds_infer 是否有数据
         --   有 → 加载通讯参数, 跳过识别, 直接收帧
         --   无 → 走现有 auto_detect 流程
-        local infer_cfg = cfgstore and cfgstore.has_infer_cfg and cfgstore.has_infer_cfg()
+        -- ⚠️ 第二个返回值不能扔: "读不出来"(内存不足)和"没存过"都会走识别,
+        --   但只有前者值得留痕 —— 不然用户看到的是"推断表又空了", 实际是
+        --   那一次读取根本没成功。(以前写成 `a and b and b()` 一行, 原因
+        --   在 and 链上被截掉了, 正是 11-12 那两个假话的同一个模式)
+        local infer_cfg, infer_why
+        if cfgstore and cfgstore.has_infer_cfg then
+            infer_cfg, infer_why = cfgstore.has_infer_cfg()
+        end
+        if infer_why then
+            log.warn("ctrl", "sniff: ds_infer 读不出来(" .. tostring(infer_why) .. "), 本轮重新识别")
+        end
         local start_params = nil
         if infer_cfg then
             local c = cfgstore.load_infer()
@@ -299,17 +318,22 @@ function M.switch_mode(mode, from_boot)
         if pm3 then pm3.stop() end
         stop_sniff()
         -- V2 日志优化：精简 idle 分支日志，from_boot 降 DEBUG
-        local cleared = {}
+        local cleared, notcleared = {}, {}
         if not from_boot then
-            cleared = M.reset_user_cfg()
+            cleared, notcleared = M.reset_user_cfg()
             log.info("ctrl", "idle: cleared " .. table.concat(cleared, "+"))
+            -- 没清掉的槽必须说出口: 静默"清成功"会让下一次进 manual 拿到
+            -- 用户以为已经删掉的旧表起轮询
+            if #notcleared > 0 then
+                log.warn("ctrl", "idle: NOT cleared " .. table.concat(notcleared, "+"))
+            end
         else
             log.debug("ctrl", "idle(boot): preserving config")
         end
         S.cur = "idle"
-        -- 第三个返回值是给 W:MODE 拼应答的(见 cmd.lua 的 cleared: 那段),
+        -- 第三、四个返回值是给 W:MODE 拼应答的(见 cmd.lua 的 cleared: 那段),
         -- msg 本身保持原样, 别把清单塞进去 —— switch_mode 的返回值有别的调用方
-        return true, "OK idle (bus released)", cleared
+        return true, "OK idle (bus released)", cleared, notcleared
 
     else
         return false, "FAIL unknown mode (use manual/platform/sniff/idle)"
@@ -323,8 +347,10 @@ end
 --    正在用这两份配置, 清了等于当场自残。
 -- ⚠️ manual_on 变了必须 kick 重连: 旧的 user/pass/topic 还挂在已建连的
 --    client 上, 不 kick 的话设备会用旧凭证继续跑, 直到下次自然重连才生效
+-- 返回 (cleared, failed): 清掉的槽名 + 想清但没清掉的槽名:原因。
+-- failed 非空时前端必须显示, 否则"切 idle"报成功是在骗人
 function M.reset_user_cfg()
-    local cleared = cfgstore.reset_user()
+    local cleared, failed = cfgstore.reset_user()
     -- wrote=false = 手动档本来就是干净的(从没配过), 不能报"已清空"骗用户
     local ok, err, wrote = mqttcfg.clear_manual()
     if ok then
@@ -333,10 +359,11 @@ function M.reset_user_cfg()
         -- 复位失败不能让切 idle 失败(总线已经放了, 回退会自相矛盾),
         -- 但必须留痕: 否则用户以为清干净了, 下次进 pollpull 拿旧配置起轮询
         log.warn("ctrl", "reset mqtt_manual fail:", tostring(err))
+        failed[#failed + 1] = "mqtt_manual:" .. tostring(err)
     end
     -- 手动档开着时旧凭证还挂在已建连的 client 上, 必须重连换一套
     if wrote and iot then pcall(iot.kick) end
-    return cleared
+    return cleared, failed
 end
 
 -- 前端据此高亮对应的卡。platform 要单列一张卡, 不能和 manual 混:

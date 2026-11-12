@@ -169,6 +169,17 @@ end
 
 local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
 
+-- W:MODE 的槽清单拼成 k:v 段。前端 protocol.js 按 ';' 分段、段内按【第一个】
+-- ':' 拆键值, 所以段里的 ';' 会把一条拆成两条, 必须换掉; 后面的 ':' 无所谓
+local function mode_seg(key, list)
+    if type(list) ~= "table" or #list == 0 then return nil end
+    local parts = {}
+    for i = 1, #list do
+        parts[i] = tostring(list[i]):gsub(";", " ")
+    end
+    return key .. ":" .. table.concat(parts, "+")
+end
+
 -- 12-fix-6: 主动把推断表推给前端。设备每发现一个新地址就推一次,
 --   前端不用手动点刷新(用户 2026-10-28 要求)。
 --   ⚠️ 键名用 INFER_PUSH 而不是 INFER: 前端的"单未决指令"靠键名配对,
@@ -317,14 +328,21 @@ local function reg_cmds()
         if v == "stop" then v = MODE_IDLE end
         -- 记录 3: 软切删了。"poll"/"pollpull" 现在直接被 ctrl.switch_mode
         -- 走下游拒掉, 不会翻译成 manual/platform。
-        local ok, msg, cleared = ctrl.switch_mode(v)
+        local ok, msg, cleared, notcleared = ctrl.switch_mode(v)
         if not ok then return M.reply("RET:FAIL:MODE:" .. tostring(msg)) end
         -- 切回 idle 会顺带复位配置。用 k:v 而不是 k=v: protocol.js 的 kv 解析
         -- 要求整段里同时有 ';' 和 ':' 才拆键值对
-        if cleared and #cleared > 0 then
-            M.reply("RET:MODE=OK;cleared:" .. table.concat(cleared, "+"))
-        else
+        -- 11-12: notcleared 是"想清但没清掉"的槽。以前只报 cleared, 高水位下
+        --   分片头读不出来 → slot_clear 失败 → 应答照说"OK", 旧表还在 flash 里。
+        --   老前端见到不认识的键直接忽略, 加这一段向后兼容
+        local segs = {}
+        local s1, s2 = mode_seg("cleared", cleared), mode_seg("notcleared", notcleared)
+        if s1 then segs[#segs + 1] = s1 end
+        if s2 then segs[#segs + 1] = s2 end
+        if #segs == 0 then
             M.reply("RET:MODE=OK")
+        else
+            M.reply("RET:MODE=OK;" .. table.concat(segs, ";"))
         end
     end)
 
@@ -804,16 +822,29 @@ local function reg_debug_cmds()
     --   的应答体"是两件事, 必须分开量。
     --   ⚠️ 每档前做一次 full GC(上一档的探测块要真还回去才测得准下一档),
     --      有毫秒级停顿 —— 这也是它只进开发版的原因。
+    --   11-12 补: 加 mode=, sys 改 KB。原因 —— 现场两次读数对不上, 复盘才发现
+    --     一次是 idle 档(没起轮询)、一次是 manual 档在轮询, 而应答里没有任何
+    --     东西说明当时是什么档, 于是把"轮询把池子打碎"这个假结论供了两轮。
+    --     mode 放最前是因为 log 只打应答前 80 字节, 后缀名再长也得看得见;
+    --     sys 换成 KB 是给 mode 腾这 12 个字节(系统池从来不是判据, Lua 池的
+    --     used/total 保持字节原样)
     M.reg("R:MEM", function()
         local p = {}
+        p[#p + 1] = "mode:" .. tostring(ctrl.get_mode())
         p[#p + 1] = string.format("lua:%dK", math.floor(collectgarbage("count")))
         if rtos then
             -- 池水位: "lua" 是 Lua 固定池(307192 那个), "sys" 是系统池。
             -- 拿不到就整段不报, 别用 0 冒充(0/0 会被读成"池子空着")
+            -- sys 报 KB(见上面注释), lua 报字节不动
             for _, k in ipairs({ "lua", "sys" }) do
                 local ok, total, used = pcall(rtos.meminfo, k)
                 if ok and type(total) == "number" and type(used) == "number" then
-                    p[#p + 1] = string.format("%s:%d/%d", k, used, total)
+                    if k == "sys" then
+                        p[#p + 1] = string.format("%s:%d/%dK", k,
+                            math.floor(used / 1024), math.floor(total / 1024))
+                    else
+                        p[#p + 1] = string.format("%s:%d/%d", k, used, total)
+                    end
                 end
             end
         end
@@ -858,10 +889,15 @@ local function reg_debug_cmds()
         --   —— 六个字段齐刷刷 no-lib。可 `ren:` 那格查的是【os 库】, 而
         --   `os.clock()`/`os.time()` 是这台设备每一轮轮询都在用的
         --   (bus/mon.lua、data/collector.lua:98 那个 ts 就是它写的)。
-        --   原写法 `rawget(_G, "io")` 绕过了 _G 的 __index(库挂在惰性加载上时
-        --   rawget 什么也看不见) ⇒ 一条【假阴性】, 拿它下"路线 B 死了"的结论
-        --   会白扔掉整条 littlefs 路。
-        -- 现在三种口径一起报, 一次把机制钉死(顺序: env 在前, 日志只打前 80 字节):
+        -- 真原因当场钉死了(下一版实测 io(env:userdata raw:userdata try:userdata)
+        --   + `=>B:YES 108K/128K`): LuatOS 把 io/os 做成【userdata 库对象】,
+        --   而探针里那句 `if type(io_lib) ~= "table" then ... no-lib` 把
+        --   userdata 一把推进了"没有库"分支 —— 六个字段全是那一条判断写出来的。
+        --   先前怪给 `rawget(_G, "io")`(说它绕过 __index)是【我的误判】:
+        --   三个口径报出来的类型一模一样, rawget 看得见。口径不是问题,
+        --   问题是【只认 table】这一条判断。
+        --   拿这条假阴性下过"路线 B 死了"的结论, 白扔了整整一轮排障。
+        -- 三种口径仍然一起报(留作机制证据, 顺序: env 在前, 日志只打前 80 字节):
         --   env  直接引用 ENV[name] —— 与 os.clock() 同一条解析路径, 判定以它为准
         --   raw  rawget(ENV, name) —— 库是否真在主全局表里(原探针的口径)
         --   try  util.try(name) —— 项目取库的现役写法(_G 索引 + require 兜底)

@@ -1151,10 +1151,22 @@ async function applyMode(mode) {
       // quiet=true: 用户刚在模式切换弹窗里明确批准了这次动作, 不该再被
       // 「有未保存更改」二次询问拦住(那次是防止误丢编辑, 这里是已知后果)
       try { await readCfg(true); await readMqtt(true); } catch (e) {}
+      // notcleared 是设备【想清但没清掉】的槽(带原因)。2026-11-12 现场没有
+      // 这一格: 切空闲回了 "OK;cleared:mqtt_manual", 而 flash 里那 56 行一个
+      // 字没少 —— 池子只给得出 2KB 时那份 3791B 的整块配置连读都读不出来。
+      // 现在必须显式告诉用户"这几样还在设备里", 否则下一次进 manual 起的
+      // 就是他以为已经删掉的旧表
+      const nc = r && r.data && r.data.notcleared;
       const cl = r && r.data && r.data.cleared;
+      const list = (s) => String(s).split('+').join('、');
+      if (nc) {
+        status('已切回空闲，但这些没清掉：' + list(nc), false);
+        toast('⚠ 配置没能清空（仍在设备里）：' + list(nc) + '\n再切一次空闲通常能清掉');
+        return;
+      }
       if (cl) {
-        status('已切回空闲，并清空了：' + String(cl).split('+').join('、'), true);
-        toast('已清空配置：' + String(cl).split('+').join('、'));
+        status('已切回空闲，并清空了：' + list(cl), true);
+        toast('已清空配置：' + list(cl));
         return;
       }
     }

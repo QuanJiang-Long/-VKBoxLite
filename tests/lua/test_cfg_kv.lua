@@ -54,27 +54,35 @@ local function has(s, sub, what)
 end
 
 -- 正常路径
+-- ⚠️ 2026-11-12 起 ds_poll 是【分片】存的: 一次"带一行寄存器"的保存 =
+--   header(st=w) + 段1 + header(st=r 提交) 三次 fskv.set, 空表(0 行)只有
+--   header 两次。所以下面全部改成"看这次保存新增了几次写", 不再对绝对次数
+--   —— 本文件钉的是 kv_set 那道闸(超限拦在前面 / 返回值判定 / 不误伤),
+--   分片本身的形状由 test_cfg_shard.lua 钉
 blob_len, set_ret = 24, true
+local before = set_calls
 local ok, err = cfg.save_poll({ slave = 1, regs = { { addr = 100, name = 'a', dtype = 'uint16' } } })
 eq(ok, true, '小配置能存')
 eq(err, nil, '成功时不带原因')
-eq(set_calls, 1, '落盘调用一次')
+eq(set_calls - before, 3, '一行寄存器: header + 1 段 + 提交, 共 3 次写')
 eq(store['ds_poll'], string.rep('a', 24), '值真进了 fskv')
 eq(cfg.poll_src(), 'fskv', 'poll_src 认出已保存过')
 
 -- 上限边界: 正好 4096 该放过去, 超一个字节必须在进 fskv 之前拦下
+before = set_calls
 blob_len = FSKV_MAX
 ok = cfg.save_poll({ slave = 1, regs = {} })
 eq(ok, true, '正好 4096B 允许写')
-eq(set_calls, 2, '4096B 真的发给了 fskv')
+eq(set_calls - before, 2, '4096B 真的发给了 fskv')
 
+before = set_calls
 blob_len = FSKV_MAX + 1
 local v_before = cfg.version()
 ok, err = cfg.save_poll({ slave = 1, regs = {} })
 eq(ok, false, '4097B 必须失败')
 has(err, '4096', '失败原因带单值上限')
 has(err, '4097', '失败原因带实际字节数')
-eq(set_calls, 2, '超限的值根本没送到 fskv (不浪费一次 flash 擦写)')
+eq(set_calls - before, 0, '超限的值根本没送到 fskv (不浪费一次 flash 擦写)')
 eq(cfg.version(), v_before, '写失败不得涨配置版本号 (缓存白失效)')
 
 -- fskv 明确返回 false (60 点那次的 not enough memory): 不能再报成功
