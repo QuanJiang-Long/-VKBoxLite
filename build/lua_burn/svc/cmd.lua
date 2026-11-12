@@ -384,10 +384,11 @@ local function reg_cmds()
                 poll.stop()
                 poll.apply_cfg(n)
 
-                poll.start(slot)
+
+                poll.start(slot, n)
             else
                 poll.apply_cfg(n)
-                if in_poll_mode then poll.start(slot) end
+                if in_poll_mode then poll.start(slot, n) end
             end
         else
             poll.apply_cfg(n)
@@ -396,10 +397,12 @@ local function reg_cmds()
 
 
 
-                poll.start(slot)
+                poll.start(slot, n)
             end
         end
         if iot and iot.reply_config then pcall(iot.reply_config) end
+
+
 
 
         trc_sample("done")

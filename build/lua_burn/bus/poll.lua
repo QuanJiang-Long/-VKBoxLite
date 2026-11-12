@@ -599,10 +599,22 @@ function M.status()
     return st
 end
 
-function M.start(src)
+function M.start(src, c)
     if running then return true end
     curSlot = (src == "pull") and "pull" or "poll"
-    M.reload_cfg(curSlot)
+
+
+
+
+
+
+
+
+    if c then
+        M.apply_cfg(c)
+    else
+        M.reload_cfg(curSlot)
+    end
     if gpio then
         pcall(gpio.setup, mbus.DE_PIN, 0)
         pcall(gpio.set, mbus.DE_PIN, 0)
