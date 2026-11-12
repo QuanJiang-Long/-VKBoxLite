@@ -15,80 +15,80 @@ local state, sn_cache = M.STATE.EMPTY, nil
 local changeCbs = {}
 
 local function kv_get(k)
-    local ok, v = pcall(fskv.get, k)
-    if ok and v ~= nil and v ~= "" then return v end
-    return nil
+local ok, v = pcall(fskv.get, k)
+if ok and v ~= nil and v ~= "" then return v end
+return nil
 end
 
 local function flush()
-    if fskv and fskv.save then pcall(fskv.save) end
+if fskv and fskv.save then pcall(fskv.save) end
 end
 
 
 
 
 local function kv_put(k, v)
-    local ok, ret = pcall(fskv.set, k, v)
-    if not ok or ret == false then
-        log.warn("sn", "fskv.set failed:", k, tostring(ret))
-        return false
-    end
-    return true
+local ok, ret = pcall(fskv.set, k, v)
+if not ok or ret == false then
+log.warn("sn", "fskv.set failed:", k, tostring(ret))
+return false
+end
+return true
 end
 
 function M.locked()
-    return kv_get(K_LOCK) == "1"
+return kv_get(K_LOCK) == "1"
 end
 
 function M.meta()
-    return { burn = tonumber(kv_get(K_BURN)) or 0, btime = tonumber(kv_get(K_BTIME)) or 0 }
+return { burn = tonumber(kv_get(K_BURN)) or 0, btime = tonumber(kv_get(K_BTIME)) or 0 }
 end
 
 function M.load()
-    return kv_get(K_SN)
+return kv_get(K_SN)
 end
 
 function M.save(sn)
-    kv_put(K_SN, sn)
-    local m = M.meta()
-    kv_put(K_BURN, m.burn + 1)
-    if m.btime == 0 then kv_put(K_BTIME, os.time()) end
-    flush()
+kv_put(K_SN, sn)
+local m = M.meta()
+kv_put(K_BURN, m.burn + 1)
+if m.btime == 0 then kv_put(K_BTIME, os.time()) end
+flush()
 end
 
 
 
 local function notify(sn, st)
-    for _, cb in ipairs(changeCbs) do pcall(cb, sn, st) end
+for _, cb in ipairs(changeCbs) do pcall(cb, sn, st) end
 end
 
 
 function M.clear()
 
 
-    if M.locked() and state ~= M.STATE.INVALID then return false, "locked" end
-    pcall(fskv.del, K_SN)
-    flush()
-    sn_cache, state = nil, M.STATE.EMPTY
-    notify(nil, state)
-    return true
+if M.locked() and state ~= M.STATE.INVALID then return false, "locked" end
+pcall(fskv.del, K_SN)
+flush()
+sn_cache, state = nil, M.STATE.EMPTY
+notify(nil, state)
+return true
 end
 
 function M.set_lock()
-    local ok = kv_put(K_LOCK, "1")
-    flush()
+local ok = kv_put(K_LOCK, "1")
+flush()
 
 
-    if not ok or not M.locked() then
-        log.error("sn", "lock NOT persisted")
-        return false
-    end
-    return true
+if not ok or not M.locked() then
+log.error("sn", "lock NOT persisted")
+return false
+end
+return true
 end
 
 function M.clear_lock()
-    pcall(fskv.del, K_LOCK)
-    flush()
+pcall(fskv.del, K_LOCK)
+flush()
 end
 
 
@@ -96,20 +96,20 @@ end
 
 
 function M.validate(sn)
-    if type(sn) ~= "string" then return false, "not string" end
-    if #sn < cfg.SN_MIN_LEN or #sn > cfg.SN_MAX_LEN then return false, "bad length" end
-    if sn:sub(1, #cfg.SN_PREFIX) ~= cfg.SN_PREFIX then return false, "bad prefix" end
+if type(sn) ~= "string" then return false, "not string" end
+if #sn < cfg.SN_MIN_LEN or #sn > cfg.SN_MAX_LEN then return false, "bad length" end
+if sn:sub(1, #cfg.SN_PREFIX) ~= cfg.SN_PREFIX then return false, "bad prefix" end
 
-    local d = sn:sub(#cfg.SN_PREFIX + 1, #cfg.SN_PREFIX + 8)
-    if not d:match("^%d+$") then return false, "bad date" end
-    local yr = tonumber(d:sub(1, 4))
-    local mo = tonumber(d:sub(5, 6))
-    local dy = tonumber(d:sub(7, 8))
-    if yr < 2000 or yr > 2099 then return false, "bad year" end
-    if mo < 1 or mo > 12 then return false, "bad month" end
-    if dy < 1 or dy > 31 then return false, "bad day" end
-    if not sn:match("^%w+$") then return false, "bad char" end
-    return true
+local d = sn:sub(#cfg.SN_PREFIX + 1, #cfg.SN_PREFIX + 8)
+if not d:match("^%d+$") then return false, "bad date" end
+local yr = tonumber(d:sub(1, 4))
+local mo = tonumber(d:sub(5, 6))
+local dy = tonumber(d:sub(7, 8))
+if yr < 2000 or yr > 2099 then return false, "bad year" end
+if mo < 1 or mo > 12 then return false, "bad month" end
+if dy < 1 or dy > 31 then return false, "bad day" end
+if not sn:match("^%w+$") then return false, "bad char" end
+return true
 end
 
 function M.on_change(cb) changeCbs[#changeCbs + 1] = cb end
@@ -117,91 +117,91 @@ function M.on_change(cb) changeCbs[#changeCbs + 1] = cb end
 function M.state() return state end
 
 function M.init()
-    if fskv.init then pcall(fskv.init) end
-    local sn = M.load()
-    if not sn or sn == "" then
-        state = M.STATE.EMPTY
-        log.warn("sn", "empty, burn via W:SN=")
-    else
-        local ok, err = M.validate(sn)
-        if ok then
-            state, sn_cache = M.STATE.READY, sn
-        else
-            state = M.STATE.INVALID
-            log.error("sn", "invalid:", sn, tostring(err))
-        end
-    end
-    _G.get_device_sn = function() return sn_cache end
-    return true
+if fskv.init then pcall(fskv.init) end
+local sn = M.load()
+if not sn or sn == "" then
+state = M.STATE.EMPTY
+log.warn("sn", "empty, burn via W:SN=")
+else
+local ok, err = M.validate(sn)
+if ok then
+state, sn_cache = M.STATE.READY, sn
+else
+state = M.STATE.INVALID
+log.error("sn", "invalid:", sn, tostring(err))
+end
+end
+_G.get_device_sn = function() return sn_cache end
+return true
 end
 
 function M.write(new_sn, opts)
-    opts = opts or {}
-    if M.locked() and state ~= M.STATE.INVALID then return false, "locked" end
-    local ok, err = M.validate(new_sn)
-    if not ok then return false, err end
-    if state == M.STATE.READY then
-        if new_sn == sn_cache then return true, "same" end
-        if not opts.force then return false, "sn exists" end
-    end
-    M.save(new_sn)
-    if M.load() ~= new_sn then return false, "verify fail" end
-    sn_cache, state = new_sn, M.STATE.READY
-    log.info("sn", "burned, burn=" .. M.meta().burn)
-    notify(new_sn, state)
-    return true
+opts = opts or {}
+if M.locked() and state ~= M.STATE.INVALID then return false, "locked" end
+local ok, err = M.validate(new_sn)
+if not ok then return false, err end
+if state == M.STATE.READY then
+if new_sn == sn_cache then return true, "same" end
+if not opts.force then return false, "sn exists" end
+end
+M.save(new_sn)
+if M.load() ~= new_sn then return false, "verify fail" end
+sn_cache, state = new_sn, M.STATE.READY
+log.info("sn", "burned, burn=" .. M.meta().burn)
+notify(new_sn, state)
+return true
 end
 
 function M.start_warn_monitor(period)
-    if not sys then return end
-    sys.timerLoopStart(function()
-        if state ~= M.STATE.READY then
-            log.warn("sn", "no sn! burn via W:SN=xxx")
-        end
-    end, (period or cfg.SN_WARN_PERIOD_S) * 1000)
+if not sys then return end
+sys.timerLoopStart(function()
+if state ~= M.STATE.READY then
+log.warn("sn", "no sn! burn via W:SN=xxx")
+end
+end, (period or cfg.SN_WARN_PERIOD_S) * 1000)
 end
 
 local function grab(lib, key)
-    if not lib then return nil end
-    local v = lib[key]
-    if type(v) == "function" then
-        local ok, r = pcall(v)
-        if ok and r and r ~= "" then return r end
-        return nil
-    end
-    if type(v) == "string" and v ~= "" then return v end
-    return nil
+if not lib then return nil end
+local v = lib[key]
+if type(v) == "function" then
+local ok, r = pcall(v)
+if ok and r and r ~= "" then return r end
+return nil
+end
+if type(v) == "string" and v ~= "" then return v end
+return nil
 end
 
 local imei_cache, uid_cache = nil, nil
 
 local function try_identity()
-    local mobile = util.try("mobile")
-    local mcu = util.try("mcu")
-    if not imei_cache then imei_cache = grab(mobile, "imei") end
-    if not uid_cache then uid_cache = grab(mcu, "unique_id") end
-    return imei_cache and uid_cache
+local mobile = util.try("mobile")
+local mcu = util.try("mcu")
+if not imei_cache then imei_cache = grab(mobile, "imei") end
+if not uid_cache then uid_cache = grab(mcu, "unique_id") end
+return imei_cache and uid_cache
 end
 
 function M.imei() return imei_cache end
 function M.uid() return uid_cache end
 
 function M.identity_init()
-    try_identity()
-    if not sys then return end
-    sys.taskInit(function()
-        for _ = 1, 60 do
-            if try_identity() then return end
-            sys.wait(500)
-        end
-        log.warn("sn", "identity timeout, imei/uid may be empty")
-    end)
+try_identity()
+if not sys then return end
+sys.taskInit(function()
+for _ = 1, 60 do
+if try_identity() then return end
+sys.wait(500)
+end
+log.warn("sn", "identity timeout, imei/uid may be empty")
+end)
 end
 
 function M.info_line()
-    return string.format("imei:%s;uid:%s;sn:%s;state:%s;lock:%d",
-        imei_cache or "", uid_cache or "",
-        sn_cache or "", state, M.locked() and 1 or 0)
+return string.format("imei:%s;uid:%s;sn:%s;state:%s;lock:%d",
+imei_cache or "", uid_cache or "",
+sn_cache or "", state, M.locked() and 1 or 0)
 end
 
 return M

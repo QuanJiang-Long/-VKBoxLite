@@ -122,12 +122,12 @@ M.HELLO_BACKOFF_S = { 1, 3, 9 }
 
 
 M.PULL_DTYPE = {
-    ushort = "uint16", uint16 = "uint16",
-    short = "int16", int16 = "int16",
-    ulong = "uint32", uint32 = "uint32",
-    long = "int32", int32 = "int32",
-    float = "float32", float32 = "float32",
-    double = "float64", float64 = "float64",
+ushort = "uint16", uint16 = "uint16",
+short = "int16", int16 = "int16",
+ulong = "uint32", uint32 = "uint32",
+long = "int32", int32 = "int32",
+float = "float32", float32 = "float32",
+double = "float64", float64 = "float64",
 }
 
 
