@@ -194,7 +194,14 @@ local function extract_row(data, base, r)
     local span = r.count or 1
     if base + span > avail then span = math.max(0, avail - base) end
 
-    local hx = base == 0 and hexs(data) or hexs(data:sub(base * 2 + 1, (base + span) * 2))
+
+
+
+
+
+
+
+    local hx = hexs(data:sub(base * 2 + 1, (base + span) * 2))
     local vb, n = {}, 0
     local name = r.name or ("r" .. r.addr)
     for off = base, base + span - w, w do
