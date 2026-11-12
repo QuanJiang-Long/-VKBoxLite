@@ -73,7 +73,10 @@ local function kv_set(k, s)
     local ok, ret = pcall(fskv.set, k, s)
     if not ok or ret == false then
         log.warn("cfg", "fskv.set failed:", k, n .. "B", tostring(ret))
-        return false, "fskv.set 拒写(值 " .. n .. "B)"
+        -- 原因必须一起带回应答里: 只报"拒写"前端分不清是超限还是内存不足。
+        --   11-12 现场 3774B(远小于 4096)保存失败, 真原因是 C 层 raise 的
+        --   "not enough memory for buffer allocation" —— 那句话原先只进设备日志。
+        return false, "fskv.set 拒写(值 " .. n .. "B): " .. tostring(ret)
     end
     -- 只有真写进去了才动缓存/版本号: 写失败时 fskv 里的内容没变,
     -- 清缓存+涨版本号等于白让所有下游解码缓存失效一遍
@@ -94,9 +97,12 @@ end
 --   也是 2026-10-28 现场 sniff 崩溃的帮凶之一。
 --
 --   ⚠️ 只缓存【解码后的原始表】, 归一化(normalize)仍然每次跑:
---      normalize_poll/normalize_alias 都不改它们的入参, 所以缓存的原始表
---      是只读的, 安全; 而归一化结果每次新建, 各调用方拿到各自独立的一份,
---      改它不会串味(这点很重要 —— poll.lastCfg 就长期持有 load_poll() 的结果)。
+--      缓存的原始表是只读的(这点很重要 —— poll.lastCfg 就长期持有
+--      load_poll() 的结果, 各调用方拿到各自独立的一份, 改它不会串味)。
+--      ⚠️ 唯一的例外: normalize_poll(c, true) 会原地改 c, 那是 W:CFG 给
+--      自己 jdecode 出来的私有表用的(省掉 13KB 第二份, 见该函数注释)。
+--      从缓存出来的 raw 一律按【一个参数】调用, 传第二参数的地方必须
+--      先确认那张表不在任何缓存里。
 --   ⚠️ 写盘(kv_set / reset_user / clear_pull)必须清缓存。
 
 local function load_json(k, default)
@@ -244,17 +250,24 @@ function M.clear_alias()
     return M.save_alias({ regs = {} })
 end
 
-local function normalize_reg(r)
+-- reuse=true: 【原地】把 r 收拾成归一化行并返回 r 本身, 不再新建一张表。
+--   两条路径的键集合必须完全一致(addr/count/dtype/name/alias 五个) ——
+--   W:CFG 走原地, 落进 fskv 的 JSON 不能比新建路径变长, 所以先把五个值
+--   读进局部变量, 再清空整张表(顺带把用户多塞的键一起丢掉), 再写回去。
+local function normalize_reg(r, reuse)
     if type(r) ~= "table" then return nil, "not table" end
     -- 范围/格式校验委托给 util.validate_reg(抽离后 ds_poll/ds_pull 共享)
     local ok, why = util.validate_reg(r)
     if not ok then return nil, why end
-    return {
-        addr = num(r.addr), count = num(r.count, 1),
-        dtype = str(r.dtype, "uint16"),
-        name = r.name,
-        alias = str(r.alias, r.name),
-    }
+    local addr, count = num(r.addr), num(r.count, 1)
+    local dtype, name = str(r.dtype, "uint16"), r.name
+    local alias = str(r.alias, r.name)
+    if not reuse then
+        return { addr = addr, count = count, dtype = dtype, name = name, alias = alias }
+    end
+    for k in pairs(r) do r[k] = nil end
+    r.addr, r.count, r.dtype, r.name, r.alias = addr, count, dtype, name, alias
+    return r
 end
 
 local function normalize_common(c, d)
@@ -267,38 +280,67 @@ local function normalize_common(c, d)
     }
 end
 
-function M.normalize_poll(c)
-    local out = normalize_common(c, M.default_poll)
-    out.slave = math.floor(num(c.slave, M.default_poll.slave))
-    if out.slave < 1 or out.slave > 247 then return nil, "bad slave" end
-    out.interval_ms = math.floor(num(c.interval_ms, M.default_poll.interval_ms))
-    if out.interval_ms < 100 then return nil, "bad interval" end
+-- inplace=true: 在 c 上【原地】归一化并返回 c。
+-- ⚠️ 只给"这张表本来就是调用方私有的"路径用(目前只有 svc/cmd.lua 的 W:CFG:
+--    那里的 t 是 json.decode 现解的, 不进任何缓存)。load_poll/load_pull
+--    走的是 SECTIONS 里的 pcall(sec.norm, raw) —— 只有一个参数, 永远是纯函数,
+--    因为 raw 是 12-fix-3 那张解码缓存, 归一化改它会串味到后续所有读取。
+-- ⚠️ 校验失败时 c 已被改成半份(寄存器表逐行原地收拾, 中途出错就停在半途)。
+--    W:CFG 出错就地 RET:FAIL 并把 t 丢掉, 不会拿半份表去落盘, 所以不用回滚。
+function M.normalize_poll(c, inplace)
+    -- 先把输入值全读进局部变量: 原地路径下面要把 c 清成空表再填回去
+    local baud = math.floor(num(c.baud, M.default_poll.baud))
+    local databits = math.floor(num(c.databits, M.default_poll.databits))
+    local stopbits = math.floor(num(c.stopbits, M.default_poll.stopbits))
+    local parity = math.floor(num(c.parity, M.default_poll.parity))
+    local slave = math.floor(num(c.slave, M.default_poll.slave))
+    local interval = math.floor(num(c.interval_ms, M.default_poll.interval_ms))
+    local timeout
     -- timeout_ms 允许留空(null)= 早返回模式: 收到响应立刻走下一事务,
     -- 不等满超时。字段名与前端一致(前端 collectCfg 下发 timeout_ms)
-    if c.timeout_ms == nil then
-        out.timeout_ms = nil
-    else
-        local t = math.floor(num(c.timeout_ms, M.default_poll.timeout_ms))
-        if t < 50 or t > 500 then return nil, "响应上限越界(50~500ms)" end
-        out.timeout_ms = t
+    if c.timeout_ms ~= nil then
+        timeout = math.floor(num(c.timeout_ms, M.default_poll.timeout_ms))
     end
-    out.regs = {}
-    local seen = {}
     local regs = c.regs
-    if type(regs) == "table" then
-        for _, r in ipairs(regs) do
-            local nr, err = normalize_reg(r)
+    if slave < 1 or slave > 247 then return nil, "bad slave" end
+    if interval < 100 then return nil, "bad interval" end
+    if timeout and (timeout < 50 or timeout > 500) then
+        return nil, "响应上限越界(50~500ms)"
+    end
+    local out = inplace and c or {}
+    if inplace then
+        for k in pairs(c) do c[k] = nil end
+    end
+    out.baud, out.databits, out.stopbits, out.parity = baud, databits, stopbits, parity
+    out.slave = slave
+    out.interval_ms = interval
+    out.timeout_ms = timeout
+    local is_list = (type(regs) == "table")
+    local dst = (inplace and is_list) and regs or {}
+    local seen = {}
+    local kept = 0
+    if is_list then
+        local cnt = #regs
+        for i, r in ipairs(regs) do
+            local nr, err = normalize_reg(r, inplace)
             if not nr then return nil, err end
-            if #out.regs > cfg.MAX_REGS then return nil, "too many regs" end
+            if kept > cfg.MAX_REGS then return nil, "too many regs" end
             -- 同 addr 只留首条。平台的 properties 实测会把同一属性发两遍
             -- (2026-10-08 日志: skipped 里 reg_100/reg_250 各出现两次),
             -- 原样存进重复项, 切 pollpull 后同一帧重复读, 白占总线时间
             if not seen[nr.addr] then
                 seen[nr.addr] = true
-                out.regs[#out.regs + 1] = nr
+                kept = kept + 1
+                dst[kept] = nr
+                if inplace and kept < i then regs[i] = nil end
             end
         end
+        -- 丢过重复项要把尾巴截掉, 否则 #regs 比 kept 大、后面还挂着空位
+        if inplace then
+            for i = kept + 1, cnt do regs[i] = nil end
+        end
     end
+    out.regs = dst
     return out
 end
 

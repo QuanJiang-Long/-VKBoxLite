@@ -243,9 +243,12 @@ local function trc_begin(nbytes)
     trc_sample("enter")
 end
 
--- t = nil 之后调, 顺手做一次 full GC 再采样。为什么要 GC: 不主动收, used 里的
---   t 只是"看起来还在", 分不清"解码表确实没引用了、能还回去"和"哪里还攥着它"
+-- 归一化之后调, 顺手做一次 full GC 再采样。为什么要 GC: 不主动收, used 里的
+--   东西只是"看起来还在", 分不清"确实没引用了、能还回去"和"哪里还攥着它"
 --   —— 现场"开机 16 秒存得下 80 点、107 秒存不下"要排除的正是后面这种。
+--   11-12 起归一化改成原地(W:CFG 传 inplace), 解码表就是结果本身、没有
+--   "放开 t"这一步, 所以 freed 段现在读的是"落盘之前 GC 能腾出多少",
+--   不再是"那 13KB 还不还回来"(答案: 原地之后根本没有那 13KB)。
 local function trc_freed()
     if not TR then return end
     collectgarbage("collect")
@@ -351,10 +354,14 @@ local function reg_cmds()
         local t = jdecode(arg)
         trc_sample("decoded")
         if not t then return M.reply("RET:FAIL:CFG:bad json") end
-        local n, err = cfgstore.normalize_poll(t)
-        -- 这一刻 t 和 n 同时在堆上 = 这条路径的峰, 采样必须在放开 t 之前
+        -- 第二个参数 true = 在 t 上【原地】归一化, 不再新建第二张表。
+        --   11-12 现场 56 点这一段 +13048B, 那就是"归一化的第二份" —— 解码表
+        --   和归一化表同时在堆上, 一次保存的入场费因此是 decoded+norm ≈ 28KB。
+        -- ⚠️ 这里敢原地, 是因为 t 是本行 jdecode 现解的私有表, 不进任何缓存;
+        --    缓存里那份(raw)必须走纯函数路径, 见 cfg.lua 12-fix-3 的约定
+        local n, err = cfgstore.normalize_poll(t, true)
+        -- inplace 之后 n == t, 所以这一段应当贴着 0(还在涨就说明没走到原地路径)
         trc_sample("norm")
-        t = nil -- 解码表就此不可达, 归一化结果只留 n 一份
         -- ⚠️ 归一化失败就地返回: 采样的"停在第几段"就是"死在第几步",
         --    这里再多走一段 freed, 读的人会以为归一化过了
         if not n then return M.reply("RET:FAIL:CFG:" .. tostring(err)) end

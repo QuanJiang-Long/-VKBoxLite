@@ -96,6 +96,10 @@ set_ret = 'raise'
 ok, err = cfg.save_poll({ slave = 1, regs = {} })
 eq(ok, false, 'fskv.set 抛错时返回失败而不是冒泡')
 has(err, '拒写', '抛错也走同一条失败原因')
+-- ⚠️ 真实原因必须跟着回应答: 11-12 现场 3774B(远小于 4096)保存失败, 前端只
+--   看到"fskv.set 拒写(值 3774B)", 那句 not enough memory 只进了设备日志。
+has(err, 'not enough memory', '失败原因带上 C 层那句话')
+has(err, '3900', '原因里既有字节数也有原因')
 
 -- 其它槽共用同一个闸: ds_infer(sniff 推断表)一样会超 4096
 set_ret = true

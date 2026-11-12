@@ -4,9 +4,10 @@
 -- 真机上把"解码/归一化/落盘各吃多少、峰究竟在哪一步"量出来, 只有靠进出口
 -- 各采一次样 —— 而这条路径正好是保存配置那条, 测错了会连带把结论带歪。
 -- 所以这个探针要钉死的不是"数字对不对", 而是三件结构性的事:
---   1) 采样点【夹住】被测操作: norm 那一次必须在 normalize_poll 返回之后、
---      放开 t 之前(那一刻 t 和 n 同时在堆上, 就是这条路径的峰); decoded 必须
---      在解码之后。采样点错一个位置, 整张表就是错的结论。
+--   1) 采样点【夹住】被测操作: norm 那一次必须紧跟 normalize_poll 的返回
+--      (第二刀之前那里还得夹在"放开 t 之前"—— t 和 n 同时在堆上才是峰;
+--      现在 W:CFG 传 inplace, n 就是 t, 夹住返回即可), decoded 必须在解码
+--      之后。采样点错一个位置, 整张表就是错的结论。
 --   2) used 抓不到的【瞬时峰】由 max 抓到: 落盘时 jencode 那份整串 JSON 返回
 --      即消失, used 一路不变、max 会涨 —— 用例里 saved 段必须 max > used。
 --   3) 发布版一个字节都不许多走: DEBUG 关掉以后不注册 R:CTRACE、一次 meminfo
@@ -23,6 +24,7 @@ local mem = { total = 307192, used = 100000, max = 100000, calls = 0 }
 local gc_calls = 0
 local decode_ok, norm_ok, save_ok = true, true, true -- 三个闸门逐个往下走失败
 local norm_regs = 8             -- 归一化结果里的点数(报给 regs= 字段)
+local norm_inplace = nil        -- W:CFG 传没传第二个参数(原地归一化那一刀)
 local has_rtos = true
 -- 每个操作【结束时】堆上实际剩多少 / 内部冒过又立刻还掉的瞬时峰
 local after = { decode = 150000, norm = 190000, save = 190000, apply = 200000 }
@@ -77,8 +79,9 @@ package.preload["cfg"] = function()
         load_poll = function() return { regs = {} } end,
         poll_src = function() return "poll" end,
         load_sys = function() return { boot_mode = "idle" } end,
-        normalize_poll = function()
+        normalize_poll = function(_, inplace)
             ev("norm")
+            norm_inplace = inplace
             if not norm_ok then return nil, "bad slave" end
             rise(after.norm)
             local regs = {}
@@ -186,7 +189,7 @@ check("① 头报了命令行长度/点数/池大小",
 -- 采样点位置 = 结论对不对的命门: 每段读到的 used 是【那个时刻】的量,
 -- 早一步晚一步都会读到上一个操作留下的数
 check("① decoded 段在解码之后(读到解码后的水位)", l2:find("decoded 150000/", 1, true) ~= nil, l2)
-check("① norm 段在归一化之后、放开 t 之前(峰就落在这个采样点上)",
+check("① norm 段紧跟归一化的返回(峰就落在这个采样点上)",
     l2:find("norm 190000/", 1, true) ~= nil, l2)
 check("① freed 段 max 还没涨(证明 save 的峰不是提前冒的)",
     l2:find("freed 190000/190000", 1, true) ~= nil, l2)
@@ -196,6 +199,11 @@ check("① done 段在重启轮询之后", l2:find("done 200000/", 1, true) ~= n
 check("① 操作顺序本身也钉一遍", table.concat(events, ",") == "decode,norm,save,apply",
     table.concat(events, ","))
 check("① 每段一次 meminfo + 头一次拿池大小", mem.calls == 8, mem.calls)
+-- 第二刀(就地归一化)的闸门: W:CFG 必须传第二个参数。省掉的那 13KB 就是这个
+--   true —— 哪天有人把它改回 normalize_poll(t), 采样点还是对的、测试照样绿,
+--   现场却重新多出那张第二份表, 所以只能在这里钉一句
+check("① W:CFG 走的是原地归一化(第二个参数 true)", norm_inplace == true,
+    tostring(norm_inplace))
 
 ------------------------------------------------------------------
 -- ② 失败路径: 采样停在死掉的那一步, 而且不被下一次保存挤掉
