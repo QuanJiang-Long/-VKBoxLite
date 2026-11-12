@@ -246,6 +246,9 @@ end
 
 
 
+
+
+
 local function trc_freed()
     if not TR then return end
     collectgarbage("collect")
@@ -351,10 +354,14 @@ local function reg_cmds()
         local t = jdecode(arg)
         trc_sample("decoded")
         if not t then return M.reply("RET:FAIL:CFG:bad json") end
-        local n, err = cfgstore.normalize_poll(t)
+
+
+
+
+
+        local n, err = cfgstore.normalize_poll(t, true)
 
         trc_sample("norm")
-        t = nil -- 解码表就此不可达, 归一化结果只留 n 一份
 
 
         if not n then return M.reply("RET:FAIL:CFG:" .. tostring(err)) end
