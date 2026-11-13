@@ -291,6 +291,13 @@ end
 
 
 
+function M.drop_alias_cache()
+alias_map_cache, alias_map_key = nil, nil
+end
+
+
+
+
 
 
 

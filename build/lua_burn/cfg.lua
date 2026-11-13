@@ -101,6 +101,25 @@ function M.version() return cfg_ver end
 
 
 
+
+
+
+
+function M.drop_cache()
+local n = 0
+for k in pairs(json_cache) do
+json_cache[k] = nil
+n = n + 1
+end
+return n
+end
+
+
+
+
+
+
+
 local FSKV_VALUE_MAX = 4096
 
 local function kv_set(k, s, noflush)

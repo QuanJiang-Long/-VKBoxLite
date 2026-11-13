@@ -418,6 +418,159 @@ up.rows = {}
 end
 
 
+
+
+
+
+
+
+
+
+
+
+
+local HOLD_IDLE_S  = 60
+local HOLD_TICK_MS = 5000
+local hold = { armed = false, stopped = false, touched = 0, gen = 0 }
+
+
+
+
+local hold_restore
+
+
+
+local cbegin_guard
+
+
+
+
+
+local function max_block(steps)
+local last_ok, first_fail = 0, 0
+for i = 1, #steps do
+local n = steps[i]
+collectgarbage("collect")
+local ok, s = pcall(string.rep, "x", n)
+if ok and type(s) == "string" and #s == n then
+last_ok = n
+else
+first_fail = n
+break
+end
+end
+return last_ok, first_fail
+end
+
+
+local function lua_used()
+if not rtos then return nil end
+local ok, total, used = pcall(rtos.meminfo, "lua")
+if ok and type(used) == "number" then return used, total end
+return nil
+end
+
+
+
+
+
+
+
+
+
+
+
+
+local function make_room()
+local did = {}
+local poll = pollmod(false)
+if poll and poll.is_running and poll.is_running() then
+
+
+poll.stop()
+hold.stopped = true
+did[#did + 1] = "poll"
+end
+if collector.clear_all then
+local n = collector.clear_all()
+did[#did + 1] = "cache:" .. tostring(n or "?")
+end
+if cfgstore.drop_cache then
+did[#did + 1] = "cfgcache:" .. tostring(cfgstore.drop_cache() or "?")
+end
+if iot and iot.drop_alias_cache then pcall(iot.drop_alias_cache) end
+collectgarbage("collect")
+collectgarbage("collect")
+return did
+end
+
+local function hold_disarm()
+hold.armed = false
+hold.gen = hold.gen + 1     -- 让在跑的兜底协程下一轮自己退出
+end
+
+
+
+local function hold_arm()
+hold.armed = true
+hold.touched = os.time()
+hold.gen = hold.gen + 1
+local mygen = hold.gen
+local sok, sys = pcall(require, "sys")
+if not sok or not sys or not sys.taskInit or not sys.wait then
+log.warn("cmd", "分片上传的静默兜底没装上(没有 sys 协程), 只能靠 W:CSABORT 还轮询")
+return
+end
+sys.taskInit(function()
+while hold.armed and mygen == hold.gen do
+sys.wait(HOLD_TICK_MS)
+if not (hold.armed and mygen == hold.gen) then break end
+if os.time() - hold.touched >= HOLD_IDLE_S then
+log.warn("cmd", "分片上传静默超 " .. HOLD_IDLE_S .. "s, 作废会话并交还轮询")
+up_reset("静默超时")
+hold_restore("静默超时")
+return
+end
+end
+end)
+end
+
+
+local function hold_touch()
+if hold.armed then hold.touched = os.time() end
+end
+
+
+hold_restore = function(why)
+hold_disarm()
+if not hold.stopped then return end
+hold.stopped = false
+local m = ctrl.get_mode()
+
+if m ~= "manual" and m ~= "platform" then
+log.info("cmd", "分片上传结束(" .. tostring(why) .. "), 当前档 " .. tostring(m) .. " 不起轮询")
+return
+end
+local poll = pollmod(false)
+if not poll then
+log.warn("cmd", "分片上传结束(" .. tostring(why) .. ") 但 bus/poll 不在, 轮询没还回来")
+return
+end
+if poll.is_running() then return end   -- commit_config 已经按新配置起了
+log.info("cmd", "分片上传结束(" .. tostring(why) .. "), 按 fskv 里那份旧配置恢复轮询")
+
+
+local ok, err = pcall(poll.start, (m == "platform") and SLOT_PULL or SLOT_POLL)
+if not ok then log.warn("cmd", "恢复轮询失败:", tostring(err)) end
+end
+
+
+function M._cshold_fire()
+up_reset("_cshold_fire")
+hold_restore("_cshold_fire")
+end
+
+
 local function reg_cmds()
 
 
@@ -549,6 +702,16 @@ end)
 
 
 
+
+
+
+
+
+
+
+
+
+
 local UP_PIECE_MAX  = 2048
 local UP_PIECES_MAX = 32      -- n 的上限: 32 片 x 每片几十行, 远超 128 点
 local UP_ROWS_MAX   = 200     -- 暂存行数上限(和 cfg.lua 的 MAX_REGS 同量级)
@@ -557,6 +720,57 @@ local function up_fail(i, why)
 log.warn("cmd", "CSHARD 第" .. i .. "片拒收:", why)
 return M.reply("RET:FAIL:CSHARD:" .. why)
 end
+
+
+
+
+
+
+
+
+
+
+
+
+M.reg("W:CBEGIN", function(arg)
+if blocked_while_detecting("CBEGIN") then return end
+if cbegin_guard then
+local no = cbegin_guard()
+if no then return M.reply("RET:FAIL:CBEGIN:" .. no) end
+end
+local c = arg:find(",", 1, true)
+local n = tonumber(c and arg:sub(1, c - 1) or arg)
+if not n or n < 1 or n > UP_PIECES_MAX then
+return M.reply("RET:FAIL:CBEGIN:片数非法(1.." .. UP_PIECES_MAX .. ")")
+end
+
+
+
+local budget = c and tonumber(arg:sub(c + 1)) or UP_PIECE_MAX
+if budget < 64 or budget > UP_PIECE_MAX + 256 then
+return M.reply("RET:FAIL:CBEGIN:单行预算 " .. tostring(budget)
+.. "B 不在 64.." .. (UP_PIECE_MAX + 256) .. " 之间")
+end
+up_reset("W:CBEGIN")
+up.on, up.n, up.got, up.mode = true, n, 0, ctrl.get_mode()
+local used = lua_used()          -- 先取水位的数, 再去试分配(探测本身吃块)
+local did = make_room()
+hold_arm()
+local mx = max_block({ 1024, 2048, 3072, 4096, 6144, 8192 })
+log.info("cmd", "分片上传开场 n=" .. n .. " mode=" .. tostring(up.mode)
+.. " 腾出[" .. table.concat(did, " ") .. "] max=" .. mx
+.. " used=" .. tostring(used))
+if mx < budget then
+
+
+up_reset("CBEGIN 水位不够")
+hold_restore("CBEGIN 水位不够")
+return M.reply("RET:FAIL:CBEGIN:腾完水仍接不住 " .. budget
+.. "B 的单行(最大连续块只有 " .. mx .. "B), 重启设备后立刻保存, 或把表改小")
+end
+
+M.reply("RET:CBEGIN=OK max:" .. mx .. " used:" .. tostring(used))
+end)
 
 M.reg("W:CSHARD", function(arg)
 if blocked_while_detecting("CSHARD") then return end
@@ -574,7 +788,11 @@ if #body > UP_PIECE_MAX then
 return up_fail(i, "单片太大 " .. #body .. ">" .. UP_PIECE_MAX)
 end
 
-if i == 1 then
+if i == 1 and up.on and up.n == n and up.got == 0 then
+
+
+log.info("cmd", "第 1 片接上 CBEGIN 开的会话 n=" .. n .. " mode=" .. tostring(up.mode))
+elseif i == 1 then
 
 
 
@@ -591,6 +809,7 @@ elseif i == up.got then
 
 
 log.info("cmd", "第" .. i .. "片重复到达, 已按原样回 OK")
+hold_touch()
 return M.reply("RET:CSHARD=" .. i .. "=OK")
 elseif i ~= up.got + 1 then
 local want = up.got + 1
@@ -623,6 +842,7 @@ up.rows[#up.rows + 1] = rows[k]
 end
 up.got = i
 up.bytes = up.bytes + #body
+hold_touch()      -- 有进展就把"静默 60 秒"的计时归零
 M.reply("RET:CSHARD=" .. i .. "=OK")
 end)
 
@@ -678,7 +898,16 @@ up_reset("CFINISH 提交")
 trc_begin(bytes_n)
 local ok, reason = commit_config(base)
 
-if not ok then return M.reply("RET:FAIL:CFG:" .. reason) end
+if not ok then
+
+
+
+hold_restore("CFINISH 提交失败")
+return M.reply("RET:FAIL:CFG:" .. reason)
+end
+
+
+hold_restore("CFINISH 提交")
 log.info("cmd", "分片上传提交完成 rows=" .. rows_n)
 
 
@@ -692,10 +921,13 @@ end)
 
 
 M.reg("W:CSABORT", function()
-if not up.on then return M.reply("RET:CSABORT=OK") end
-local n = up.got
+local n = up.on and up.got or 0
 up_reset("W:CSABORT")
-log.info("cmd", "分片上传被放弃, 已暂存 " .. n .. " 片")
+
+
+
+hold_restore("W:CSABORT")
+if n > 0 then log.info("cmd", "分片上传被放弃, 已暂存 " .. n .. " 片") end
 M.reply("RET:CSABORT=OK")
 end)
 
@@ -1046,6 +1278,23 @@ end
 mon.request_detect()
 M.reply("RET:AUTODETECT=BUSY")
 end)
+
+
+
+
+
+
+
+
+
+
+
+cbegin_guard = function()
+if ctrl.get_mode() == "sniff" then
+return "sniff 档在靠 poll/collector 做推断, W:CBEGIN 不能在这儿停轮询腾水; 要改配置先切 manual 或 platform"
+end
+return nil
+end
 end
 
 
@@ -1110,19 +1359,8 @@ end
 end
 end
 end
-local last_ok, first_fail = 0, 0
-local steps = { 1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384 }
-for i = 1, #steps do
-local n = steps[i]
-collectgarbage("collect")
-local ok, s = pcall(string.rep, "x", n)
-if ok and type(s) == "string" and #s == n then
-last_ok = n
-else
-first_fail = n
-break
-end
-end
+
+local last_ok, first_fail = max_block({ 1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384 })
 p[#p + 1] = string.format("max:%d fail:%d", last_ok, first_fail)
 M.reply("RET:MEM=" .. table.concat(p, " "))
 end)

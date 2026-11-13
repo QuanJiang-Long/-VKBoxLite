@@ -647,7 +647,13 @@ gen = gen + 1
 
 
 
-regs, interval, lastCfg = {}, cfg.POLL_INTERVAL_MS, nil
+
+
+
+
+
+
+regs, interval, lastCfg, plan = {}, cfg.POLL_INTERVAL_MS, nil, nil
 
 
 
