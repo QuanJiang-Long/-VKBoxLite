@@ -315,7 +315,25 @@ elseif mode == "idle" or mode == "stop" then
 
 
 local pm3 = pollmod(false)
-if pm3 then pm3.stop() end
+if pm3 then
+pm3.stop()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+local col = util.try("data/collector")
+if col then col.clear_all() end
+end
 stop_sniff()
 
 local cleared, notcleared = {}, {}

@@ -4,6 +4,7 @@ local log = util.log()
 
 local fskv = util.try("fskv")
 local json = util.try("json")
+local rtos = util.try("rtos")
 
 local M = {}
 
@@ -44,6 +45,23 @@ local s = tostring(v):gsub("[\r\n]", " ")
 n = n or 80
 if #s > n then s = s:sub(1, n) end
 return s
+end
+
+
+
+
+
+
+
+
+
+
+
+local function pool_tag()
+if not rtos then return "" end
+local ok, total, used = pcall(rtos.meminfo, "lua")
+if not ok or type(total) ~= "number" or type(used) ~= "number" then return "" end
+return "(池 " .. math.floor(used) .. "/" .. math.floor(total) .. ")"
 end
 
 
@@ -191,7 +209,7 @@ local ok, cs = pcall(fskv.get, shard_key(k, i))
 if not ok then return nil, "分片" .. i .. "读不出来: " .. brief(cs) end
 if cs == nil or cs == "" then return nil, "分片不全(" .. (i - 1) .. "/" .. n .. ")" end
 local ct = dec_json(cs)
-if ct == nil then return nil, "分片" .. i .. "解码失败" end
+if ct == nil then return nil, "分片" .. i .. "解码失败" .. pool_tag() end
 for j = 1, #ct do rows[#rows + 1] = ct[j] end
 end
 t.regs = rows

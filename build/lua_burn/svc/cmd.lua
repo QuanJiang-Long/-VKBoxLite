@@ -167,6 +167,52 @@ local ok, t = pcall(json.decode, s)
 return ok and t or nil
 end
 
+
+
+
+local function brief(v, n)
+local s = tostring(v):gsub("[\r\n]", " ")
+n = n or 80
+if #s > n then s = s:sub(1, n) end
+return s
+end
+
+
+
+
+local function pool_tag()
+if not rtos then return "" end
+local ok, total, used = pcall(rtos.meminfo, "lua")
+if not ok or type(total) ~= "number" or type(used) ~= "number" then return "" end
+return " pool " .. math.floor(used) .. "/" .. math.floor(total)
+end
+
+
+
+
+
+
+
+
+
+
+local function jencode_err(t)
+if not json then return nil, "json 库不可用" end
+local ok, s = pcall(json.encode, t)
+if ok and type(s) == "string" then return s end
+return nil, brief(s) .. pool_tag()
+end
+
+
+
+
+local function jdecode_err(s)
+if not json then return nil, "json 库不可用" end
+local ok, t = pcall(json.decode, s)
+if ok and t ~= nil then return t end
+return nil, brief(ok and "解码结果为空" or t) .. pool_tag()
+end
+
 local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
 
 
@@ -282,6 +328,96 @@ return table.concat(p, " | ")
 end
 
 
+
+
+
+
+
+
+
+local function commit_config(t)
+
+
+
+
+
+local n, err = cfgstore.normalize_poll(t, true)
+
+trc_sample("norm")
+
+
+if not n then return false, tostring(err) end
+trc_regs(n)
+trc_freed()
+local cur_mode = ctrl.get_mode()
+local slot = (cur_mode == "platform") and SLOT_PULL or SLOT_POLL
+local ok, serr
+
+
+if slot == SLOT_PULL then ok, serr = cfgstore.save_pull_norm(n)
+else ok, serr = cfgstore.save_poll_norm(n) end
+
+trc_sample("saved")
+if not ok then return false, tostring(serr or "写入失败") end
+
+
+
+
+
+local in_poll_mode = cur_mode == "manual" or cur_mode == "platform"
+
+local poll = pollmod(true)
+if not poll then return false, "bus/poll 不可用" end
+if poll.needs_restart(n) then
+if poll.is_running() then
+poll.stop()
+poll.apply_cfg(n)
+
+
+poll.start(slot, n)
+else
+poll.apply_cfg(n)
+if in_poll_mode then poll.start(slot, n) end
+end
+else
+poll.apply_cfg(n)
+if in_poll_mode and not poll.is_running() then
+
+
+
+
+poll.start(slot, n)
+end
+end
+if iot and iot.reply_config then pcall(iot.reply_config) end
+
+
+
+
+trc_sample("done")
+return true
+end
+
+
+
+
+
+
+
+
+local up = { on = false, n = 0, got = 0, rows = {}, bytes = 0, mode = nil }
+
+
+
+local function up_reset(why)
+if up.on and up.got > 0 then
+log.info("cmd", "分片暂存作废:", why or "-", "已收 " .. up.got .. "/" .. up.n)
+end
+up.on, up.n, up.got, up.bytes, up.mode = false, 0, 0, 0, nil
+up.rows = {}
+end
+
+
 local function reg_cmds()
 
 
@@ -332,6 +468,9 @@ local ok, msg, cleared, notcleared = ctrl.switch_mode(v)
 if not ok then return M.reply("RET:FAIL:MODE:" .. tostring(msg)) end
 
 
+up_reset("W:MODE 切档")
+
+
 
 
 
@@ -369,7 +508,10 @@ end)
 
 M.reg("W:CFG", function(arg)
 if blocked_while_detecting("CFG") then return end
+
+up_reset("W:CFG")
 trc_begin(#arg)
+
 
 
 
@@ -378,69 +520,176 @@ trc_begin(#arg)
 
 if #arg > 4096 then collectgarbage("collect") end
 trc_sample("gc")
-local t = jdecode(arg)
+local t, jerr = jdecode_err(arg)
 trc_sample("decoded")
-if not t then return M.reply("RET:FAIL:CFG:bad json") end
 
 
-
-
-
-local n, err = cfgstore.normalize_poll(t, true)
-
-trc_sample("norm")
-
-
-if not n then return M.reply("RET:FAIL:CFG:" .. tostring(err)) end
-trc_regs(n)
-trc_freed()
-local cur_mode = ctrl.get_mode()
-local slot = (cur_mode == "platform") and SLOT_PULL or SLOT_POLL
-local ok, serr
-
-
-if slot == SLOT_PULL then ok, serr = cfgstore.save_pull_norm(n)
-else ok, serr = cfgstore.save_poll_norm(n) end
-
-trc_sample("saved")
-if not ok then return M.reply("RET:FAIL:CFG:" .. tostring(serr)) end
-
-
-
-
-
-local in_poll_mode = cur_mode == "manual" or cur_mode == "platform"
-
-local poll = pollmod(true)
-if not poll then return M.reply("RET:FAIL:CFG:bus/poll 不可用") end
-if poll.needs_restart(n) then
-if poll.is_running() then
-poll.stop()
-poll.apply_cfg(n)
-
-
-poll.start(slot, n)
-else
-poll.apply_cfg(n)
-if in_poll_mode then poll.start(slot, n) end
-end
-else
-poll.apply_cfg(n)
-if in_poll_mode and not poll.is_running() then
-
-
-
-
-poll.start(slot, n)
-end
-end
-if iot and iot.reply_config then pcall(iot.reply_config) end
-
-
-
-
-trc_sample("done")
+if not t then return M.reply("RET:FAIL:CFG:" .. jerr) end
+local ok, reason = commit_config(t)
+if not ok then return M.reply("RET:FAIL:CFG:" .. reason) end
 M.reply("RET:CFG=OK")
+end)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+local UP_PIECE_MAX  = 2048
+local UP_PIECES_MAX = 32      -- n 的上限: 32 片 x 每片几十行, 远超 128 点
+local UP_ROWS_MAX   = 200     -- 暂存行数上限(和 cfg.lua 的 MAX_REGS 同量级)
+
+local function up_fail(i, why)
+log.warn("cmd", "CSHARD 第" .. i .. "片拒收:", why)
+return M.reply("RET:FAIL:CSHARD:" .. why)
+end
+
+M.reg("W:CSHARD", function(arg)
+if blocked_while_detecting("CSHARD") then return end
+
+
+local c = arg:find(",", 1, true)
+if not c then return up_fail(0, "缺 , 分隔") end
+local i, n = arg:sub(1, c - 1):match("^(%d+)/(%d+)$")
+i, n = tonumber(i), tonumber(n)
+if not i or not n then return up_fail(0, "片号不是 i/n") end
+if i < 1 or n < 1 or i > n then return up_fail(i, "片号超范围 n=" .. n) end
+if n > UP_PIECES_MAX then return up_fail(i, "片数超上限 " .. UP_PIECES_MAX) end
+local body = arg:sub(c + 1)
+if #body > UP_PIECE_MAX then
+return up_fail(i, "单片太大 " .. #body .. ">" .. UP_PIECE_MAX)
+end
+
+if i == 1 then
+
+
+
+up_reset("CSHARD 第 1 片")
+up.on, up.n, up.mode = true, n, ctrl.get_mode()
+log.info("cmd", "分片上传开始 n=" .. n .. " mode=" .. tostring(up.mode))
+elseif not up.on then
+return up_fail(i, "没有上传会话, 先发第 1 片")
+elseif up.n ~= n then
+local why = "片数和正在收的那次不一样(n=" .. up.n .. " 收到 " .. n .. ")"
+up_reset("片数变了")
+return up_fail(i, why)
+elseif i == up.got then
+
+
+log.info("cmd", "第" .. i .. "片重复到达, 已按原样回 OK")
+return M.reply("RET:CSHARD=" .. i .. "=OK")
+elseif i ~= up.got + 1 then
+local want = up.got + 1
+up_reset("顺序断了")
+return up_fail(i, "顺序不对, 下一片应该是 " .. want)
+end
+
+local rows, jerr = jdecode_err(body)
+if not rows then
+up_reset("片解码失败")
+return up_fail(i, jerr)
+end
+if type(rows) ~= "table" then
+up_reset("片不是数组")
+return up_fail(i, "片不是 JSON 数组")
+end
+
+
+
+for k = 1, #rows do
+if type(rows[k]) ~= "table" then
+up_reset("第 " .. k .. " 项不是对象")
+return up_fail(i, "数组第 " .. k .. " 项不是对象")
+end
+if #up.rows >= UP_ROWS_MAX then
+up_reset("暂存行数超上限")
+return up_fail(i, "行数超上限 " .. UP_ROWS_MAX)
+end
+up.rows[#up.rows + 1] = rows[k]
+end
+up.got = i
+up.bytes = up.bytes + #body
+M.reply("RET:CSHARD=" .. i .. "=OK")
+end)
+
+
+
+
+
+M.reg("W:CFINISH", function(arg)
+if blocked_while_detecting("CFINISH") then return end
+if not up.on then
+return M.reply("RET:FAIL:CFINISH:没有上传会话, 先发 W:CSHARD")
+end
+local c = arg:find(",", 1, true)
+local n = c and tonumber(arg:sub(1, c - 1)) or nil
+if not n then
+up_reset("CFINISH 缺 n")
+return M.reply("RET:FAIL:CFINISH:缺片数 n")
+end
+if n ~= up.n then
+local why = "片数不符(上传时说是 " .. up.n .. ", 收尾说 " .. n .. ")"
+up_reset("CFINISH 片数不符")
+return M.reply("RET:FAIL:CFINISH:" .. why)
+end
+if up.got ~= up.n then
+
+
+
+return M.reply("RET:FAIL:CFINISH:只收到 " .. up.got
+.. "/" .. up.n .. " 片, 补发第 " .. (up.got + 1) .. " 片起")
+end
+if ctrl.get_mode() ~= up.mode then
+
+local why = "上传途中模式从 " .. tostring(up.mode) .. " 变成了 "
+.. tostring(ctrl.get_mode()) .. ", 这" .. up.n .. "片作废, 重新上传"
+up_reset("CFINISH 时模式变了")
+return M.reply("RET:FAIL:CFINISH:" .. why)
+end
+local base, jerr = jdecode_err(arg:sub(c + 1))
+if not base then
+up_reset("CFINISH 解码失败")
+return M.reply("RET:FAIL:CFINISH:" .. jerr)
+end
+if type(base) ~= "table" then
+up_reset("CFINISH 不是对象")
+return M.reply("RET:FAIL:CFINISH:收尾字段不是 JSON 对象")
+end
+
+
+
+base.regs = up.rows
+local rows_n, bytes_n = #up.rows, up.bytes + #arg
+up_reset("CFINISH 提交")
+trc_begin(bytes_n)
+local ok, reason = commit_config(base)
+if not ok then return M.reply("RET:FAIL:CFG:" .. reason) end
+log.info("cmd", "分片上传提交完成 rows=" .. rows_n)
+M.reply("RET:CFG=OK")
+end)
+
+
+
+M.reg("W:CSABORT", function()
+if not up.on then return M.reply("RET:CSABORT=OK") end
+local n = up.got
+up_reset("W:CSABORT")
+log.info("cmd", "分片上传被放弃, 已暂存 " .. n .. " 片")
+M.reply("RET:CSABORT=OK")
 end)
 
 M.reg("R:REG", function()
@@ -451,7 +700,11 @@ reply_json("RET:REG=", jencode(regs or {}))
 end)
 
 M.reg("R:VAL", function()
-reply_json("RET:VAL=", jencode(collector.snapshot()))
+
+
+local s, err = jencode_err(collector.snapshot())
+if not s then return M.reply("RET:FAIL:VAL:" .. err) end
+reply_json("RET:VAL=", s)
 end)
 
 
@@ -519,6 +772,7 @@ return M.reply("RET:FAIL:CLRPULL:平台正在拉取中, 稍后重试")
 end
 local ok, err, wrote = cfgstore.clear_pull()
 if not ok then return M.reply("RET:FAIL:CLRPULL:" .. tostring(err)) end
+up_reset("W:CLRPULL")
 
 
 log.info("cmd", string.format("W:CLRPULL cleared=%s", tostring(wrote)))
@@ -545,6 +799,7 @@ M.reg("W:CLRPOLL", function()
 if not cfgstore then return M.reply("RET:FAIL:CLRPOLL:cfgstore 不可用") end
 local ok, err, wrote = cfgstore.clear_poll()
 if not ok then return M.reply("RET:FAIL:CLRPOLL:" .. tostring(err)) end
+up_reset("W:CLRPOLL")
 log.info("cmd", string.format("W:CLRPOLL cleared=%s", tostring(wrote)))
 if wrote then return M.reply("RET:CLRPOLL=OK;cleared:manual 配置")
 else return M.reply("RET:CLRPOLL=OK;cleared:") end

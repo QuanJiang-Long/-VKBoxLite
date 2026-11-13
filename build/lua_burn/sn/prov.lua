@@ -4,6 +4,7 @@ local log = util.log()
 local uart = util.get("uart")
 local sys = util.try("sys")
 local fskv = util.try("fskv")
+local rtos = util.try("rtos")
 
 local M = {}
 
@@ -184,6 +185,27 @@ end
 
 local function cat2(a, b) return a .. b end
 
+
+
+
+
+
+
+
+
+local function why_and_pool(e)
+local s = tostring(e):gsub("[\r\n]", " ")
+if #s > 96 then s = s:sub(1, 96) end
+local pool = ""
+if rtos then
+local ok, total, used = pcall(rtos.meminfo, "lua")
+if ok and type(total) == "number" and type(used) == "number" then
+pool = " pool " .. math.floor(used) .. "/" .. math.floor(total)
+end
+end
+return s .. pool
+end
+
 local function rx_merge()
 if #rx_parts == 0 then return end
 local has_line = false
@@ -206,7 +228,7 @@ local ok, s = pcall(table.concat, rx_parts)
 if not ok or type(s) ~= "string" then
 local bytes = rx_len
 rx_parts, rx_len = {}, 0
-return false, "concat fail, drop " .. bytes .. "B"
+return false, why_and_pool(s) .. ", drop " .. bytes .. "B"
 end
 joined = s
 end
@@ -220,7 +242,7 @@ local ok2, nb = pcall(cat2, rx_buf, joined)
 if not ok2 or type(nb) ~= "string" then
 
 
-return false, "cat fail, drop " .. #joined .. "B"
+return false, why_and_pool(nb) .. ", drop " .. #joined .. "B"
 end
 rx_buf = nb
 return true
