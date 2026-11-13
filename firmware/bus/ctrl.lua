@@ -315,7 +315,25 @@ function M.switch_mode(mode, from_boot)
         --   12-fix-8: poll 从没加载过就不用停(它没绑过 UART), 也别为
         --   停它把 14KB 常驻堆拉进来。
         local pm3 = pollmod(false)
-        if pm3 then pm3.stop() end
+        if pm3 then
+            pm3.stop()
+            -- 2026-11-13: 停 poll 之后必须连采集缓存一起放开。
+            --   ⚠️ 为什么单独加这一步: poll.stop() 只清它自己那份 regs
+            --   (bus/poll.lua 的 M.stop), 缓存那侧只有 mon.stop() 会调
+            --   collector.clear_all() —— 于是 manual -> idle 这条路【没人清】,
+            --   那 60 行数据和它们的 id 字符串一直被 dataCache 攥着。
+            --   现场证据: 冷开机空槽 used 270336, 存一次 60 行 + 轮询两分钟,
+            --   切 idle 清完配置再 W:GC 两轮仍是 285320 —— 配置已经没了、
+            --   GC 收了四轮, 还差这 ~15KB。
+            --   这不会让 max 回来(同一个开机内 max 塌了不恢复, 11-13 实测),
+            --   但它把"白占着的活引用"从曲线里摘掉, 下一步的量才好读。
+            --   为什么挂在 pm3 非空这条路上: poll 从没加载过 = 没跑过轮询 =
+            --   缓存必然是空的, 为清一个空缓存把 collector(10KB 源码)请进
+            --   常驻堆是净亏 —— idle 开机那条路尤其亏。require 命中缓存,
+            --   poll 在的时候它早就在了。
+            local col = util.try("data/collector")
+            if col then col.clear_all() end
+        end
         stop_sniff()
         -- V2 日志优化：精简 idle 分支日志，from_boot 降 DEBUG
         local cleared, notcleared = {}, {}

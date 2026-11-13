@@ -49,7 +49,14 @@ package.preload["util"] = function()
                 write = function(_, s) uart_writes[#uart_writes + 1] = s; return s:len() end,
             }
         end,
-        try = function() return nil end,
+        try = function(name)
+            -- 2026-11-13: prov 的失败原因里要带 Lua 池水位(why_and_pool),
+            --   所以 rtos 也得给一份假 meminfo —— 不给就只测到"没水位也不崩"
+            if name == "rtos" then
+                return { meminfo = function() return 307192, 293544, 307192 end }
+            end
+            return nil
+        end,
     }
 end
 
@@ -216,8 +223,26 @@ do
     check("一轮只回一次(不逐片刷串口)", #uart_writes == 1,
         "写了 " .. #uart_writes .. " 段: " .. string.format("%q", rep))
     local errs = 0
-    for _, l in ipairs(logs) do if l:find("rx lost", 1, true) then errs = errs + 1 end end
+    local lost_line
+    for _, l in ipairs(logs) do
+        if l:find("rx lost", 1, true) then errs = errs + 1; lost_line = l end
+    end
     check("设备日志留下一句查得到的话", errs == 1, "找到 " .. errs .. " 条")
+    -- 2026-11-13: 那句话必须是【真错误】。以前这里写死 "concat fail", 于是
+    --   11-12 现场两次 rx lost 只有那五个字, 附近又没有 E/mem 行, "到底是
+    --   分配不出来还是 concat 换了别的说法"整轮没法判。现在带 pcall 的第二
+    --   返回值原话 + 池水位, 当场就能对上 11-13 那两行:
+    --     E/mem used 293544, alloc 4089  /  rx lost: ... drop 4072B
+    check("日志带 C 层那句原话(不是我们替它编的词)",
+        lost_line:find("not enough memory", 1, true) ~= nil, string.format("%q", lost_line or ""))
+    check("日志带池水位", lost_line:find("pool 293544/307192", 1, true) ~= nil,
+        string.format("%q", lost_line or ""))
+    check("日志带丢掉多少字节", lost_line:find("drop ", 1, true) ~= nil,
+        string.format("%q", lost_line or ""))
+    check("日志里没有换行(一行就是一行)", not lost_line:find("\n", 1, true),
+        string.format("%q", lost_line or ""))
+    check("串口上那句仍然是前端认识的原话",
+        rep:find("RET:FAIL:rx 丢弃, 请重发", 1, true) ~= nil, string.format("%q", rep))
     -- 丢完之后设备必须还能干活(分片已经清空, 不是卡在半个缓冲里)
     reset()
     feed_lines("R:STAT")

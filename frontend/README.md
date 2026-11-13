@@ -267,9 +267,42 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 |---|---|---|---|
 | 读设备信息 | `R:INFO` | `RET:INFO={json}` | SN/sn_state/lock/IMEI/**UID**/ICCID/CSQ/RSRP/版本/项目/服务器/波特率/从机/寄存器数 |
 | 读 poll 配置 | `R:CFG` | `RET:CFG={json}` | `{cfg:{baud,databits,parity,stopbits,slave,interval_ms,timeout_ms,regs},src,slot}`；`slot`=`poll`/`pull` 由当前运行模式决定 |
-| 保存 poll 配置 | `W:CFG={json}` | `RET:CFG=OK` / `RET:FAIL:CFG:原因` | 串口参数变化自动重启轮询任务；间隔/寄存器表热更新。**写哪个槽同样由运行模式决定**：`poll（拉取配置）` 档写 `ds_pull`，其余写 `ds_poll`。读写同槽才有"所见即所存" |
+| 保存 poll 配置 | `W:CFG={json}` | `RET:CFG=OK` / `RET:FAIL:CFG:原因` | 串口参数变化自动重启轮询任务；间隔/寄存器表热更新。**写哪个槽同样由运行模式决定**：`poll（拉取配置）` 档写 `ds_pull`，其余写 `ds_poll`。读写同槽才有"所见即所存"。整行超过 1200 字节时前端**自动改走下面的分片上行**，用户无感 |
+| 分片上传寄存器表 | `W:CSHARD=<i>/<n>,[regs 行数组]` | `RET:CSHARD=<i>=OK` / `RET:FAIL:CSHARD:原因` | 一片 ≤1200 字节的寄存器行。设备只在 RAM 里暂存，**没凑齐 n 片之前一个字节都不写 fskv** |
+| 分片收尾提交 | `W:CFINISH=<n>,{除 regs 外的 cfg 字段}` | `RET:CFG=OK` / `RET:FAIL:CFG:原因` | 把暂存的行拼成 regs、和这里带的字段合成整份配置，走与 `W:CFG` **完全相同**的校验+落盘+热更路径 |
+| 放弃分片上传 | `W:CSABORT` | `RET:CSABORT=OK` | 某一片重发 3 次仍没送达时前端发这条，清掉设备暂存。**不发也行**——暂存在 RAM，断电/切档/插一条 `W:CFG` 都会自动作废，设备里那份老配置动不了 |
 | 读寄存器表 | `R:REG` | `RET:REG=[json]` | `[{addr,count,name,alias,dtype}]`。**只有读**：写寄存器表走 `W:CFG`（`regs` 并进 cfg 一起发），`W:REG` 已删 |
-| 读实时值 | `R:VAL` | `RET:VAL=[json]` | `[{name,addr,value,hex,ts,dtype}]`，设备已解好值 |
+| 读实时值 | `R:VAL` | `RET:VAL=[json]` / `RET:FAIL:VAL:原因` | `[{name,addr,value,hex,ts,dtype}]`，设备已解好值。**2026-11-13 起**：设备拼不出这份 JSON（池子不够）时改回 `RET:FAIL:VAL:` + 原因 + `pool 已用/总量` 水位，不再回一条空的 `RET:VAL=` 冒充"一个点都没采到" |
+
+### 为什么大表要分片上行（2026-11-13）
+
+现场结论：**只要轮询任务在跑，设备的 Lua 池就只给得出 3072 字节的连续块**
+（`R:MEM` 实测 `max:3072`，池总量 307192）。一条 60 行的 `W:CFG` 是 **4072 字节的一整行**，
+在 `sn/prov.lua` 拼包阶段就 `not enough memory` 被丢掉——**连解析都没进**。
+所以那台设备表现成"开机第一次保存能成，之后每次都失败"，而且失败得悄无声息。
+
+分片只是**换运输方式**，落盘格式（`cfg.lua` 的 fskv 分片，16 行一片）和校验
+（`normalize_poll(t,true)` 就地归一化）**一个字都没改**，两条路径提交走的是同一个函数。
+前端 `renderer/cfg.js` 的 `writeCfgUp()` 负责选路：
+
+| 整条 `W:CFG` 字节数 | 走法 |
+|---|---|
+| ≤ 1200 | 一条 `W:CFG`（老逻辑，小配置不会变慢） |
+| > 1200 | `W:CSHARD=1/n … n/n` → `W:CFINISH`，每片 ≤1200 字节 |
+
+要点：
+
+- **按字节切，不按字符**：`byteLen()` 用 `TextEncoder` 数 UTF-8 字节，别名是中文时
+  一个字符算 3 字节。按字符切会让含中文别名的表实际超限
+- **一片内按整行为界**，绝不把一行的 JSON 切断；单行自己就超过 1200 字节属于配置填错
+  （标识符/别名过长），前端直接报"这一行设备接不住"，不发指令
+- **片数上限 32**，超过同样在前端拦下（正常表 60 行 3~4 片）
+- **每片重发 3 次**。设备对"重复送达的同一片号"回 OK 但不重复追加——
+  覆盖的是"命令到了、应答丢在路上"这一种，没有这条规则会永远卡在下一片
+- **任何一步失败都发 `W:CSABORT`** 并把原因贴到状态栏；设备端此时一个字都没写进 fskv，
+  面板上那份仍挂着「未保存」标记
+- 上传途中**切模式会让提交失败**（`RET:FAIL:CFINISH:上传途中模式从 manual 变成了 platform`），
+  因为写哪个槽是模式决定的——中途换槽等于把配置存到另一个地方
 | 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,mqtt}` 全量状态；`mqtt` 段另带 `push_n/push_seen/push_err/autosaved/autosave_at`（平台主动重推横幅用，见下）；`write` 段是写队列的 queued/done/fail |
 
 ### 平台配置拉取

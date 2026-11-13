@@ -4,6 +4,7 @@ local log = util.log()
 
 local fskv = util.try("fskv")
 local json = util.try("json")
+local rtos = util.try("rtos")
 
 local M = {}
 
@@ -44,6 +45,23 @@ local function brief(v, n)
     n = n or 80
     if #s > n then s = s:sub(1, n) end
     return s
+end
+
+-- 失败原因后面贴一次 Lua 池水位 (used/total, 约 20 字节)。
+--   为什么只在失败路径贴: 11-12/11-13 现场反复出现同一句假话 ——
+--     E/mem memory allocation failed total 307192, used 302680, alloc 160
+--     E/user.cfg poll read fail: 分片4解码失败
+--   连 160 字节都拿不到的时候, json.decode 是【回 nil】而不是抛的(这台 bsp
+--   的 C 层就这样), 于是"池子不够"被报成"flash 里那段内容坏了"。同一段前后
+--   都读得出来, 内容根本没坏。光说"解码失败"排查方向直接被带偏到 flash 上,
+--   带上水位这一眼就分得清是哪种。
+--   ⚠️ rtos.meminfo 的顺序是 (total, used, 峰值) —— 和 svc/cmd.lua 的
+--   R:MEM 同一个口径, 别在这里换成 (used, total) 反着报
+local function pool_tag()
+    if not rtos then return "" end
+    local ok, total, used = pcall(rtos.meminfo, "lua")
+    if not ok or type(total) ~= "number" or type(used) ~= "number" then return "" end
+    return "(池 " .. math.floor(used) .. "/" .. math.floor(total) .. ")"
 end
 
 -- 读一个槽的原文, 把【读不出来】和【没写过】分开。
@@ -191,7 +209,7 @@ local function shards_load(k, t)
         if not ok then return nil, "分片" .. i .. "读不出来: " .. brief(cs) end
         if cs == nil or cs == "" then return nil, "分片不全(" .. (i - 1) .. "/" .. n .. ")" end
         local ct = dec_json(cs)
-        if ct == nil then return nil, "分片" .. i .. "解码失败" end
+        if ct == nil then return nil, "分片" .. i .. "解码失败" .. pool_tag() end
         for j = 1, #ct do rows[#rows + 1] = ct[j] end
     end
     t.regs = rows

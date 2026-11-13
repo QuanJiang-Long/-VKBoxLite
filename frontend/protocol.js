@@ -27,6 +27,21 @@
     cfg:        ()     => 'R:CFG',                      // 读 poll 配置
     writeCfg:   (obj)  => 'W:CFG=' + JSON.stringify(obj),
 
+    // ---- 配置分片上传 (2026-11-13, 甲) ----
+    // ⚠️ 为什么要有这一组: 轮询跑起来之后设备只切得出 ~3KB 的连续块(现场
+    // R:MEM = max:3072 fail:4096), 而 60 行那份 W:CFG 是【一整行 4072B】,
+    // prov 把它并成一行时就要那么大的块 —— 于是在还没解析之前整条被丢掉
+    // (E/user.prov rx lost: concat fail, drop 4072B)。同一个开机里 max 塌了
+    // 不再回来(清配置 + W:GC 两轮仍是 3072), 只有重启才恢复, 所以"第一次保存
+    // 能成、之后怎么存都失败"是结构性的。
+    // 这里只把【传输】切片: 每片是一小段寄存器行的 JSON, 设备在 RAM 里按序攒
+    // 成行表, W:CFINISH 时交回和 W:CFG 【同一条】提交流程 —— 存储格式、校验、
+    // 起轮询的规矩一个字没变。前端只在整行超过阈值时才走这条路, 小改动仍然
+    // 直接发 W:CFG。好处: 上传中断时 flash 里那份老配置完好无损(暂存只在 RAM)
+    cfgShard:   (i, n, rows) => 'W:CSHARD=' + i + '/' + n + ',' + JSON.stringify(rows),
+    cfgFinish:  (n, obj)     => 'W:CFINISH=' + n + ',' + JSON.stringify(obj),
+    cfgAbort:   ()           => 'W:CSABORT',
+
     // ---- 寄存器表 ----
     // ⚠️ 只有 R:REG 没有 W:REG：前端「保存配置」把 regs 并进 W:CFG 一起发
     // (app.js: cfg.regs = regs -> writeCfg)，单独写寄存器表的指令零调用已删

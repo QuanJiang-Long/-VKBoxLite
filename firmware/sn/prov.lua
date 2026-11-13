@@ -4,6 +4,7 @@ local log = util.log()
 local uart = util.get("uart")
 local sys = util.try("sys")
 local fskv = util.try("fskv")
+local rtos = util.try("rtos")
 
 local M = {}
 
@@ -184,6 +185,27 @@ end
 -- 继续攒着(大命令逐片到达, 提前并等于白抄一遍)
 local function cat2(a, b) return a .. b end
 
+-- 失败原因里带上真实报错 + Lua 池水位。
+--   ⚠️ 为什么不能再写死 "concat fail": 11-12 那两次 rx lost 只有这五个字,
+--   而附近【没有】E/mem 行, 于是"到底是 OOM 还是 table.concat 换了别的说法"
+--   整轮没法判。11-13 补了水位之后当场对上 ——
+--     E/mem used 293544, alloc 4089  ← 正好是那一整行 4072B + 一点点
+--     E/user.prov rx lost: concat fail, drop 4072B
+--   现在把 pcall 的第二返回值原样带出来, 下次再看见 rx lost 第一件事就该是
+--   "它说的是哪句话", 不用再去猜
+local function why_and_pool(e)
+    local s = tostring(e):gsub("[\r\n]", " ")
+    if #s > 96 then s = s:sub(1, 96) end
+    local pool = ""
+    if rtos then
+        local ok, total, used = pcall(rtos.meminfo, "lua")
+        if ok and type(total) == "number" and type(used) == "number" then
+            pool = " pool " .. math.floor(used) .. "/" .. math.floor(total)
+        end
+    end
+    return s .. pool
+end
+
 local function rx_merge()
     if #rx_parts == 0 then return end
     local has_line = false
@@ -206,7 +228,7 @@ local function rx_merge()
         if not ok or type(s) ~= "string" then
             local bytes = rx_len
             rx_parts, rx_len = {}, 0
-            return false, "concat fail, drop " .. bytes .. "B"
+            return false, why_and_pool(s) .. ", drop " .. bytes .. "B"
         end
         joined = s
     end
@@ -220,7 +242,7 @@ local function rx_merge()
     if not ok2 or type(nb) ~= "string" then
         -- rx_buf 那份是已经在手上的, 不该跟着陪葬: 只丢并进不来的 joined,
         -- 里面那条命令丢了就丢了, 由上面的如实回报告诉前端重发
-        return false, "cat fail, drop " .. #joined .. "B"
+        return false, why_and_pool(nb) .. ", drop " .. #joined .. "B"
     end
     rx_buf = nb
     return true

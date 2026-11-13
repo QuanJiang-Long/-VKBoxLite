@@ -167,6 +167,52 @@ local function jdecode(s)
     return ok and t or nil
 end
 
+-- 往外报的"原因"先过这一道: 应答是一整行的, 原因里带换行会把后面所有帧的
+-- 解析搅乱; 太长会顶到应答缓冲。C 层那句(not enough memory for buffer
+-- allocation)都是 ASCII, 截断不会切断多字节字符
+local function brief(v, n)
+    local s = tostring(v):gsub("[\r\n]", " ")
+    n = n or 80
+    if #s > n then s = s:sub(1, n) end
+    return s
+end
+
+-- Lua 池水位后缀。诊断串里带上"当时池子什么样子", 一句话就能分清
+--   【拼不出来】和【本来就没有】—— 不带水位时这两种情况在日志里长一个样。
+--   取不到就整段不追加, 别用 0 冒充(0/0 会被读成"池子空着")
+local function pool_tag()
+    if not rtos then return "" end
+    local ok, total, used = pcall(rtos.meminfo, "lua")
+    if not ok or type(total) ~= "number" or type(used) ~= "number" then return "" end
+    return " pool " .. math.floor(used) .. "/" .. math.floor(total)
+end
+
+-- jencode 的"带原因"版本。
+--   ⚠️ 为什么不能继续让 jencode 失败回 "{}": 11-12 现场 R:VAL 那一次, 日志
+--   里明明白白是 alloc 4023 → 编码不出来, 但应答是 RET:VAL={} ——前端把它
+--   显示成"暂无数据: 设备可能未进入轮询模式"。两件事被说成了同一件:
+--     1) 缓存里确实一行数据都没有(轮询没跑)
+--     2) 缓存里有 60 行, 但拼不出一条应答(池子见底)
+--   只有 jencode_err 把第二件如实报出来, 前端那句提示才不再是猜。
+--   其余命令仍用 jencode: 本次只改 R:VAL(现场唯一被误读成"没数据"的那条),
+--   不动 R:INFO/R:CFG/R:STAT 那些应答的形状。
+local function jencode_err(t)
+    if not json then return nil, "json 库不可用" end
+    local ok, s = pcall(json.encode, t)
+    if ok and type(s) == "string" then return s end
+    return nil, brief(s) .. pool_tag()
+end
+
+-- jdecode 的"带原因"版本(道理和上面一样: 原来 bad json 这一个词同时代表了
+--   "前端写的东西不合法"和"解码时分配不出来", 后者重发就能过, 前者重发永远
+--   不过 —— 分不清就会一直重试或一直放弃)
+local function jdecode_err(s)
+    if not json then return nil, "json 库不可用" end
+    local ok, t = pcall(json.decode, s)
+    if ok and t ~= nil then return t end
+    return nil, brief(ok and "解码结果为空" or t) .. pool_tag()
+end
+
 local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
 
 -- W:MODE 的槽清单拼成 k:v 段。前端 protocol.js 按 ';' 分段、段内按【第一个】
@@ -281,6 +327,96 @@ local function trc_line(tr, tag)
     return table.concat(p, " | ")
 end
 
+-- 提交一份【已解码】的配置表: 归一化 -> 落盘 -> 按需重启轮询 -> 平台回报。
+-- W:CFG(整行一次到) 和 W:CFINISH(分片攒齐) 共用这一条。
+--   ⚠️ 为什么必须共用: 分片上传存在的唯一理由是"一整行 4KB 在轮询中接不进
+--   来"(见下面 UP_PIECE_MAX 那段), 它只改【传输怎么分片】, 不改存储格式也不改
+--   校验。要是 CFINISH 自己再写一遍提交逻辑, 两条路迟早某个校验或某次落盘
+--   行为分叉 —— 那种 bug 只会以"手动保存能成、分片保存 somehow 不能成"的
+--   形式在现场撞见, 而现场没法同时对比两条路。
+-- 返回 (true) 或 (false, 原因)。原因一律由调用方原样带进 RET:FAIL:CFG:
+local function commit_config(t)
+    -- 第二个参数 true = 在 t 上【原地】归一化, 不再新建第二张表。
+    --   11-12 现场 56 点这一段 +13048B, 那就是"归一化的第二份" —— 解码表
+    --   和归一化表同时在堆上, 一次保存的入场费因此是 decoded+norm ≈ 28KB。
+    -- ⚠️ 这里敢原地, 是因为 t 是调用方现解的私有表, 不进任何缓存;
+    --    缓存里那份(raw)必须走纯函数路径, 见 cfg.lua 12-fix-3 的约定
+    local n, err = cfgstore.normalize_poll(t, true)
+    -- inplace 之后 n == t, 所以这一段应当贴着 0(还在涨就说明没走到原地路径)
+    trc_sample("norm")
+    -- ⚠️ 归一化失败就地返回: 采样的"停在第几段"就是"死在第几步",
+    --    这里再多走一段 freed, 读的人会以为归一化过了
+    if not n then return false, tostring(err) end
+    trc_regs(n)
+    trc_freed()
+    local cur_mode = ctrl.get_mode()
+    local slot = (cur_mode == "platform") and SLOT_PULL or SLOT_POLL
+    local ok, serr
+    -- 落归一化后的 n, 不再用 save_poll(t): 后者会在内部再 normalize 一遍,
+    --   等于把 128 个寄存器表(~30KB)白造第二次
+    if slot == SLOT_PULL then ok, serr = cfgstore.save_pull_norm(n)
+    else ok, serr = cfgstore.save_poll_norm(n) end
+    -- 落盘内部那份 jencode 字符串已经还掉了, used 看不见它; 靠 max 的涨幅
+    trc_sample("saved")
+    if not ok then return false, tostring(serr or "写入失败") end
+    -- 34-fix: 进入 polling 档 (manual/platform) 时, 如果 poll 因为空配置
+    --   没起来 (34-fix 的副作用, 之前一定起来), 现在写完要把 poll 启起来,
+    --   否则用户添了表保存后什么都看不到
+    -- idle/sniff 档: poll 本来就不该起, 即便 get_mode() 算出 SLOT_POLL
+    --   也不在这两档起 (前端不会在这两档发配置, 这层防御是兜底)
+    local in_poll_mode = cur_mode == "manual" or cur_mode == "platform"
+    -- 配置提交就是在配轮询, 这里该把 poll 拉进来
+    local poll = pollmod(true)
+    if not poll then return false, "bus/poll 不可用" end
+    if poll.needs_restart(n) then
+        if poll.is_running() then
+            poll.stop()
+            poll.apply_cfg(n)
+            -- ⚠️ 必须带槽: poll.start() 不传 src 会把 curSlot 强制置成 "poll"
+            -- 第二个参数 = 刚归一化好的那份, start 里就不再 reload_cfg 了
+            poll.start(slot, n)
+        else
+            poll.apply_cfg(n)
+            if in_poll_mode then poll.start(slot, n) end
+        end
+    else
+        poll.apply_cfg(n)
+        if in_poll_mode and not poll.is_running() then
+            -- 34-fix: needs_restart 不成立但 poll 没起来 (例如:
+            --   manual 档进入时空 ds_poll → 34-fix 不起 → 用户添
+            --   寄存器表但 baud/slave 没动 → needs_restart=false →
+            --   之前没人调 poll.start). 补起
+            poll.start(slot, n)
+        end
+    end
+    if iot and iot.reply_config then pcall(iot.reply_config) end
+    -- 重启轮询(建块计划)之后采一次。11-12 起 start 拿得到 n, 不再回头
+    --   reload_cfg 解第二遍, 这一段应当只剩建块计划那点(几 KB 量级);
+    --   还是 +15KB 往上跳就说明没走到传 n 的那条路(旧版这里 +26992B,
+    --   池子 306168/307192 只剩 1024B —— 见 README 的 CTRACE 现场表)
+    trc_sample("done")
+    return true
+end
+
+-- ==== 分片上传的暂存状态(只在 RAM) ====
+--   为什么只放 RAM: 这条路的目的是【让单行变小】, 存储格式一点没动(还是
+--   cfg.lua 那套 fskv 分片槽)。暂存落了盘反而多出一份半写状态要管。
+--   带来的好处: 上传中断(断电/放弃/片没凑齐)时 flash 里那份老配置完好无损,
+--   比 st=w 那种半写头更安全 —— 这是白捡的。
+--   mode 记下【第 1 片到达时】的模式: commit_config 按当刻 get_mode() 决定
+--   落 ds_poll 还是 ds_pull, 上传途中切档会把这几十片送进另一个槽。
+local up = { on = false, n = 0, got = 0, rows = {}, bytes = 0, mode = nil }
+
+-- 会话作废。why 只进日志: 现场要能回答"我明明发了 8 片, 怎么说没会话",
+--   答案通常是"中间插了一条 W:MODE / W:CFG, 那 8 片是被谁清掉的"
+local function up_reset(why)
+    if up.on and up.got > 0 then
+        log.info("cmd", "分片暂存作废:", why or "-", "已收 " .. up.got .. "/" .. up.n)
+    end
+    up.on, up.n, up.got, up.bytes, up.mode = false, 0, 0, 0, nil
+    up.rows = {}
+end
+
 -- A 类：上位软件业务必需的 16 条指令
 local function reg_cmds()
     -- R:INFO: 前端打开串口读设备信息用的第一条指令
@@ -330,6 +466,9 @@ local function reg_cmds()
         -- 走下游拒掉, 不会翻译成 manual/platform。
         local ok, msg, cleared, notcleared = ctrl.switch_mode(v)
         if not ok then return M.reply("RET:FAIL:MODE:" .. tostring(msg)) end
+        -- 切档成功 = 这 N 片要落的槽可能变了, 暂存会话直接作废(见 W:CSHARD)。
+        --   切失败不动: 模式没变, 会话还成立
+        up_reset("W:MODE 切档")
         -- 切回 idle 会顺带复位配置。用 k:v 而不是 k=v: protocol.js 的 kv 解析
         -- 要求整段里同时有 ';' 和 ':' 才拆键值对
         -- 11-12: notcleared 是"想清但没清掉"的槽。以前只报 cleared, 高水位下
@@ -369,6 +508,8 @@ local function reg_cmds()
 
     M.reg("W:CFG", function(arg)
         if blocked_while_detecting("CFG") then return end
+        -- 整行一次到位的配置 = 分片会话的终结者: 攒着的那半份已经作废
+        up_reset("W:CFG")
         trc_begin(#arg)
         -- 大配置(128 点整行最坏 12.7KB)解码前先收一轮垃圾: Lua 堆池平时就
         --   贴着天花板(R:STAT 每 5 秒造 1.5KB 串), 2026-11-10 现场保存 90 点
@@ -376,71 +517,179 @@ local function reg_cmds()
         --   ⚠️ GC 合并不了相邻空闲块(见 README 12-fix-8 第三层), 它救不了
         --   连续大块; 但这条路径上的分配绝大多数是寄存器表那种小对象,
         --   收一轮就有货。停顿只在人工保存时发生, 不在 UART 收帧路径上。
+        --   分片路径(W:CSHARD)不走这一步: 片体本来就 <=2KB, 没有大块解码。
         if #arg > 4096 then collectgarbage("collect") end
         trc_sample("gc")
-        local t = jdecode(arg)
+        local t, jerr = jdecode_err(arg)
         trc_sample("decoded")
-        if not t then return M.reply("RET:FAIL:CFG:bad json") end
-        -- 第二个参数 true = 在 t 上【原地】归一化, 不再新建第二张表。
-        --   11-12 现场 56 点这一段 +13048B, 那就是"归一化的第二份" —— 解码表
-        --   和归一化表同时在堆上, 一次保存的入场费因此是 decoded+norm ≈ 28KB。
-        -- ⚠️ 这里敢原地, 是因为 t 是本行 jdecode 现解的私有表, 不进任何缓存;
-        --    缓存里那份(raw)必须走纯函数路径, 见 cfg.lua 12-fix-3 的约定
-        local n, err = cfgstore.normalize_poll(t, true)
-        -- inplace 之后 n == t, 所以这一段应当贴着 0(还在涨就说明没走到原地路径)
-        trc_sample("norm")
-        -- ⚠️ 归一化失败就地返回: 采样的"停在第几段"就是"死在第几步",
-        --    这里再多走一段 freed, 读的人会以为归一化过了
-        if not n then return M.reply("RET:FAIL:CFG:" .. tostring(err)) end
-        trc_regs(n)
-        trc_freed()
-        local cur_mode = ctrl.get_mode()
-        local slot = (cur_mode == "platform") and SLOT_PULL or SLOT_POLL
-        local ok, serr
-        -- 落归一化后的 n, 不再用 save_poll(t): 后者会在内部再 normalize 一遍,
-        --   等于把 128 个寄存器表(~30KB)白造第二次
-        if slot == SLOT_PULL then ok, serr = cfgstore.save_pull_norm(n)
-        else ok, serr = cfgstore.save_poll_norm(n) end
-        -- 落盘内部那份 jencode 字符串已经还掉了, used 看不见它; 靠 max 的涨幅
-        trc_sample("saved")
-        if not ok then return M.reply("RET:FAIL:CFG:" .. tostring(serr)) end
-        -- 34-fix: 进入 polling 档 (manual/platform) 时, 如果 poll 因为空配置
-        --   没起来 (34-fix 的副作用, 之前一定起来), 现在 W:CFG 写完要把
-        --   poll 启起来, 否则用户添了表保存后什么都看不到
-        -- idle/sniff 档: poll 本来就不该起, 即便 get_mode() 算出 SLOT_POLL
-        --   也不在这两档起 (前端不会在这两档发 W:CFG, 这层防御是兜底)
-        local in_poll_mode = cur_mode == "manual" or cur_mode == "platform"
-        -- W:CFG 就是在配轮询, 这里该把 poll 拉进来
-        local poll = pollmod(true)
-        if not poll then return M.reply("RET:FAIL:CFG:bus/poll 不可用") end
-        if poll.needs_restart(n) then
-            if poll.is_running() then
-                poll.stop()
-                poll.apply_cfg(n)
-                -- ⚠️ 必须带槽: poll.start() 不传 src 会把 curSlot 强制置成 "poll"
-                -- 第二个参数 = 刚归一化好的那份, start 里就不再 reload_cfg 了
-                poll.start(slot, n)
-            else
-                poll.apply_cfg(n)
-                if in_poll_mode then poll.start(slot, n) end
-            end
-        else
-            poll.apply_cfg(n)
-            if in_poll_mode and not poll.is_running() then
-                -- 34-fix: needs_restart 不成立但 poll 没起来 (例如:
-                --   manual 档进入时空 ds_poll → 34-fix 不起 → 用户添
-                --   寄存器表但 baud/slave 没动 → needs_restart=false →
-                --   之前没人调 poll.start). 补起
-                poll.start(slot, n)
-            end
-        end
-        if iot and iot.reply_config then pcall(iot.reply_config) end
-        -- 重启轮询(建块计划)之后采一次。11-12 起 start 拿得到 n, 不再回头
-        --   reload_cfg 解第二遍, 这一段应当只剩建块计划那点(几 KB 量级);
-        --   还是 +15KB 往上跳就说明没走到传 n 的那条路(旧版这里 +26992B,
-        --   池子 306168/307192 只剩 1024B —— 见 README 的 CTRACE 现场表)
-        trc_sample("done")
+        -- 原来这里固定报 bad json, 而"前端写得不合法"和"解码时分配不出来"
+        --   共用这一个词 —— 后者重发就能过, 前者重发永远不过(见 jencode_err)
+        if not t then return M.reply("RET:FAIL:CFG:" .. jerr) end
+        local ok, reason = commit_config(t)
+        if not ok then return M.reply("RET:FAIL:CFG:" .. reason) end
         M.reply("RET:CFG=OK")
+    end)
+
+    -- ==== 分片上传(W:CSHARD / W:CFINISH / W:CSABORT) ====
+    --   ⚠️ 为什么非有不可: 11-13 现场把这件事钉死了 —— 轮询跑起来之后
+    --   R:MEM 是 max:3072 fail:4096, 而 60 行那份 W:CFG 是【一整行 4072B】,
+    --   prov 把分片并成一行时 table.concat 要的正是那么大的连续块, 于是在
+    --   【还没解析】的时候整条就被丢掉:
+    --     E/mem used 293544, alloc 4089
+    --     E/user.prov rx lost: concat fail, drop 4072B
+    --   而 max 塌下去之后在同一次开机里不再回来(清空配置 + W:GC 两次仍
+    --   3072), 只有重启才恢复 —— 所以"第一次保存能成、之后怎么存都失败"是
+    --   结构性的, 不是等一等能等到的。清多少水都不解决问题(乙 已实测否掉),
+    --   只能让【单行本身】变小。
+    --   方案只做传输分片: 每片一个 <=2KB 的小 JSON 数组, 设备在 RAM 里攒成
+    --   行表, W:CFINISH 时交给 commit_config —— 和 W:CFG 同一条提交路径,
+    --   存储格式(fskv 分片槽)、校验(normalize_poll)一个字节都没改。
+    --   好处不只是能收: 上传没走完就断电/放弃时, flash 里那份【老配置】完好
+    --   无损(暂存只在 RAM), 比现在 st=w 那种半写状态更安全。
+    -- 单片 body 上限。前端按 <=1200B 切, 设备只在明显离谱时拒收 —— 这里
+    --   留 2048 是因为"片必须收得下"的判据是 max:3072, 2048 加行头仍在
+    --   安全区; 收到更大的片说明前端切错了, 当场拒绝比让它把池子打死好。
+    local UP_PIECE_MAX  = 2048
+    local UP_PIECES_MAX = 32      -- n 的上限: 32 片 x 每片几十行, 远超 128 点
+    local UP_ROWS_MAX   = 200     -- 暂存行数上限(和 cfg.lua 的 MAX_REGS 同量级)
+
+    local function up_fail(i, why)
+        log.warn("cmd", "CSHARD 第" .. i .. "片拒收:", why)
+        return M.reply("RET:FAIL:CSHARD:" .. why)
+    end
+
+    M.reg("W:CSHARD", function(arg)
+        if blocked_while_detecting("CSHARD") then return end
+        -- 拆 "i/n,<JSON 行数组>"。用 find(",") 而不是 gmatch: 大字符串上
+        --   gsub/gmatch 都要二次分配, 这条命令恰恰是在池子紧的时候用的
+        local c = arg:find(",", 1, true)
+        if not c then return up_fail(0, "缺 , 分隔") end
+        local i, n = arg:sub(1, c - 1):match("^(%d+)/(%d+)$")
+        i, n = tonumber(i), tonumber(n)
+        if not i or not n then return up_fail(0, "片号不是 i/n") end
+        if i < 1 or n < 1 or i > n then return up_fail(i, "片号超范围 n=" .. n) end
+        if n > UP_PIECES_MAX then return up_fail(i, "片数超上限 " .. UP_PIECES_MAX) end
+        local body = arg:sub(c + 1)
+        if #body > UP_PIECE_MAX then
+            return up_fail(i, "单片太大 " .. #body .. ">" .. UP_PIECE_MAX)
+        end
+
+        if i == 1 then
+            -- 第 1 片: 开新会话。同时记下【此刻】的模式 —— 落盘落在哪个槽
+            --   是由模式决定的(commit_config 里按 get_mode 选 ds_poll/ds_pull),
+            --   上传途中切档会把这 N 片送进另一个槽, 那才是真的灾难
+            up_reset("CSHARD 第 1 片")
+            up.on, up.n, up.mode = true, n, ctrl.get_mode()
+            log.info("cmd", "分片上传开始 n=" .. n .. " mode=" .. tostring(up.mode))
+        elseif not up.on then
+            return up_fail(i, "没有上传会话, 先发第 1 片")
+        elseif up.n ~= n then
+            local why = "片数和正在收的那次不一样(n=" .. up.n .. " 收到 " .. n .. ")"
+            up_reset("片数变了")
+            return up_fail(i, why)
+        elseif i == up.got then
+            -- 同一片重发: 上一次已经收进暂存了, 只是应答在路上丢了。
+            --   不能再追加一遍(追加=同一行存两份), 补一次 OK 让前端接着发下一片
+            log.info("cmd", "第" .. i .. "片重复到达, 已按原样回 OK")
+            return M.reply("RET:CSHARD=" .. i .. "=OK")
+        elseif i ~= up.got + 1 then
+            local want = up.got + 1
+            up_reset("顺序断了")
+            return up_fail(i, "顺序不对, 下一片应该是 " .. want)
+        end
+
+        local rows, jerr = jdecode_err(body)
+        if not rows then
+            up_reset("片解码失败")
+            return up_fail(i, jerr)
+        end
+        if type(rows) ~= "table" then
+            up_reset("片不是数组")
+            return up_fail(i, "片不是 JSON 数组")
+        end
+        -- ⚠️ 逐行挪进暂存, 不把 rows 整张存下来: rows 这一层的表头是这一片
+        --   独有的临时对象, 存下来就等于让一次解码的产物常驻; 行本身是解码
+        --   产物、要留着, 所以只挪引用, 不复制行内容
+        for k = 1, #rows do
+            if type(rows[k]) ~= "table" then
+                up_reset("第 " .. k .. " 项不是对象")
+                return up_fail(i, "数组第 " .. k .. " 项不是对象")
+            end
+            if #up.rows >= UP_ROWS_MAX then
+                up_reset("暂存行数超上限")
+                return up_fail(i, "行数超上限 " .. UP_ROWS_MAX)
+            end
+            up.rows[#up.rows + 1] = rows[k]
+        end
+        up.got = i
+        up.bytes = up.bytes + #body
+        M.reply("RET:CSHARD=" .. i .. "=OK")
+    end)
+
+    -- 收尾: "n,<除 regs 外的整份配置字段>"。
+    --   为什么把非 regs 字段也放这里而不是让第 1 片带: 那份字段是【整张表】的
+    --   一部分, commit_config 要的是完整一张表; 分两处传就要在设备里合并两处,
+    --   多一个合并点多一类分叉。
+    M.reg("W:CFINISH", function(arg)
+        if blocked_while_detecting("CFINISH") then return end
+        if not up.on then
+            return M.reply("RET:FAIL:CFINISH:没有上传会话, 先发 W:CSHARD")
+        end
+        local c = arg:find(",", 1, true)
+        local n = c and tonumber(arg:sub(1, c - 1)) or nil
+        if not n then
+            up_reset("CFINISH 缺 n")
+            return M.reply("RET:FAIL:CFINISH:缺片数 n")
+        end
+        if n ~= up.n then
+            local why = "片数不符(上传时说是 " .. up.n .. ", 收尾说 " .. n .. ")"
+            up_reset("CFINISH 片数不符")
+            return M.reply("RET:FAIL:CFINISH:" .. why)
+        end
+        if up.got ~= up.n then
+            -- 只收了一半就收尾: 绝不能把它当成一份完整配置写下去。
+            --   老配置必须原样留着, 所以这里连 commit 都不进; 会话也【留着】,
+            --   前端只需要补发缺的那几片, 不用整份重传
+            return M.reply("RET:FAIL:CFINISH:只收到 " .. up.got
+                .. "/" .. up.n .. " 片, 补发第 " .. (up.got + 1) .. " 片起")
+        end
+        if ctrl.get_mode() ~= up.mode then
+            -- 原因串要在 up_reset 之前凑好: 会话字段一清就全是 0/nil 了
+            local why = "上传途中模式从 " .. tostring(up.mode) .. " 变成了 "
+                .. tostring(ctrl.get_mode()) .. ", 这" .. up.n .. "片作废, 重新上传"
+            up_reset("CFINISH 时模式变了")
+            return M.reply("RET:FAIL:CFINISH:" .. why)
+        end
+        local base, jerr = jdecode_err(arg:sub(c + 1))
+        if not base then
+            up_reset("CFINISH 解码失败")
+            return M.reply("RET:FAIL:CFINISH:" .. jerr)
+        end
+        if type(base) ~= "table" then
+            up_reset("CFINISH 不是对象")
+            return M.reply("RET:FAIL:CFINISH:收尾字段不是 JSON 对象")
+        end
+        -- 会话到此结束: 先把暂存的行交出去, 再放开会话引用。
+        --   顺序很重要 —— up_reset 换掉 up.rows 这个字段, 已经挂到 base.regs
+        --   上的那张表不受影响, 后面 commit_config 原地归一化用的就是它
+        base.regs = up.rows
+        local rows_n, bytes_n = #up.rows, up.bytes + #arg
+        up_reset("CFINISH 提交")
+        trc_begin(bytes_n)
+        local ok, reason = commit_config(base)
+        if not ok then return M.reply("RET:FAIL:CFG:" .. reason) end
+        log.info("cmd", "分片上传提交完成 rows=" .. rows_n)
+        M.reply("RET:CFG=OK")
+    end)
+
+    -- 放弃上传: 前端取消/重试整个流程时显式释放暂存, 不用等下一次第 1 片来
+    --   覆盖。行为上 up_reset 在每条会动配置的命令里都会做, 这条只是让它立刻发生
+    M.reg("W:CSABORT", function()
+        if not up.on then return M.reply("RET:CSABORT=OK") end
+        local n = up.got
+        up_reset("W:CSABORT")
+        log.info("cmd", "分片上传被放弃, 已暂存 " .. n .. " 片")
+        M.reply("RET:CSABORT=OK")
     end)
 
     M.reg("R:REG", function()
@@ -451,7 +700,11 @@ local function reg_cmds()
     end)
 
     M.reg("R:VAL", function()
-        reply_json("RET:VAL=", jencode(collector.snapshot()))
+        -- 编码不出来时必须单独报, 不能回 RET:VAL={} —— 见上面 jencode_err 的
+        -- 说明: 那会把"应答拼不出来"说成"设备里没有数据"
+        local s, err = jencode_err(collector.snapshot())
+        if not s then return M.reply("RET:FAIL:VAL:" .. err) end
+        reply_json("RET:VAL=", s)
     end)
 
     -- R:STAT 的片段表。单独抽出来是为了让单测能直接验结构
@@ -519,6 +772,7 @@ local function reg_cmds()
         end
         local ok, err, wrote = cfgstore.clear_pull()
         if not ok then return M.reply("RET:FAIL:CLRPULL:" .. tostring(err)) end
+        up_reset("W:CLRPULL")
         -- wrote=false 时 ds_pull 本来就是空, 也回 ok 不报错, 避免前端
         -- 出现"没清成功"的误提示
         log.info("cmd", string.format("W:CLRPULL cleared=%s", tostring(wrote)))
@@ -545,6 +799,7 @@ local function reg_cmds()
         if not cfgstore then return M.reply("RET:FAIL:CLRPOLL:cfgstore 不可用") end
         local ok, err, wrote = cfgstore.clear_poll()
         if not ok then return M.reply("RET:FAIL:CLRPOLL:" .. tostring(err)) end
+        up_reset("W:CLRPOLL")
         log.info("cmd", string.format("W:CLRPOLL cleared=%s", tostring(wrote)))
         if wrote then return M.reply("RET:CLRPOLL=OK;cleared:manual 配置")
         else return M.reply("RET:CLRPOLL=OK;cleared:") end

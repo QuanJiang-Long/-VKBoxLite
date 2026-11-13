@@ -159,9 +159,12 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 |---|---|
 | R:INFO | 设备信息（SN/sn_state/lock/IMEI/**UID**/ICCID/CSQ/RSRP/版本/项目/服务器/波特率/从机/寄存器数） |
 | R:MODE / W:MODE=idle\|poll\|pollpull\|sniff | 模式查询（返回 `{mode,busy,poll_src,pull_ready,pull,poll,mon,write}`）/ 切换。`pollpull` = 拉取配置档，进模式自动 hello 拉取 |
-| R:CFG / W:CFG={json} | 轮询配置读写，读返回 `{cfg, src}`，src=default 表示 fskv 里没写过。`W:CFG` 是**唯一**写寄存器表的入口（regs 并进 cfg 一起发） |
+| R:CFG / W:CFG={json} | 轮询配置读写，读返回 `{cfg, src}`，src=default 表示 fskv 里没写过。`W:CFG` 是**整份**写寄存器表的入口（regs 并进 cfg 一起发）；表大到一行传不过来时走下面三条分片指令，**提交路径是同一个函数** |
+| W:CSHARD=`<i>/<n>`,[regs 行数组] | **分片上行的第 i 片**（2026-11-13）。设备把行数组原样存进 RAM 暂存 `up.rows`，回 `RET:CSHARD=<i>=OK`。**没凑齐 n 片绝不动 fskv**。校验只做运输层的：片号必须是 `i/n`、`i` 必须是 `up.got+1`（同一片号重复送达回 OK 但不重复追加，覆盖"命令到了应答丢在路上"）、单片 ≤2048B、片数 ≤32、累计行数 ≤200 |
+| W:CFINISH=`<n>`,{除 regs 外的 cfg 字段} | 分片**收尾提交**：把暂存的行拼成 `regs`、和这条带的字段合成整份配置，走与 `W:CFG` 完全相同的 normalize→落盘→热更→回执路径，回 `RET:CFG=OK` / `RET:FAIL:CFG:原因`。片数不齐回 `RET:FAIL:CFINISH:只收到 2/3 片`（**暂存不清**，补发那一片即可）；上传途中切了模式回 `RET:FAIL:CFINISH:上传途中模式从 manual 变成了 platform`（写哪个槽是模式决定的，不能替你猜） |
+| W:CSABORT | 放弃本次分片上传，清掉 RAM 暂存，回 `RET:CSABORT=OK`。**不发也行**：暂存在 RAM，切档 / 插一条 `W:CFG` / `W:CLRPOLL` / `W:CLRPULL` 都会把它作废，断电自然消失——设备里那份老配置从头到尾没被碰过 |
 | R:REG | 读寄存器表（= `R:CFG` 的 `cfg.regs`，因前端单独读它才留） |
-| R:VAL | 实时值快照 |
+| R:VAL | 实时值快照。**2026-11-13 起不再骗人**：`json.encode` 拼不出这份快照（池子不够）时回 `RET:FAIL:VAL:<真实异常> pool <已用>/<总量>`，而不是回一条 `RET:VAL=` 加空数组。后者在前端长成"一个点都没采到"，实际是设备连应答都编不出来 |
 | R:STAT | 运行状态汇总（mode/data/guard/mqtt）；`mqtt` 段另带 `push_pending`/`push_n`/`push_seen`/`push_err`（平台主动重推横幅用） |
 | W:PULLCFG / R:PULLCFG | 平台配置拉取：W 发起（回 `started`），R 查状态（`{state,msg,poll,skipped,mqtt,msg_id,replied,src,seen,autosaved,autosave_at,autosave_regs,push_n,push_err}`，`mqtt` 段含 `pub`/`sub` 两个拼好的 topic；`autosaved`=解析成功即已落盘生效并自动回执；`msg_id`/`replied` 反映回执；`src`=`pull`/`push`）。平台主动重推的配置也走这个返回（`src=push`）。前提只需配好 MQTT 服务器地址和端口，设备会自己连 |
 | W:RAWTEST[=slave,addr,qty] | 485 裸探针：发原始请求并回显所有原始回字节，用于区分“没发出去/从机没回”与“回了但参数不匹配”（**仅开发版注册**，发布版不可用） |
@@ -314,6 +317,55 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 兼容：老格式（整份 JSON 一个键）照样读，**不做双写兼容层**——下一次保存自然
 迁成分片，迁移期最长一次保存。`ds_sys`/`ds_alias` 不分片（一个只有一个字段、
 一个已标"待废弃"），规则写在 `cfg.lua` 的 `SECTIONS` 上，别在第二处重写。
+
+## 配置分片上行（`W:CSHARD` / `W:CFINISH` / `W:CSABORT`，2026-11-13）
+
+上一节把**存储**拆成了 1024B 一段，但**运输**没拆：一条 `W:CFG` 仍是一整行。
+现场因此撞上第二堵墙——轮询跑起来之后 `max` 只剩 3072，而 60 行那份配置是
+**4072 字节的一整行**，`sn/prov.lua` 拼包时 `not enough memory` 直接丢弃，
+**连 JSON 解析都没进**。表现就是"开机第一次保存能成，之后每一次都失败"，
+而且失败得没有原因（应答都发不回去）。
+
+三条新指令只换运输方式，**存储格式与校验一个字没改**：
+
+```
+W:CSHARD=1/3,[{...},{...}…]   → RET:CSHARD=1=OK      第 1 片(寄存器行数组)
+W:CSHARD=2/3,[…]              → RET:CSHARD=2=OK      第 2 片
+W:CSHARD=3/3,[…]              → RET:CSHARD=3=OK      第 3 片
+W:CFINISH=3,{"baud":9600,…}  → RET:CFG=OK / RET:FAIL:CFG:原因
+```
+
+设计上的四条硬规则：
+
+1. **暂存只在 RAM**（`cmd.lua` 里的 `up = {on,n,got,rows,bytes,mode}`）。
+   没凑齐 n 片之前 fskv 一个字都不写，所以**上传中断不会留半套配置**——
+   这一点比上一节 `st=w` 那个两阶段提交还干净（那个至少写过 flash）。
+   作废时机：`W:CSABORT`、`W:CFG`、`W:MODE`（只在切档**成功**后）、
+   `W:CLRPOLL`、`W:CLRPULL`。
+2. **同一片号重复送达回 OK 但不重复追加**（`i == up.got` 时直接再回一次成功）。
+   覆盖的是"命令到了、应答丢在路上"：前端只会重发同一片，不会卡死在下一片。
+   片号 ≠ `up.got+1` 且不是重复 → 本会话作废并回原因（宁可重来，不猜顺序）。
+3. **提交走同一个函数**。`W:CFG` 与 `W:CFINISH` 都调 `commit_config(t)`
+   （normalize → 按模式选槽 → `save_*_norm` → 重启轮询 → `iot.reply_config`），
+   两条路径的失败原因**逐字节相同**。校验有第二份拷贝 = 迟早不一致。
+4. **切档不让上传偷渡**。片 1 记下当时的模式，`W:CFINISH` 比对
+   `ctrl.get_mode()`，变了就回 `RET:FAIL:CFINISH:上传途中模式从 manual 变成了 platform`。
+   写哪个槽是模式决定的，中途换槽等于把这份配置存到别的地方去。
+
+闸门尺寸：设备端只拦**明显离谱**的（单片 >2048B、片数 >32、累计行数 >200），
+把"切到 1200 字节"这个策略留在前端 `cfg.js`。原因是 2048 是设备当前
+`max` 读数之下确实能收的块，前端要保守（中文别名按 UTF-8 字节数，还要留
+`W:CSHARD=i/n,` 这 16 字节前缀和一片解码后的行表本身），设备没必要跟着保守——
+两个数字各写一处，将来放宽只改前端。
+
+**为什么切片就能收得下**（`tests/lua/test_cmd_cshard.lua` 第 ⑫ 组把它钉成了断言）：
+整行 4072B 要的是一块 ≥4072 的连续空闲，切片后每次峰值只要**片本身 + 解码出来的行表**
+≈ 1200×2 = 2400B，落在 `max:3072` 以内。行数按行累加进 `up.rows`，
+那是一份份小表，不需要连续大块。
+
+现场口径：`W:CFINISH` 与 `W:CFG` 共用 `R:CTRACE` 的分阶段采样，
+所以发完分片上传再发 `R:CTRACE`，看到的仍是 `enter/gc/decoded/norm/freed/saved/done`
+七段，段名里 `arg`/字节数取的是**拼完之后的整份**（不是最后一片）。
 
 ## 手动配置 / 拉取配置隔离（`ds_poll` vs `ds_pull`）
 
@@ -2416,4 +2468,44 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
   `tests/lua/test_cmd_cfgfail.lua`（R:CFG 两个槽、假配置一个字节都不发）。
   `mqttcfg.lua` 那句 `encode fail` 故意没动：它管的是 ≤2KB 的 MQTT 配置，现场从没
   在这上面 OOM 过，而 `pc_tool` 的 `_st_mqtt.py` 按【全等】匹配这个 reason。
+
+- **第四刀：运输拆片（2026-11-13，`W:CSHARD`/`W:CFINISH`/`W:CSABORT`）**。存储拆完
+  复测，墙挪到了前面：日志里那句 `E/mem ... alloc 4072` 根本不是 `cfg.lua` 打的，
+  是 `sn/prov.lua` 拼包时给的——**60 行那一整条 4072 字节的命令在进 JSON 解析之前
+  就被丢掉了**，所以前端连"失败原因"都拿不到。这一刀把一条命令拆成
+  若干 ≤1200 字节的片，逐片确认；分片只是运输，落盘格式/校验/提交路径与
+  `W:CFG` 完全同一个函数。为什么切片收得下、暂存为什么只放 RAM、片号重复为什么
+  必须容忍——都写在上面「配置分片上行」一节。
+  护栏 `tests/lua/test_cmd_cshard.lua`（49 条，含第 ⑫ 组把"整行 >4096 而单片峰值
+  ≤2048"这条**立项理由本身**钉成断言）；前端选路护栏 `frontend/tests/test_cshard_upload.js`。
+  ⚠️ 这条不解决**采到的数据放不进应答**那一格，所以下一条一起做。
+
+- **三处"失败了但说不出为什么"改成如实回报（2026-11-13）**。同一个坑在三个位置：
+  应答发不出去/编不出来的时候，代码回了一条**看起来像成功**的空应答。
+  ① `R:VAL`：`json.encode(collector.snapshot())` 失败原先落到 `reply_json("RET:VAL=", nil)`，
+  前端解析成空表 → 界面显示"一个点都没采到"，实际是设备连应答都编不出来。
+  现在改回 `RET:FAIL:VAL:<C 层原话> pool <已用>/<总量>`。
+  ② `cfg.lua` 的分片解码：`ct == nil` 原先只回"分片 i 解码失败"，现在带 `pool` 水位
+  ——同一句"解码失败"是配置真坏还是池子不够，两种处置完全相反。
+  ③ `prov.lua` 的收包丢弃：`rx lost` 那条日志原先固定写"内存不足"猜的，
+  现在把 `pcall` 的真实异常贴进去 + 水位 + 丢掉的字节数。
+  **串口上那一句应答一个字没改**（仍回 `RET:FAIL:rx 丢弃, 请重发`）——
+  SN 烧写工具按这句认，改文案等于砸产线；真原因只进日志。
+  `pool` 水位这一段是三条共用的 `pool_tag()`：`rtos.meminfo("lua")` 返回
+  `(total, used, max)`，报的是 `已用/总量`，读的人一眼能对着 `R:MEM` 核。
+  护栏 `tests/lua/test_cmd_valfail.lua`、`tests/lua/test_prov_rx.lua` 第 6 组。
+  ⚠️ 写这两条测试踩到的坑值得记：Lua 替身里 `error(msg)` 会自动前缀 `文件:行号:`，
+  而 C 库的 raise 不带 —— 于是"原因里含这句"的断言在 PC 上全绿、真机上全红。
+  替身一律 `error(msg, 0)`。
+
+- **切回 idle 顺手清掉采集缓存（2026-11-13）**。`ctrl.lua` 的 idle 分支原先只
+  `poll.stop()`，而 `poll.stop` 只清 `regs`——**没人清 `collector.dataCache`**。
+  只有 `mon.stop()` 走 `clear_all()`，所以 manual→idle 这一档切完，最近一轮
+  每点一行的缓存（现场 ≈15KB，`W:GC` 前后 270336 → 285320 那截）一直挂在常驻堆上。
+  现在 idle 分支 `pm3.stop()` 之后补 `util.try("data/collector").clear_all()`。
+  两个讲究：① 挂在 `if pm3 then` 里面，开机就是 idle 的那条路（`poll` 模块压根没起）
+  不为了这一句把 10KB 源码的 collector 请进常驻堆，取库走 `util.try` 命中
+  `package.loaded` 缓存，与 12-fix-8 的懒加载口径一致；② `trim_cache()` 不是
+  `clear_all()`——它按上限裁剪，不清空，用错函数等于没改。
+  这一格腾出来的量正好是"下一次保存的入场费"，所以和分片上行放进同一版实测。
 

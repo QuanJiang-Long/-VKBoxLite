@@ -216,7 +216,12 @@ local function one_case(ok_dec, ok_norm, ok_save)
 end
 
 local r = one_case(false, true, true)
-check("② 坏 JSON 照实回失败", r == "RET:FAIL:CFG:bad json\r\n", r)
+-- 2026-11-13: 这句从固定串 "bad json" 改成真原因。这台设备的 json.decode 在
+--   分配不出来时【返回 nil 而不抛】(11-12 现场那句 E/mem alloc 160 就是它),
+--   所以"解不出来"有两种原因, 以前压成一个词 —— 一种重发就能过, 一种永远不过
+check("② 坏 JSON 照实回失败", r:sub(1, 13) == "RET:FAIL:CFG:", r)
+check("② 说的是解不出来 + 当时的池子",
+    r:find("解码结果为空", 1, true) ~= nil and r:find("pool ", 1, true) ~= nil, r)
 check("② 坏 JSON 的采样停在 decoded", stages(tag_line(dev, "#2")) == "enter,gc,decoded")
 
 r = one_case(true, false, true)

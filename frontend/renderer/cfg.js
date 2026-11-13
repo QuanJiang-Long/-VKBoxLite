@@ -456,6 +456,92 @@ function cfgErr(raw) {
   return s;
 }
 
+//=====================================================================
+// 配置上行：整行 W:CFG，或者超过一行接得下的尺寸时改走分片上传
+//   (2026-11-13, 甲。为什么必须分片见 protocol.js 的 cfgShard 注释)
+//=====================================================================
+// 单行字节上限。判据不是"设备能不能存"，而是"设备能不能把这一行【拼出来】"：
+//   现场轮询中只给得出 max:3072 的连续块，收 4072B 那一行就是在这里死的。
+//   1200 是 3072 的三分之一，留出串口缓冲和分片对齐的余量
+const SHARD_LIMIT = 1200;
+const SHARD_PREFIX = 16;      // 'W:CSHARD=99/99,' 按最坏位数算的行头
+const SHARD_PIECES_MAX = 32;  // 和固件 UP_PIECES_MAX 同值，超了设备会直接拒收
+const _utf8 = typeof TextEncoder === 'function' ? new TextEncoder() : null;
+// 字节数按 UTF-8 算，不是字符串长度：一行寄存器名里全是中文，
+//   s.length 会把 60 个汉字读成 60 字节，实际 180 字节 —— 切出来的片就会超
+function byteLen(s) {
+  if (!_utf8) return String(s).length * 3;   // 拿不到编码器时按最坏 3 字节/字算
+  return _utf8.encode(s).length;
+}
+
+// 把 regs 切成"每片一整行 JSON 数组都不超过 SHARD_LIMIT"的若干段。
+//   行是最小单位，不能把一行拆到两片里(设备按 JSON 数组解码)，所以装不下
+//   就收口开新片，而不是切字节。返回的是行数组的数组。
+function planShards(regs) {
+  const budget = SHARD_LIMIT - SHARD_PREFIX - 2;   // 减掉 '[' 和 ']'
+  const pieces = [];
+  let cur = [], used = 0;
+  for (const r of regs) {
+    const sz = byteLen(JSON.stringify(r)) + 1;     // +1 = 逗号
+    if (cur.length && used + sz > budget) { pieces.push(cur); cur = []; used = 0; }
+    if (sz > budget) throw new Error('第 ' + (regs.indexOf(r) + 1) +
+      ' 行自己就超过 ' + SHARD_LIMIT + ' 字节，设备接不住这么大一片');
+    cur.push(r); used += sz;
+  }
+  if (cur.length) pieces.push(cur);
+  if (pieces.length > SHARD_PIECES_MAX) {
+    throw new Error('行数太多：要分 ' + pieces.length + ' 片，设备一次最多收 '
+      + SHARD_PIECES_MAX + ' 片');
+  }
+  return pieces;
+}
+
+// 一条指令最多试几次。为什么只重试【同一片】：设备按片号记账，重发同一片
+//   要么被认成重复到达(原样补一次 OK)，要么正好把上一轮没进去的那片补上。
+//   两次重试足够盖住"应答在路上丢了"和"那一片被池子丢掉"这两种
+const SHARD_TRIES = 3;
+async function sendTry(line, cmd) {
+  let last = null;
+  for (let k = 0; k < SHARD_TRIES; k++) {
+    try { return await sendCmd(line, cmd, 5000); }
+    catch (e) { last = e; }
+  }
+  throw last;
+}
+
+// 上行一份配置。返回 'plain'(整行 W:CFG 一条搞定) 或 'shard'(走了分片)。
+//   失败一律 throw，消息里带着"死在第几片"——现场要区分【设备拒收】和
+//   【某一片根本没送到】，这两件事的处理方式不一样
+async function writeCfgUp(cfg, regs) {
+  const whole = Protocol.Enc.writeCfg(Object.assign({}, cfg, { regs: regs }));
+  if (byteLen(whole) <= SHARD_LIMIT) {
+    await sendCmd(whole, 'CFG', 5000);
+    return 'plain';
+  }
+  const pieces = planShards(regs);
+  const n = pieces.length;
+  for (let i = 1; i <= n; i++) {
+    try {
+      await sendTry(Protocol.Enc.cfgShard(i, n, pieces[i - 1]), 'CSHARD');
+    } catch (e) {
+      // 会话留在设备里是半份暂存(它不会写进 flash)，明确放弃再报错，
+      //   免得下一次保存的第 1 片之前先撞上一条"顺序不对"
+      try { await sendCmd(Protocol.Enc.cfgAbort(), 'CSABORT', 3000); } catch (e2) {}
+      throw new Error('第 ' + i + '/' + n + ' 片没有送达：' + e.message);
+    }
+    status('分片上传 ' + i + '/' + n + ' 片…', false);
+  }
+  const fields = Object.assign({}, cfg);
+  delete fields.regs;              // regs 已经在暂存里，收尾只带其余字段
+  try {
+    await sendTry(Protocol.Enc.cfgFinish(n, fields), 'CFINISH');
+  } catch (e) {
+    try { await sendCmd(Protocol.Enc.cfgAbort(), 'CSABORT', 3000); } catch (e2) {}
+    throw new Error('收尾失败：' + e.message);
+  }
+  return 'shard';
+}
+
 async function saveCfg() {
   // 兜底：前置校验任何意外都必须留下痕迹。否则异常会直接冲出 onclick，
   // 界面不弹 toast 也不改 status，用户看到的就是"点了没反应"
@@ -507,7 +593,10 @@ async function saveCfg() {
     }
     try {
       cfg.regs = regs;
-      await sendCmd(Protocol.Enc.writeCfg(cfg), 'CFG', 5000);
+      // 整行超过设备接得下的尺寸时自动改走分片上传(见上面 writeCfgUp)。
+      //   提交路径是设备里同一条，所以校验错误、成功应答 RET:CFG=OK 这些
+      //   全都和以前一模一样 —— 变的只是"这几 KB 怎么送到设备"
+      await writeCfgUp(cfg, regs);
       S.cfg = cfg; S.regs = regs;
       snapClean(pre);                  // 保存成功 = 表单和设备一致，清掉「未保存」标记
       status('配置已保存（串口参数变化时设备会自动重启轮询任务）', true);
