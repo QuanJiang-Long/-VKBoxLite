@@ -1,13 +1,13 @@
 // test_im6_device_status.js
 //
-// im-6: exportCfgAsJson 加 device_status 段 (R:STAT 4 段里的 mode + data + guard, 不含 mqtt)
-//   1. data 含 device_status 字段
-//   2. device_status 是对象: { mode, data, guard } (不含 mqtt)
-//   3. mqtt_status 段保留 (im-4)
-//   4. 字段值: S.stat.mode / S.stat.data / S.stat.guard
-//   5. S.stat 不存在时: device_status = null
-//   6. CSV 不加 device_status (对象, 不适合表格)
-//   7. 段顺序: tool/version/exported/serial/registers/mqtt/mqtt_status/device_status
+// im-6: device_status 段与导出的关系
+//   历史行为: exportCfgAsJson data 里带 device_status: S.stat ? {mode,data,guard} : null
+//   2026-11-04 (1aca52e "调整导出配置范围"): 有意去掉 —— 同 im-4,
+//   设备运行态 (R:STAT 的 mode/data/guard) 不进配置文件
+//   现在的行为:
+//   1. exportCfgAsJson 不含 device_status
+//   2. exportCfgAsCsv 同样不含
+//   3. 设备运行态仍然活着: R:STAT 照常拉 (S.stat), 只是随配置文件一起走
 
 const fs = require('fs');
 const path = require('path');
@@ -15,37 +15,22 @@ const { assertEq } = require('./setup');
 
 const appJs = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
 
-// 1. exportCfgAsJson data 含 device_status
+// 1. 找到 exportCfgAsJson
 const exportFnMatch = appJs.match(/function\s+exportCfgAsJson\s*\(\s*pre\s*\)\s*\{[\s\S]*?toast\('配置已导出为 JSON'\);?\s*\}/);
 assertEq(!!exportFnMatch, true, 'im-6: 找到 exportCfgAsJson 函数');
 
-// 2. device_status 段是对象 { mode, data, guard } 不含 mqtt
-const deviceStatusMatch = exportFnMatch[0].match(/device_status:\s*S\.stat\s*\?\s*\{[\s\S]*?\}\s*:\s*null/);
-assertEq(!!deviceStatusMatch, true, 'im-6: device_status 段是 S.stat ? {...} : null');
-assertEq(/S\.stat\.mode/.test(deviceStatusMatch[0]), true,
-  'im-6: device_status 含 S.stat.mode (mode 段)');
-assertEq(/S\.stat\.data/.test(deviceStatusMatch[0]), true,
-  'im-6: device_status 含 S.stat.data (data 段)');
-assertEq(/S\.stat\.guard/.test(deviceStatusMatch[0]), true,
-  'im-6: device_status 含 S.stat.guard (guard 段)');
-// 不含 mqtt (mqtt 走 mqtt_status 段, 不重复)
-assertEq(!/S\.stat\.mqtt/.test(deviceStatusMatch[0]), true,
-  'im-6: device_status 不含 S.stat.mqtt (避免跟 mqtt_status 段重复)');
+// 2. JSON 导出不含 device_status (运行时状态, 1aca52e 有意去掉)
+assertEq(!/device_status/.test(exportFnMatch[0]), true,
+  'im-6: exportCfgAsJson 不含 device_status (运行态不进配置文件)');
 
-// 3. mqtt_status 段保留 (im-4 没删)
-assertEq(/mqtt_status:\s*\(S\.mqtt\s*&&\s*S\.mqtt\.stat\)\s*\|\|\s*null/.test(exportFnMatch[0]), true,
-  'im-6: mqtt_status 段保留 (im-4 没动)');
-
-// 4. device_status 在 mqtt_status 之后 (段顺序)
-const mqttStatusIdx = exportFnMatch[0].indexOf('mqtt_status:');
-const deviceStatusIdx = exportFnMatch[0].indexOf('device_status:');
-assertEq(mqttStatusIdx > 0 && deviceStatusIdx > mqttStatusIdx, true,
-  'im-6: device_status 在 mqtt_status 之后 (段顺序: .../mqtt/mqtt_status/device_status)');
-
-// 5. CSV 不加 device_status
+// 3. CSV 导出同样不含
 const csvFnMatch = appJs.match(/function\s+exportCfgAsCsv\s*\(\s*pre\s*\)\s*\{[\s\S]*?toast\('配置已导出为 CSV'\);?\s*\}/);
 assertEq(!!csvFnMatch, true, 'im-6: 找到 exportCfgAsCsv 函数');
 assertEq(!/device_status|device-status|deviceStat/i.test(csvFnMatch[0]), true,
-  'im-6: exportCfgAsCsv 不加 device_status (对象, 不适合 CSV)');
+  'im-6: exportCfgAsCsv 不含 device_status');
 
-console.log('PASS: im-6 exportCfgAsJson 加 device_status 段 (R:STAT 3 段 mode+data+guard, 不含 mqtt, CSV 不导)');
+// 4. 设备运行态本身没被砍: R:STAT 仍拉回 S.stat (首页/状态卡在用)
+assertEq(/S\.stat\s*=/.test(appJs), true,
+  'im-6: R:STAT 仍写入 S.stat (运行态只是不进导出文件, 功能本身还在)');
+
+console.log('PASS: im-6 导出不含 device_status 运行态 (1aca52e 调整), R:STAT 采集本身保留');

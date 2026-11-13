@@ -39,10 +39,11 @@ const btnInferIdx = sniffBody.indexOf('id="btnInfer"');
 const btnAutoIdx = sniffBody.indexOf('id="btnAutoDetect"');
 assertEq(btnInferIdx > 0 && btnAutoIdx > 0, true,
   'sniff-3 f: 推断结果子分段含 [推断轮询表] (btnInfer) + [重新识别通讯参数] (btnAutoDetect) 按钮');
-// 找 btnInfer 之前 500 字符, 看是否含 "推断结果" 标题 + "inferHint" 标志
-const inferWindow = sniffBody.substring(Math.max(0, btnInferIdx - 500), btnInferIdx);
-assertEq(/id="inferHint"/.test(inferWindow), true,
-  'sniff-3 f: btnInfer 之前 500 字符含 inferHint (说明是推断结果子分段内)');
+// 2026-11-02 布局调整: btnInfer/btnAutoDetect 移进 panel-title 标题行,
+//   inferHint 在推断结果子分段的内容区 (标题行之后)
+const inferHintIdx = sniffBody.indexOf('id="inferHint"');
+assertEq(inferHintIdx > btnInferIdx && inferHintIdx > btnAutoIdx, true,
+  'sniff-3 f: inferHint 在两个按钮之后 (标题行在前, 推断结果内容区在后)');
 assertEq(/btnAutoDetect/.test(sniffBody.substring(btnInferIdx, btnInferIdx + 200)), true,
   'sniff-3 f: btnInfer 之后 200 字符含 btnAutoDetect (两按钮相邻)');
 // 推断结果标题简化: 没有 "（从监听到的请求帧反推）"

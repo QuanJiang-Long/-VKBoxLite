@@ -51,7 +51,9 @@ end
 local function compile_file(path)
     local src = read_file(path)
     if src then
-        local chunk, err = load(src, "@" .. path)
+        -- Lua 5.1 只有 loadstring(str), 5.2+ 的 load(str) 才收字符串 —— 两者兼容
+        local loader = loadstring or load
+        local chunk, err = loader(src, "@" .. path)
         src = nil
         if chunk then return chunk end
         return nil, err

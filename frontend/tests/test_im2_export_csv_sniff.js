@@ -48,21 +48,26 @@ const importClick = appJs.indexOf('inp.click()', importStart);
 const importEnd = importClick + 'inp.click();'.length;
 const importCfgBody = appJs.substring(importStart, importEnd);
 assertEq(importCfgBody.length > 0, true, 'im-2: 找到 importCfg 函数体');
-assertEq(/S\.mode\s*===\s*'sniff'/.test(importCfgBody), true,
-  'im-2: importCfg 体内含 S.mode === "sniff" 守卫');
-assertEq(/sniff 档无表单可导入/.test(importCfgBody), true,
-  'im-2: importCfg sniff 档守卫 toast 提示"sniff 档无表单可导入"');
+// (后续改动收敛为 "只有 manual 档能导入": S.mode !== 'manual' 一律拦;
+//  sniff 格式的文件本身仍支持识别 + 转换导入 manual 档)
+assertEq(/S\.mode\s*!==\s*'manual'/.test(importCfgBody), true,
+  'im-2: importCfg 开头有 S.mode !== "manual" 守卫 (只有手动档能导入)');
+assertEq(/只有手动档可以导入配置/.test(importCfgBody), true,
+  'im-2: importCfg 非 manual 档 toast 提示"只有手动档可以导入配置"');
+assertEq(/impMode\s*===\s*'sniff'/.test(importCfgBody), true,
+  'im-2: importCfg 仍识别 sniff 格式文件 (impMode === "sniff" 转换)');
 
-// 6. exportCfg 加 sniff 档特判 (走 m prefix)
+// 6. exportCfg 的 sniff 分支 (2026-11-02 改版: 走专门的 exportSniffAsJson/Csv)
+// (提取窗口到第二个 askExportFormat() 为止 —— 第一个在 sniff 分支里)
 const exportStart = appJs.indexOf('async function exportCfg');
-const exportEnd = appJs.indexOf('askExportFormat()', exportStart) + 'askExportFormat()'.length;
+const ask1 = appJs.indexOf('askExportFormat()', exportStart);
+const ask2 = appJs.indexOf('askExportFormat()', ask1 + 20);
+const exportEnd = (ask2 > 0 ? ask2 : ask1) + 'askExportFormat()'.length;
 const exportCfgBody = appJs.substring(exportStart, exportEnd);
 assertEq(exportCfgBody.length > 0, true, 'im-2: 找到 exportCfg 函数体');
 assertEq(/S\.mode\s*===\s*'sniff'/.test(exportCfgBody), true,
-  'im-2: exportCfg 体内含 S.mode === "sniff" 特判');
-assertEq(/pre\s*=\s*'m'/.test(exportCfgBody), true,
-  'im-2: exportCfg sniff 档特判把 pre 改 "m" (走手动档 prefix)');
-assertEq(/sniff 档无表单, 导出当前手动档配置/.test(exportCfgBody), true,
-  'im-2: exportCfg sniff 档 toast 提示"sniff 档无表单, 导出当前手动档配置"');
+  'im-2: exportCfg 开头有 S.mode === "sniff" 分支');
+assertEq(/exportSniffAsJson\(\)/.test(exportCfgBody) && /exportSniffAsCsv\(\)/.test(exportCfgBody), true,
+  'im-2: exportCfg sniff 分支走 exportSniffAsJson/Csv (导出当前嗅探结果)');
 
 console.log('PASS: im-2 CSV 加 server 列 + sniff 档导入禁用/导出开启 (走 manual 档)');

@@ -41,7 +41,8 @@ assertEq(/if \(!silent\) status\(/.test(fn), true,
 // 3. 手动按钮仍走非静默(有提示)
 assertEq(/el\.btnInfer\.onclick = doInfer;/.test(appJs), true,
   'sniff5: 手动「推断轮询表」按钮仍是有提示的 doInfer');
-assertEq(/el\.btnInferRefresh\.onclick = doInfer;/.test(appJs), true,
-  'sniff5: 标题栏[刷新]按钮仍是有提示的 doInfer');
+// (后续增强: 标题栏[刷新]按钮在 doInfer 之后还会刷一次识别状态 R:AUTODETECT)
+assertEq(/el\.btnInferRefresh\.onclick = async \(\) => \{\s*await doInfer\(\);/.test(appJs), true,
+  'sniff5: 标题栏[刷新]按钮 = await doInfer() + 识别状态刷新 (有提示)');
 
 console.log('PASS: sniff5 切 sniff 面板自动重推推断表(串行+重试, 静默) + 手动按钮保留提示 (9 个测试点通过)');

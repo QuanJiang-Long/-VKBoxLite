@@ -22,10 +22,14 @@ const sniffEnd = html.indexOf('MQTT连接', sniffStart);
 const sniffBody = html.substring(sniffStart, sniffEnd);
 
 // 1. 推断结果标题简化
-assertEq(/<div[^>]*>\s*推断结果\s*<span/.test(sniffBody), true,
-  'sniff-3 g: 推断结果标题只剩 "推断结果" (后面紧跟 <span id="inferHint">)');
+// (2026-11-02 后 inferHint 移到标题下方的提示行, 不再紧跟标题;
+//  标题 div 内是 "推断结果" + 刷新/清空按钮)
+assertEq(/>\s*推断结果\s*(<!--|<)/.test(sniffBody), true,
+  'sniff-3 g: 推断结果标题只剩 "推断结果" (后面是注释/按钮, 无旧副标题)');
 assertEq(/推断结果（从监听到的请求帧反推）/.test(sniffBody), false,
   'sniff-3 g: 旧标题 "推断结果（从监听到的请求帧反推）" 已删');
+assertEq(/id="inferHint"/.test(sniffBody), true,
+  'sniff-3 g: inferHint 提示行仍在推断结果子分段内');
 
 // 2. 总线报文子分段加滑动开关
 assertEq(/id="frameSectionOn"/.test(sniffBody), true,

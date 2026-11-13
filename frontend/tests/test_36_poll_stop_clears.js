@@ -1,4 +1,4 @@
-// test_36_poll_stop_clears.js
+﻿// test_36_poll_stop_clears.js
 //
 // 36-fix: poll.stop() 必须清空 regs/lastCfg/interval
 //
@@ -18,7 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const { assertEq } = require('./setup');
 
-const pollLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'bus', 'poll.lua'), 'utf8');
+const pollLua = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'bus', 'poll.lua'), 'utf8');
 
 // 找 M.stop 函数体
 const stopStart = pollLua.indexOf('function M.stop()');
@@ -27,7 +27,8 @@ assertEq(stopStart > 0 && stopEnd > 0, true, '能找到 M.stop 函数');
 if (stopStart > 0 && stopEnd > 0) {
   const body = pollLua.substring(stopStart, stopEnd);
   // 36-fix: 末尾清空 regs/lastCfg/interval
-  assertEq(/regs,\s*interval,\s*lastCfg\s*=\s*\{\},\s*cfg\.POLL_INTERVAL_MS\s*,\s*nil/.test(body), true,
+  // (2026-11-13 plan 重构后同一行还顺带清了 plan —— 语义不变, 放宽匹配)
+  assertEq(/regs,\s*interval,\s*lastCfg(,\s*plan)?\s*=\s*\{\},\s*cfg\.POLL_INTERVAL_MS\s*,\s*nil/.test(body), true,
     '36-fix: M.stop() 末尾清空 regs/interval/lastCfg (修切 idle 后 R:REG 还能返回旧寄存器)');
   // 仍然返回 true
   assertEq(/return\s+true/.test(body), true, 'M.stop() 仍然返回 true');

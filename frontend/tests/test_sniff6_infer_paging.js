@@ -1,4 +1,4 @@
-// test_sniff6_infer_paging.js
+﻿// test_sniff6_infer_paging.js
 //
 // 12-fix-9: 推断表【分页】
 //
@@ -30,8 +30,8 @@ const html = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'
 const appJs = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
 const protoJs = fs.readFileSync(path.join(__dirname, '..', 'protocol.js'), 'utf8');
 const repo = path.join(__dirname, '..', '..');
-const monLua = fs.readFileSync(path.join(repo, 'lua', 'bus', 'mon.lua'), 'utf8');
-const cmdLua = fs.readFileSync(path.join(repo, 'lua', 'svc', 'cmd.lua'), 'utf8');
+const monLua = fs.readFileSync(path.join(repo, 'firmware', 'bus', 'mon.lua'), 'utf8');
+const cmdLua = fs.readFileSync(path.join(repo, 'firmware', 'svc', 'cmd.lua'), 'utf8');
 
 // sniff 嗅探 panel 范围
 const sniffStart = html.indexOf('id="tabSniff"');
@@ -64,16 +64,20 @@ assertEq(tbodyIdx > 0 && pagerIdx > tbodyIdx, true,
 // === 3. app.js: 按页取 ===
 assertEq(/Protocol\.Enc\.infer\(off,\s*size\)/.test(appJs), true,
   'sniff-6: 前端按页取 (Enc.infer(off, size))');
-assertEq(/inferPageSize:\s*32/.test(appJs), true,
-  'sniff-6: 每页行数 32 (跟设备硬上限一致)');
+// (2026-11-02 起: 每页条数从选择器读, 用户可选 10/20; 设备硬上限仍是 32)
+assertEq(/inferPageSize:\s*\d+/.test(appJs), true,
+  'sniff-6: 状态里有默认每页行数 inferPageSize');
+assertEq(/function\s+getInferPageSize/.test(appJs) && /parseInt\(sel\.value,\s*10\)\s*\|\|\s*32/.test(appJs),
+  true, 'sniff-6: getInferPageSize 从选择器读, 取不到回退 32 (设备硬上限)');
 assertEq(/async function fetchInferPage/.test(appJs), true,
   'sniff-6: 有 fetchInferPage');
 assertEq(/async function gotoInferPage/.test(appJs), true,
   'sniff-6: 有 gotoInferPage (翻页)');
 
 // === 4. app.js: 序号用全局下标 ===
-assertEq(/\(off \+ i \+ 1\)/.test(appJs), true,
-  'sniff-6: 序号 = 全局下标 (off + i + 1), 不是每页从 1 开始');
+// (2026-11-02 后行序按 origIdx 排, 全局下标 = off + item.origIdx + 1)
+assertEq(/off \+ item\.origIdx \+ 1/.test(appJs), true,
+  'sniff-6: 序号 = 全局下标 (off + item.origIdx + 1), 不是每页从 1 开始');
 
 // === 5. app.js: 名字走 names 表 ===
 assertEq(/S\.inferNames\[akey\]/.test(appJs), true,

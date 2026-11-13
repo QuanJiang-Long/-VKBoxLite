@@ -1,4 +1,4 @@
-// test_37_poll_slot_uses_mode.js
+﻿// test_37_poll_slot_uses_mode.js
 //
 // 37-fix: poll_slot() 必须用 ctrl 记下的 mode, 不能用 poll.cur_slot()
 //
@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const { assertEq } = require('./setup');
 
-const iotLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'iot', 'iot.lua'), 'utf8');
+const iotLua = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'iot', 'iot.lua'), 'utf8');
 
 // 修复 1: poll_slot() 改用 get_mode()
 const slotStart = iotLua.indexOf('local function poll_slot()');

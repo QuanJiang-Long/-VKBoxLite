@@ -12,8 +12,8 @@
 --   2) A/B 对照: 同一帧, 复用表解出来的字段必须和"每次新建表"解出来的
 --      一模一样。
 
-local mbus = dofile('lua/bus/mbus.lua')
-local collector = dofile('lua/data/collector.lua')
+local mbus = dofile('firmware/bus/mbus.lua')
+local collector = dofile('firmware/data/collector.lua')
 local cfg = require 'core/config'
 
 local failed = 0

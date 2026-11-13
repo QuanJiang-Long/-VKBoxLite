@@ -2107,15 +2107,9 @@ function parseCsv(text) {
   return result;
 }
 
-// data: { serial, registers, mqtt, mqtt_status, device_status } - 内部统一格式
-// im-4: 加 mqtt_status 段 (设备 R:STAT 来的 mqtt 段, 只读快照)
-//   - 含 connected / want_run / subscribed / client_id / user /
-//     device_id / sub / pub_topics / keep_session 等运行态
-//   - CSV 不导 (sub/keep_session/pub_topics 不太适合表格, JSON 优先)
-// im-6: 加 device_status 段 (设备 R:STAT 来的 mode + data + guard 3 段, 设备运行态)
-//   - 跟 mqtt_status 段平级, 但不含 mqtt 段 (mqtt 走 mqtt_status 段, 不重复)
-//   - 没拉到 R:STAT 时 (S.stat 不存在): 返 null
-//   - CSV 不导 (对象, 不适合表格)
+// data: { tool, version, exported, mode, serial, registers, mqtt } - 内部统一格式
+// 2026-11-04 (1aca52e): 去掉 mqtt_status/device_status 段 —— 那是设备运行态
+//   (R:STAT 来的快照), 不该进配置文件; 配置文件只含静态配置 + 来源档位 mode
 function exportCfgAsJson(pre) {
   if (pre === undefined) pre = cfgPrefix();
   const c = collectCfg(pre);

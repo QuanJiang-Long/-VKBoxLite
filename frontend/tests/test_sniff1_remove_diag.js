@@ -1,4 +1,4 @@
-// test_sniff1_remove_diag.js
+﻿// test_sniff1_remove_diag.js
 //
 // sniff-1: 删除 sniff 面板的 "总线诊断" 卡片
 //   - 前端: index.html / app.js / protocol.js 删掉相关 UI 和命令
@@ -20,10 +20,10 @@ const { assertEq } = require('./setup');
 const indexHtml = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'), 'utf8');
 const appJs     = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
 const protocolJs = fs.readFileSync(path.join(__dirname, '..', 'protocol.js'), 'utf8');
-const cmdLua    = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'svc', 'cmd.lua'), 'utf8');
-const monLua    = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'bus', 'mon.lua'), 'utf8');
-const pollLua   = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'bus', 'poll.lua'), 'utf8');
-const readmeMd  = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'README.md'), 'utf8');
+const cmdLua    = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'svc', 'cmd.lua'), 'utf8');
+const monLua    = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'bus', 'mon.lua'), 'utf8');
+const pollLua   = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'bus', 'poll.lua'), 'utf8');
+const readmeMd  = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'README.md'), 'utf8');
 
 // 测 1: HTML 不再有 "总线诊断" / btnBusSniff / busSniffMs / txHex / btnTx
 assertEq(indexHtml.indexOf('总线诊断') < 0, true, 'index.html 不再有 "总线诊断"');

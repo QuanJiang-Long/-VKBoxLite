@@ -1,4 +1,4 @@
-// test_32_pub_topics.js
+﻿// test_32_pub_topics.js
 //
 // 32-fix: 设备端 profile() / M.status() 实际发送的 topic 列表 (pub_topics)
 //         前端 mqStPub 优先用 pub_topics 渲染, 老设备回退到 s.pub
@@ -18,8 +18,8 @@ const fs = require('fs');
 const path = require('path');
 const { assertEq } = require('./setup');
 
-const mqttcfg = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'iot', 'mqttcfg.lua'), 'utf8');
-const iot     = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'iot', 'iot.lua'), 'utf8');
+const mqttcfg = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'iot', 'mqttcfg.lua'), 'utf8');
+const iot     = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'iot', 'iot.lua'), 'utf8');
 const mqttJs  = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'mqtt.js'), 'utf8');
 const appJs   = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
 

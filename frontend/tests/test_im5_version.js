@@ -38,20 +38,28 @@ assertEq(!/version:\s*['"]2\.0\.0['"]/.test(exportFnMatch[0]), true,
 // 3. importCfg 含版本校验
 const importCfgMatch = appJs.match(/async\s+function\s+importCfg[\s\S]*?inp\.click\(\);?\s*\}/);
 assertEq(!!importCfgMatch, true, 'im-5 6b: 找到 importCfg 函数体');
-assertEq(/data\.version\s*!=\s*null/.test(importCfgMatch[0]) || /data\.version\s*!=\s*undefined/.test(importCfgMatch[0]),
-  true, 'im-5 6b: importCfg 检查 data.version 不为 null/undefined');
+// (后续升级: 版本号统一收进 impVer, JSON 用 data.version, CSV 用 data.meta.version)
+assertEq(/impVer\s*!=\s*null/.test(importCfgMatch[0]), true,
+  'im-5 6b: importCfg 检查 impVer (data.version / data.meta.version) 不为 null');
+assertEq(/data\.version/.test(importCfgMatch[0]) && /data\.meta && data\.meta\.version/.test(importCfgMatch[0]), true,
+  'im-5 6b: impVer 的来源是 data.version 或 data.meta.version');
 assertEq(/curMajor/.test(importCfgMatch[0]) && /impMajor/.test(importCfgMatch[0]), true,
   'im-5 6b: importCfg 取 major version (curMajor / impMajor)');
-assertEq(/版本不兼容/.test(importCfgMatch[0]), true,
-  'im-5 6b: importCfg major 不同抛 "版本不兼容" 错误');
+// (后续升级: 从 "major 不同直接拒绝" 改为 "提示确认", 且 1.x/2.x 互认兼容)
+assertEq(/不一致，可能不兼容/.test(importCfgMatch[0]), true,
+  'im-5 6b: importCfg major 不同弹 "不一致，可能不兼容" 确认 (不直接拒绝)');
+assertEq(/compatible/.test(importCfgMatch[0]), true,
+  'im-5 6b: importCfg 有 compatible 判定 (major 同或 1.x/2.x 互认)');
 
-// 4. CSV 不校验 (importCfgMatch 里 fmt === 'JSON' 才校验)
-assertEq(/fmt\s*===\s*['"]JSON['"]/.test(importCfgMatch[0]), true,
-  'im-5 6b: importCfg 版本校验只在 fmt === "JSON" 时跑 (CSV 不校验)');
+// 4. 版本校验对 JSON/CSV 都生效 (CSV 从 data.meta.version 取)
+//    (后续升级: 不再只对 fmt === "JSON" 校验)
+assertEq(/impVer\s*!=\s*null/.test(importCfgMatch[0]), true,
+  'im-5 6b: importCfg 版本校验用 impVer != null 门控 (JSON/CSV 都查)');
+assertEq(/data\.meta && data\.meta\.version/.test(importCfgMatch[0]), true,
+  'im-5 6b: CSV 格式从 data.meta.version 取版本号');
 
-// 5. 老格式兼容: 没 version 字段也接受
-//    测试代码: 注释说 "没 version 字段 (老格式): 接受, 兼容"
-assertEq(/没\s*version\s*字段/.test(importCfgMatch[0]) || /兼容老格式/.test(importCfgMatch[0]), true,
-  'im-5 6b: importCfg 注释说明"没 version 字段 (老格式): 接受"');
+// 5. 老/无版本号格式兼容: impVer 为空直接跳过校验
+assertEq(/版本校验/.test(importCfgMatch[0]), true,
+  'im-5 6b: importCfg 注释说明版本校验行为 (无版本号跳过)');
 
 console.log('PASS: im-5 6a 从 window.__APP_VERSION__ 读版本号 + 6b importCfg 加版本校验 (major 拒, 老格式兼容)');

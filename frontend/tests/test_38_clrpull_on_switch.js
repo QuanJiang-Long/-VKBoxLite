@@ -1,4 +1,4 @@
-// test_38_clrpull_on_switch.js
+﻿// test_38_clrpull_on_switch.js
 //
 // 38-fix: 从 platform 切 manual/sniff 弹窗, 默认勾选"清空平台拉取配置",
 //   确认后前端发 W:CLRPULL 后再 W:MODE, 设备端 W:CLRPULL handler 只清
@@ -12,8 +12,8 @@ const fs = require('fs');
 const path = require('path');
 const { assertEq } = require('./setup');
 
-const cmdLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'svc', 'cmd.lua'), 'utf8');
-const cfgLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'cfg.lua'), 'utf8');
+const cmdLua = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'svc', 'cmd.lua'), 'utf8');
+const cfgLua = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'cfg.lua'), 'utf8');
 const protocol = fs.readFileSync(path.join(__dirname, '..', 'protocol.js'), 'utf8');
 const appJs = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
 

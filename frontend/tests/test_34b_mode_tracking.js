@@ -1,4 +1,4 @@
-// test_34b_mode_tracking.js
+﻿// test_34b_mode_tracking.js
 //
 // 34b-fix: ctrl.get_mode() 必须返回真实的 mode, 不能只靠 poll.is_running() 推导.
 //   34-fix 让 poll 在槽空时不起, 此时 旧 get_mode() 会把 platform/manual 误报为 idle
@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { assertEq } = require('./setup');
 
-const ctrlLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'bus', 'ctrl.lua'), 'utf8');
+const ctrlLua = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'bus', 'ctrl.lua'), 'utf8');
 
 // === 测 1: S.cur 存在 ===
 assertEq(/local\s+S\s*=\s*\{\s*cur\s*=\s*["']idle["']\s*\}/.test(ctrlLua), true,
@@ -34,11 +34,13 @@ if (getMode) {
 }
 
 // === 测 3: switch_mode 4 个成功返回点都设 S.cur ===
-// 4 个 S.cur 赋值点 (不一定按顺序出现, 用单独的 S.cur 出现来验证)
+// 不再数具体次数 (后续 fix 给 sniff 加了持久恢复路径的第二处赋值, 注释里也
+// 会出现 S.cur="idle" 字样) —— 改为语义检查: 4 个档位各自至少有一个赋值点
 const sCurAssigns = (ctrlLua.match(/S\.cur\s*=\s*["'](idle|manual|platform|sniff)["']/g) || []);
-const sCurValues = sCurAssigns.map(s => s.match(/["'](idle|manual|platform|sniff)["']/)[1]).sort();
-assertEq(JSON.stringify(sCurValues), JSON.stringify(['idle', 'idle', 'manual', 'platform', 'platform', 'sniff']),
-  'switch_mode: S.cur 赋值点包含 manual/platform/sniff/idle (idle 出现 2 次: 默认值 + idle 档赋值)');
+const sCurValues = new Set(sCurAssigns.map(s => s.match(/["'](idle|manual|platform|sniff)["']/)[1]));
+for (const m of ['idle', 'manual', 'platform', 'sniff']) {
+  assertEq(sCurValues.has(m), true, 'switch_mode: S.cur 有 "' + m + '" 赋值点');
+}
 
 // === 测 4: 4 个 S.cur 赋值点都存在 (总共 4 个) ===
 // 把 34b-fix 注释以外的所有 S.cur 赋值都数一遍

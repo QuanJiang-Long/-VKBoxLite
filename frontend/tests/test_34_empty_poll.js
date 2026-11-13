@@ -1,4 +1,4 @@
-// test_34_empty_poll.js
+﻿// test_34_empty_poll.js
 //
 // 34-fix: 空配置不起轮询 (manual + platform 都要)
 //
@@ -15,10 +15,10 @@ const { assertEq } = require('./setup');
 
 // 换行归一化: Windows 下 git autocrlf 检出 CRLF, 断言里的 '\n' 字面会全落空
 const norm = s => s.replace(/\r\n/g, '\n');
-const cfgLua = norm(fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'cfg.lua'), 'utf8'));
-const ctrlLua = norm(fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'bus', 'ctrl.lua'), 'utf8'));
-const cmdLua = norm(fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'svc', 'cmd.lua'), 'utf8'));
-const iotLua = norm(fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'iot', 'iot.lua'), 'utf8'));
+const cfgLua = norm(fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'cfg.lua'), 'utf8'));
+const ctrlLua = norm(fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'bus', 'ctrl.lua'), 'utf8'));
+const cmdLua = norm(fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'svc', 'cmd.lua'), 'utf8'));
+const iotLua = norm(fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'iot', 'iot.lua'), 'utf8'));
 const appJs = norm(fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8'));
 
 // === 1. cfg.lua: has_poll_cfg / has_pull_cfg 函数存在 ===
@@ -37,7 +37,8 @@ if (hasPollStart > 0 && hasPollEnd > 0) {
   const body = cfgLua.substring(hasPollStart, hasPollEnd)
     .split('\n').filter(l => !/^\s*--/.test(l)).join('\n');
   // Lua 用 ~= 不是 !=
-  assertEq(/poll_src\(\)\s*[~=!]=\s*["']fskv["']/.test(body), true,
+  // (实现后来重构成 src_of(K_POLL): src 变量做比较, 语义不变 —— src=="fskv" 才算有)
+  assertEq(/src\s*[~=!]=\s*["']fskv["']/.test(body), true,
     'has_poll_cfg: 看 poll_src() 和 "fskv" 比较');
   assertEq(/#\(c\.regs\s*or\s*\{\}\)\s*>\s*0/.test(body), true,
     'has_poll_cfg: #regs>0 才算有');
@@ -58,25 +59,24 @@ if (pollStartBlock) {
     'ctrl.lua 有 34-fix 注释 (空配置不起轮询)');
 }
 
-// === 3. cmd.lua W:CFG: 补 poll.start (34-fix 兜底) ===
-const wcfgHandler = cmdLua.match(/M\.reg\("W:CFG",\s*function\([\s\S]+?end\)/);
-assertEq(!!wcfgHandler, true, '能找到 W:CFG handler');
-if (wcfgHandler) {
-  const body = wcfgHandler[0].split('\n').filter(l => !/^\s*--/.test(l)).join('\n');
+// === 3. cmd.lua: 配置提交路径补 poll.start (34-fix 兜底) ===
+// (2026-11-11 起 W:CFG/W:CFINISH 的提交逻辑收敛进 commit_config(), 两条
+//  上传路径共用 —— poll.start 兜底也跟着搬进去了)
+const commitFn = cmdLua.match(/local function commit_config\(t\)[\s\S]+?\nend/);
+assertEq(!!commitFn, true, '能找到 commit_config 函数');
+if (commitFn) {
+  const body = commitFn[0].split('\n').filter(l => !/^\s*--/.test(l)).join('\n');
   // 补起 poll: in_poll_mode && !is_running → poll.start(slot)
   assertEq(/in_poll_mode/.test(body), true,
     'W:CFG: 用 in_poll_mode 决定是否起 poll');
   assertEq(/not\s+poll\.is_running\(\)/.test(body), true,
     'W:CFG: poll 没起时补起 (34-fix 副作用)');
   // 注释: 34-fix
-  // 在 handler 全文找 34-fix 注释 + poll.start 调用 (语义断言)。
+  // 在 commit_config 全文找 34-fix 注释 + poll.start 调用 (语义断言)。
   // 不再用 "34-fix[|..200]补起[|..100]poll" 的字符窗口 —— 限近距离搜词
   // 会被注释重排/深缩进/换行符挤爆 (实测超窗 9 字符, 与代码对错无关)
-  const wcfgStart = cmdLua.indexOf('M.reg("W:CFG"');
-  const wcfgNext = cmdLua.indexOf('M.reg("', wcfgStart + 10);
-  const wcfgRegion = cmdLua.substring(wcfgStart, wcfgNext > 0 ? wcfgNext : wcfgStart + 3000);
-  assertEq(/34-fix/.test(wcfgRegion) && /poll\.start/.test(wcfgRegion), true,
-    'W:CFG: handler 区间内有 34-fix 注释 + poll.start 补起');
+  assertEq(/34-fix/.test(commitFn[0]) && /poll\.start/.test(commitFn[0]), true,
+    'commit_config: 34-fix 注释 + poll.start 补起都在 (W:CFG/W:CFINISH 共用)');
 }
 
 // === 4. iot.lua: apply_fail 状态 ===

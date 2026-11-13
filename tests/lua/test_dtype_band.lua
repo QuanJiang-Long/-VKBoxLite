@@ -11,9 +11,9 @@
 -- 跑法: Lua 5.3+ 引擎 (mbus 的 CRC 用了 5.3 位运算 // 与 ~)。
 --   用 Luatools 自带 LuatOS PC 引擎跑, 见 tools/run_lua_tests.bat
 if package and package.path then
-    package.path = 'lua/?.lua;' .. package.path
+    package.path = 'firmware/?.lua;' .. package.path
 end
-local mon = dofile('lua/bus/mon.lua')
+local mon = dofile('firmware/bus/mon.lua')
 
 local fails = 0
 local total = 0

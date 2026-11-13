@@ -1,4 +1,4 @@
-// test_35_idle_always_clickable.js
+﻿// test_35_idle_always_clickable.js
 //
 // 35-fix: idle 永远是逃生口, 串口没开也能进. 平台档拉不到配置又不能
 //   切回 idle, 用户就被卡死了.
@@ -15,7 +15,7 @@ const { assertEq } = require('./setup');
 const appJs = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8')
   // 换行归一化: Windows 下 git autocrlf 检出 CRLF, 断言里的 '\n' 字面会全落空
   .replace(/\r\n/g, '\n');
-const iotLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'iot', 'iot.lua'), 'utf8')
+const iotLua = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'iot', 'iot.lua'), 'utf8')
   .replace(/\r\n/g, '\n');
 
 // === 测 1: setPortState 中 mcIdle 不加 .locked ===

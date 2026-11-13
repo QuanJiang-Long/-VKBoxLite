@@ -7,8 +7,8 @@
 --
 -- 跑法(仓库根目录):  lua tests/lua/test_clamp_qty.lua  (本机 5.1 即可, 不依赖 mbus)
 
-if package and package.path then package.path = 'lua/?.lua;' .. package.path end
-local util = dofile('lua/util.lua')
+if package and package.path then package.path = 'firmware/?.lua;' .. package.path end
+local util = dofile('firmware/util.lua')
 
 local fails = 0
 local function eq(a, b, what)

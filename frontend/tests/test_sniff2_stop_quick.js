@@ -1,4 +1,4 @@
-// test_sniff2_stop_quick.js
+﻿// test_sniff2_stop_quick.js
 //
 // sniff-2 fix: mon.stop() 必须立刻停掉后台 auto_detect, 不让 sys.wait(2000)
 //   闷头跑完剩余 baud, 还要 uart.close 防止后续 uart.setup 改 UART 寄存器
@@ -22,7 +22,7 @@ const fs = require('fs');
 const path = require('path');
 const { assertEq } = require('./setup');
 
-const monLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'bus', 'mon.lua'), 'utf8');
+const monLua = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'bus', 'mon.lua'), 'utf8');
 
 // 1. forceStop 标志存在
 assertEq(/local\s+forceStop\s*=\s*false/.test(monLua), true,

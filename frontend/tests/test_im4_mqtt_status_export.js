@@ -1,13 +1,13 @@
 // test_im4_mqtt_status_export.js
 //
-// im-4: exportCfgAsJson 加 mqtt_status 段
-//   1. data 含 mqtt_status 字段
-//   2. mqtt_status 值 = S.mqtt.stat (R:STAT mqtt 段, 设备运行态快照)
-//   3. 字段: connected / want_run / subscribed / client_id / user /
-//            device_id / sn / sub / pub_topics / keep_session
-//   4. S.mqtt 不存在时 (没拉到) 返 null
-//   5. CSV 不加 (sub/keep_session/pub_topics 不适合表格)
-//   6. data 段顺序: tool/version/exported/serial/registers/mqtt/mqtt_status
+// im-4: mqtt_status 段与导出的关系
+//   历史行为: exportCfgAsJson data 里带 mqtt_status: (S.mqtt && S.mqtt.stat) || null
+//   2026-11-04 (1aca52e "调整导出配置范围"): 有意去掉 —— 运行时状态不该
+//   进配置文件 (配置文件用于跨设备导入, 拿着别台设备的运行态没意义)
+//   现在的行为:
+//   1. exportCfgAsJson 不含 mqtt_status (运行态不导出)
+//   2. exportCfgAsCsv 同样不含
+//   3. data 有 mode 字段记录当前档位 (1aca52e 补的)
 
 const fs = require('fs');
 const path = require('path');
@@ -15,35 +15,26 @@ const { assertEq } = require('./setup');
 
 const appJs = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
 
-// 1. exportCfgAsJson data 含 mqtt_status
+// 1. 找到 exportCfgAsJson
 const exportFnMatch = appJs.match(/function\s+exportCfgAsJson\s*\(\s*pre\s*\)\s*\{[\s\S]*?toast\('配置已导出为 JSON'\);?\s*\}/);
 assertEq(!!exportFnMatch, true, 'im-4: 找到 exportCfgAsJson 函数');
-assertEq(/mqtt_status:\s*\(S\.mqtt\s*&&\s*S\.mqtt\.stat\)\s*\|\|\s*null/.test(exportFnMatch[0]), true,
-  'im-4: exportCfgAsJson data 含 mqtt_status: (S.mqtt && S.mqtt.stat) || null');
 
-// 2. CSV 不加 mqtt_status (CSV 3 段: [serial] / [registers] / [mqtt])
+// 2. JSON 导出不含 mqtt_status (运行时状态, 1aca52e 有意去掉)
+assertEq(!/mqtt_status/.test(exportFnMatch[0]), true,
+  'im-4: exportCfgAsJson 不含 mqtt_status (运行态不进配置文件)');
+
+// 3. CSV 导出同样不含 mqtt_status
 const csvFnMatch = appJs.match(/function\s+exportCfgAsCsv\s*\(\s*pre\s*\)\s*\{[\s\S]*?toast\('配置已导出为 CSV'\);?\s*\}/);
 assertEq(!!csvFnMatch, true, 'im-4: 找到 exportCfgAsCsv 函数');
 assertEq(!/mqtt_status|mqtt-status|mqttStat/i.test(csvFnMatch[0]), true,
-  'im-4: exportCfgAsCsv 不加 mqtt_status (sub/keep_session/pub_topics 不适合 CSV)');
+  'im-4: exportCfgAsCsv 不含 mqtt_status');
 
-// 3. 段顺序: tool/version/exported/serial/registers/mqtt/mqtt_status
-//   找 mqtt: {...} 块结束位置, 看 mqtt_status 是不是在它之后
-const mqttEnd = exportFnMatch[0].lastIndexOf('manual_on: S.mqManual');
-const mqttStatusIdx = exportFnMatch[0].indexOf('mqtt_status', mqttEnd);
-assertEq(mqttStatusIdx > mqttEnd, true,
-  'im-4: mqtt_status 在 mqtt 段 (manual_on) 之后, 段顺序正确');
+// 4. data 有 mode 字段记录当前档位 (1aca52e: 导出时记录来源档位)
+assertEq(/mode:\s*S\.mode\s*\|\|\s*'manual'/.test(exportFnMatch[0]), true,
+  'im-4: exportCfgAsJson data 含 mode: S.mode || "manual" (记录来源档位)');
 
-// 4. mqtt_status 值用 S.mqtt.stat (不是 S.mqtt 整个, 因为 S.mqtt 还有 cfg/auto_pass)
-//   排除法: mqtt_status 应该是 (S.mqtt && S.mqtt.stat) || null
-//   不能是 S.mqtt (包含 cfg)
-assertEq(!/mqtt_status:\s*S\.mqtt\s*\|\|/.test(exportFnMatch[0]), true,
-  'im-4: mqtt_status 不直接是 S.mqtt (只取 stat 段)');
+// 5. app.js 保留 "CSV 不导" 相关注释语境 (历史说明, 防止误删 MQTT 静态配置)
+assertEq(/manual_on:\s*S\.mqManual/.test(exportFnMatch[0]), true,
+  'im-4: mqtt 段仍导出 manual_on (静态配置保留)');
 
-// 5. 注释说明 CSV 不导 mqtt_status
-//   注: 注释在 exportCfgAsJson 函数上方, exportFnMatch 可能不含
-//   检查 appJs 整文件含 "CSV 不导" 字样
-assertEq(/CSV\s*不\s*导/.test(appJs), true,
-  'im-4: app.js 含 "CSV 不导" 注释');
-
-console.log('PASS: im-4 exportCfgAsJson 加 mqtt_status 段 (设备 R:STAT mqtt 段, CSV 不导)');
+console.log('PASS: im-4 导出不含 mqtt_status 运行态 (1aca52e 调整), JSON/CSV 一致, mode 来源档位保留');

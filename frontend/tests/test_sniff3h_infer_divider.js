@@ -23,7 +23,9 @@ const titleEnd = sniffBody.indexOf('</div>', titleStart + 50);
 const titleBody = sniffBody.substring(titleStart, titleEnd + 5);
 
 // 找推断结果子分段位置
-const inferStart = sniffBody.indexOf('id="btnInfer"');
+// (2026-11-02 后 btnInfer/btnAutoDetect 移进了 panel-title 标题行,
+//  推断结果子分段以它的 [刷新] 按钮 btnInferRefresh 为锚)
+const inferStart = sniffBody.indexOf('id="btnInferRefresh"');
 
 // 1. 推断结果之前有 border-top 分隔线 (在 panel-title 和 推断结果 之间)
 const gapChunk = sniffBody.substring(titleEnd, inferStart);

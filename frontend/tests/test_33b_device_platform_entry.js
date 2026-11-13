@@ -1,4 +1,4 @@
-// test_33b_device_platform_entry.js
+﻿// test_33b_device_platform_entry.js
 //
 // 33-fix 设备端: 撤掉 25-fix 的 platform MQTT 拦截
 //   - 不再要求 MQTT 已连接才能切 platform
@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const { assertEq } = require('./setup');
 
-const ctrlLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'bus', 'ctrl.lua'), 'utf8');
+const ctrlLua = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'bus', 'ctrl.lua'), 'utf8');
 
 // 测 1: 不再有 25-fix 的 MQTT 连接状态检查
 //   排除注释行 (// 开头) - 33-fix 注释里会提到 "25-fix"

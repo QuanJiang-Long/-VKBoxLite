@@ -1,4 +1,4 @@
-// test_sniff4_alias_edit.js
+﻿// test_sniff4_alias_edit.js
 //
 // sniff-4 (2026-10): 推断表的"参数名称 / 建议标识符"两列可编辑
 //   - 前端: 点击单元格 → 弹窗改名 → 存设备 → 重推推断表
@@ -15,9 +15,9 @@ const { assertEq } = require('./setup');
 const appJs = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
 const protoJs = fs.readFileSync(path.join(__dirname, '..', 'protocol.js'), 'utf8');
 const html = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'), 'utf8');
-const cmdLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'svc', 'cmd.lua'), 'utf8');
-const iotLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'iot', 'iot.lua'), 'utf8');
-const cfgLua = fs.readFileSync(path.join(__dirname, '..', '..', 'lua', 'cfg.lua'), 'utf8');
+const cmdLua = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'svc', 'cmd.lua'), 'utf8');
+const iotLua = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'iot', 'iot.lua'), 'utf8');
+const cfgLua = fs.readFileSync(path.join(__dirname, '..', '..', 'firmware', 'cfg.lua'), 'utf8');
 
 // === 1. 协议层: 两条别名指令 ===
 assertEq(/aliasRead:\s*\(\)\s*=>\s*'R:SALIAS'/.test(protoJs), true,
