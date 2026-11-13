@@ -677,9 +677,16 @@ local rows_n, bytes_n = #up.rows, up.bytes + #arg
 up_reset("CFINISH 提交")
 trc_begin(bytes_n)
 local ok, reason = commit_config(base)
+
 if not ok then return M.reply("RET:FAIL:CFG:" .. reason) end
 log.info("cmd", "分片上传提交完成 rows=" .. rows_n)
-M.reply("RET:CFG=OK")
+
+
+
+
+
+
+M.reply("RET:CFINISH=OK")
 end)
 
 
