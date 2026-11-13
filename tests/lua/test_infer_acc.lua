@@ -117,7 +117,9 @@ eq(mon.infer(true).regs[1], nil, '复位后没有残留行')
 
 -- 11) 内存账: 现场的 48 个地址, 累加器占多少堆
 --   12-fix-5/6 的教训: 堆只有 307KB, 常驻结构每 1KB 都是从余量里抠的。
---   现场 sniff 实测活对象 ~213KB, 所以这 48 行必须控制在 12KB 以内。
+--   2026-11 行加了 name/id (8→10 字段, 8→16 哈希槽): 每行 203→363 字节,
+--   48 行 ~17KB —— 这是过了账的有意代价 (换 sniff 持久化, 见 mon.lua
+--   2026-11 注), 红线相应从 12KB 放宽到 24KB。再超说明行又胖了, 要重新过账。
 mon.test_reset_acc()
 collectgarbage("collect")
 local kb0 = collectgarbage("count")
@@ -130,14 +132,16 @@ local kb1 = collectgarbage("count")
 local used_kb = kb1 - kb0
 print(string.format('  累加器 48 行占 %.1f KB (每行 %.0f 字节)', used_kb, used_kb * 1024 / 48))
 ok(used_kb > 0.5, '48 行确实占了堆(测出了)')
-ok(used_kb < 12, '48 行的累加器占用在 12KB 以内')
+ok(used_kb < 24, '48 行的累加器占用在 24KB 以内')
 
--- 11b) ⚠️ 字段数 ≤8 的红线: Lua 表的哈希槽按 2 的幂走, 第 9 个字段就把
---   8 槽撑成 16 槽 —— 每行 203 → 363 字节(实测), 48 行多占 8KB 堆。
---   以后谁给推断行加字段, 这个断言会先炸。
+-- 11b) ⚠️ 字段数红线: Lua 表的哈希槽按 2 的幂走。2026-10-28 时行是 8 字段
+--   (8 槽, 203B/行); 2026-11 有意加 name/id 到 10 字段 (16 槽, 363B/行,
+--   128 行 26→46KB) —— 换 sniff 持久化 + build_topo 免查 alias_map, 是
+--   过了账的决定 (mon.lua 2026-11 注)。红线相应从 ≤8 放宽到 ≤10:
+--   第 11 个字段会把 16 槽撑成 32 槽、每行内存再翻倍 —— 谁加字段这个先炸。
 local nf = 0
 for _ in pairs(mon.infer(true).regs[1]) do nf = nf + 1 end
-ok(nf <= 8, '推断行的字段数 ≤ 8 (现在 ' .. nf .. ' 个)')
+ok(nf <= 10, '推断行的字段数 ≤ 10 (现在 ' .. nf .. ' 个)')
 
 -- 11c) 12-fix-9: 分页接口 infer_page(off, n)
 --   现场 64 个地址时整表应答是 8158 字节的 JSON, 峰值连续块需求 8158,
@@ -168,10 +172,12 @@ local vo, vn = mon.infer_view()
 eq(vo, 4, '记住前端在看第 2 页')
 eq(vn, 4, '记住每页 4 行')
 
--- 12) ⚠️ 12-fix-9: attach_names 【不复制行、不加字段】——
---   名字挂到顶层 names 表, 只有跟默认值(reg<addr>)不一样的才登记。
---   老的"复制一份"方案(12-fix-6): 64 行 × 363 字节 = 23KB 表 + 128 个
---   名字串 ≈ 28KB 垃圾/次, 现场把 300KB 的堆打碎 → 整机卡死。
+-- 12) ⚠️ attach_names 【不复制行、不加字段】—— 名字挂顶层 names 表。
+--   2026-11 起行上自带 name/id (默认 id="reg<addr>", name=""), attach_names
+--   仍不改行: 行自带 name/id 就用行的, 否则查 ds_alias / cfg alias_map,
+--   只有跟默认值不一样的才登记进顶层 names 表。
+--   (12-fix-9 的背景不变: "复制一份" 方案每行 10 字段表 = 64 行 23KB 垃圾,
+--    现场把 300KB 的堆打碎 → 整机卡死。)
 local ok_iot, iot = pcall(require, "iot/iot")
 if ok_iot then
   mon.test_reset_acc()
@@ -181,12 +187,11 @@ if ok_iot then
   local named = iot.attach_names(live)
   local nf = 0
   for _ in pairs(live.regs[1]) do nf = nf + 1 end
-  ok(nf <= 8, 'attach_names 之后活着的行还是 ≤8 字段 (现在 ' .. nf .. ' 个)')
-  eq(live.regs[1].id, nil, '活着的行没被就地加 id')
+  ok(nf <= 10, 'attach_names 之后活着的行还是 ≤10 字段 (现在 ' .. nf .. ' 个)')
+  eq(live.regs[1].id, 'reg100', '行上 id 是默认值 reg<addr> (2026-11 起行自带)')
   eq(named.regs[1], live.regs[1], 'attach_names 不复制行(同一个行对象)')
-  eq(named.regs[1].id, nil, '行上也不加 id(名字在顶层 names 表里)')
+  eq(named.names['reg100'], nil, '默认名/默认id 不占 names 表(前端自己补 reg<addr>)')
   eq(type(named.names), 'table', '顶层有 names 表')
-  eq(named.names['reg100'], nil, '默认名不占 names 表(前端自己补 reg<addr>)')
   eq(named.regs[1].value, 7, '值没丢')
 else
   print('  (跳过 attach_names 用例: iot/iot 在本环境装不上)')
@@ -212,13 +217,13 @@ local p2 = mon.infer_page(32, 32)
 eq(#p2.regs, 32, '第 2 页 32 行')
 eq(p2.regs[1].addr, 320, '第 2 页第一行 = 第 33 行')
 eq(p2.page, 2, '第 2 页')
--- 名字表: 行一个字段都不加, 名字挂顶层
+-- 名字表: 行一个字段都不加, 名字挂顶层 (行自带 name/id, 2026-11 起)
 local ok_iot2, iot2 = pcall(require, "iot/iot")
 if ok_iot2 then
   local named = iot2.attach_names(p1)
   local nf = 0
   for _ in pairs(p1.regs[1]) do nf = nf + 1 end
-  ok(nf <= 8, '一页的行还是 ≤8 字段 (现在 ' .. nf .. ' 个)')
+  ok(nf <= 10, '一页的行还是 ≤10 字段 (现在 ' .. nf .. ' 个)')
   eq(named.regs[1], p1.regs[1], 'attach_names 不复制行')
   eq(type(named.names), 'table', '顶层有 names 表')
 else

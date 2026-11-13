@@ -6,9 +6,18 @@
 --   修法: util.clamp_qty 把 qty 收敛到 Modbus 合理的范围。
 --
 -- 跑法(仓库根目录):  lua tests/lua/test_clamp_qty.lua  (本机 5.1 即可, 不依赖 mbus)
-
-if package and package.path then package.path = 'firmware/?.lua;' .. package.path end
-local util = dofile('firmware/util.lua')
+-- 路径双布局: 仓库根是 firmware/, LuatOS PC 仿真器 staging 里镜像成 lua/
+--   (仿真器的 require 走 ROM fs, 没有 package.path —— 见 tools/luatos_pc_main.lua)
+local function load_first(...)
+  local err = ''
+  for _, p in ipairs({ ... }) do
+    local f, e = loadfile(p)
+    if f then return dofile(p) end
+    err = err .. p .. ' [' .. tostring(e) .. '] '
+  end
+  error('load_first: no candidate loaded -> ' .. err)
+end
+local util = load_first('firmware/util.lua', 'lua/util.lua')
 
 local fails = 0
 local function eq(a, b, what)

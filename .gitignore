@@ -25,6 +25,10 @@ dist/
 # LuatOS PC 模拟器日志（配置保留，日志忽略）
 .simulator/logs/
 
+# LuatOS PC 模拟器引擎本体（luatos-pc-64bit.exe 等，约 50MB）
+# 手动安装一次即可，见 tools/run_lua_tests.bat 头部注释（官方 CDN 下载）
+.simulator/LuatOS_PC/
+
 # Agent 会话笔记（本地辅助，不进仓库）
 .agent-memory/
 

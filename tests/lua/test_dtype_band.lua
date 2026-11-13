@@ -10,10 +10,17 @@
 --
 -- 跑法: Lua 5.3+ 引擎 (mbus 的 CRC 用了 5.3 位运算 // 与 ~)。
 --   用 Luatools 自带 LuatOS PC 引擎跑, 见 tools/run_lua_tests.bat
-if package and package.path then
-    package.path = 'firmware/?.lua;' .. package.path
+-- 路径双布局: 仓库根是 firmware/, 仿真器 staging 里镜像成 lua/ (见 test_clamp_qty)
+local function load_first(...)
+  local err = ''
+  for _, p in ipairs({ ... }) do
+    local f, e = loadfile(p)
+    if f then return dofile(p) end
+    err = err .. p .. ' [' .. tostring(e) .. '] '
+  end
+  error('load_first: no candidate loaded -> ' .. err)
 end
-local mon = dofile('firmware/bus/mon.lua')
+local mon = load_first('firmware/bus/mon.lua', 'lua/bus/mon.lua')
 
 local fails = 0
 local total = 0

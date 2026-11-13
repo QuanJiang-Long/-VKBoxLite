@@ -22,7 +22,13 @@ local MODS = {
 }
 
 -- 红线: 我们自己的代码在 Lua 堆里最多占这么多 KB(设备堆才 300KB)
-local LIMIT_KB = 320
+-- ⚠️ 口径跟引擎绑定: collectgarbage("count") 的计账方式随 LuatOS 引擎版
+--   本变 (编译块/分配器开销不同), 换引擎必须重新标定。
+--   标定记录: V2019 引擎 2026-10-28 实测 275KB → 红线定 320;
+--             V2039-64bit 引擎 2026-11-13 实测 441.5 KB (20/20 模块,
+--             baseline 65.9KB) → 红线重标定为 480 (= 当前 +9% 余量)。
+--   设备侧的真防线是 R:STAT 回的 lua used (idle 时应明显低于 300KB)。
+local LIMIT_KB = 480
 
 local function count() return collectgarbage("count") end
 

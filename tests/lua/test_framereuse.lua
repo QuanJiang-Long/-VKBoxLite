@@ -12,8 +12,18 @@
 --   2) A/B 对照: 同一帧, 复用表解出来的字段必须和"每次新建表"解出来的
 --      一模一样。
 
-local mbus = dofile('firmware/bus/mbus.lua')
-local collector = dofile('firmware/data/collector.lua')
+-- 路径双布局: 仓库根是 firmware/, 仿真器 staging 里镜像成 lua/ (见 test_clamp_qty)
+local function load_first(...)
+  local err = ''
+  for _, p in ipairs({ ... }) do
+    local f, e = loadfile(p)
+    if f then return dofile(p) end
+    err = err .. p .. ' [' .. tostring(e) .. '] '
+  end
+  error('load_first: no candidate loaded -> ' .. err)
+end
+local mbus = load_first('firmware/bus/mbus.lua', 'lua/bus/mbus.lua')
+local collector = load_first('firmware/data/collector.lua', 'lua/data/collector.lua')
 local cfg = require 'core/config'
 
 local failed = 0
