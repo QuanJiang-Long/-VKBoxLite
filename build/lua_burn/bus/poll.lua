@@ -422,6 +422,12 @@ local function poll_task()
 local mygen = gen
 local okBefore = stat.ok
 while gen == mygen and running do
+
+
+
+
+
+if guard and guard.sweep then guard.sweep() end
 for _, blk in ipairs(cur_plan()) do
 if gen ~= mygen or not running then break end
 drain_write_queue(mygen)      -- 空队列时立刻返回, 不必先判长度

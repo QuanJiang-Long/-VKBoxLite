@@ -30,6 +30,8 @@ local rx_buf, rx_parts, rx_len = "", {}, 0
 local rx_lost
 local cb_registered, loop_started = false, false
 
+local loop_crashes = 0
+
 
 
 
@@ -248,6 +250,37 @@ rx_buf = nb
 return true
 end
 
+
+
+
+
+
+
+
+local function take_line_raw()
+local nl = rx_buf:find("\n", 1, true)
+if not nl then return nil end
+local end_pos = nl - 1
+
+if end_pos > 0 and rx_buf:byte(end_pos) == 13 then end_pos = end_pos - 1 end
+local line = rx_buf:sub(1, end_pos)
+rx_buf = rx_buf:sub(nl + 1)
+return trim(line)
+end
+
+
+
+local function take_line()
+local ok, line = pcall(take_line_raw)
+if not ok then return false, nil, why_and_pool(line) end
+return line ~= nil, line, nil
+end
+
+
+
+
+local take_fail = 0
+
 function M.poll()
 local n = 0
 while n < 8 do
@@ -256,14 +289,24 @@ while n < 8 do
 
 local okr, why = rx_merge()
 if not okr then rx_lost = why end
-local nl = rx_buf:find("\n", 1, true)
-if not nl then break end
-local end_pos = nl - 1
+local has, line, wfail = take_line()
+if wfail then
+take_fail = take_fail + 1
+if take_fail == 1 then
+log.error("prov", "line take fail:", wfail)
+pcall(collectgarbage, "collect")
+break
+end
 
-if end_pos > 0 and rx_buf:byte(end_pos) == 13 then end_pos = end_pos - 1 end
-local line = rx_buf:sub(1, end_pos)
-rx_buf = rx_buf:sub(nl + 1)
-line = trim(line)
+
+local bytes = #rx_buf
+rx_buf, rx_parts, rx_len = "", {}, 0
+local note = "take fail x" .. take_fail .. ", drop " .. bytes .. "B (" .. wfail .. ")"
+rx_lost = rx_lost and (rx_lost .. " + " .. note) or note
+break
+end
+take_fail = 0
+if not has then break end
 if #line > 0 then
 
 
@@ -353,7 +396,23 @@ if not sys then return false end
 loop_started = true
 sys.taskInit(function()
 while true do
-M.poll()
+
+
+
+
+
+
+
+
+local ok, err = pcall(M.poll)
+if ok then
+loop_crashes = 0
+else
+loop_crashes = loop_crashes + 1
+if loop_crashes <= 2 or loop_crashes % 250 == 0 then
+pcall(log.error, "prov", "poll crashed x" .. loop_crashes .. ":", tostring(err))
+end
+end
 sys.wait(20)
 end
 end)

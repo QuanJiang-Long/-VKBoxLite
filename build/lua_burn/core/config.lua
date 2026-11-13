@@ -28,6 +28,13 @@ M.STALL_LIMIT_S = 120
 
 
 
+
+
+M.GC_FUSE_FREE = 32768
+
+
+
+
 M.AUTO_REBOOT = true
 
 

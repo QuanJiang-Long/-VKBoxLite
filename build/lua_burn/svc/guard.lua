@@ -96,8 +96,43 @@ end
 
 M.stall_of = stall_of
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function M.sweep()
+if not rtos then return false end
+local ok, total, used = pcall(rtos.meminfo, "lua")
+if not ok or type(total) ~= "number" or type(used) ~= "number" then return false end
+if total - used > cfg.GC_FUSE_FREE then return false end
+pcall(collectgarbage, "collect")
+local ok2, t2, u2 = pcall(rtos.meminfo, "lua")
+if ok2 and type(t2) == "number" and type(u2) == "number" then
+log.warn("guard", string.format("lua 池剩 %d, 扫一轮 %d->%d 剩 %d",
+total - used, used, u2, t2 - u2))
+else
+log.warn("guard", string.format("lua 池剩 %d, 扫一轮", total - used))
+end
+return true
+end
+
 local function monitor()
 local mode = cur_mode()
+
+
+M.sweep()
 
 
 local is_manual = mode == "manual" or mode == "poll"
