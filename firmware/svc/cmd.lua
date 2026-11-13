@@ -677,9 +677,16 @@ local function reg_cmds()
         up_reset("CFINISH 提交")
         trc_begin(bytes_n)
         local ok, reason = commit_config(base)
+        -- 校验/落盘失败的原因仍挂 CFG: 那是"这份配置被拒了", 与 W:CFG 逐字节同一句
         if not ok then return M.reply("RET:FAIL:CFG:" .. reason) end
         log.info("cmd", "分片上传提交完成 rows=" .. rows_n)
-        M.reply("RET:CFG=OK")
+        -- ⚠️ 成功应答必须用【自己的键】RET:CFINISH。11-13 现场第一次分片保存
+        --   就是这么骗人的: 设备 77.778s 已 rows=60 落盘并回了 RET:CFG=OK,
+        --   但前端 sendCmd 等的键是 CFINISH —— app.js 的匹配条件是
+        --   "resp.cmd == 在途指令的键", 这条应答谁也匹配不上, 于是 5s 超时 →
+        --   重发 CFINISH(会话已清 → RET:FAIL:CFINISH:没有上传会话) → 再重发 →
+        --   发 CSABORT → 弹"收尾失败"。真事是【存进去了】, 用户看到的是失败。
+        M.reply("RET:CFINISH=OK")
     end)
 
     -- 放弃上传: 前端取消/重试整个流程时显式释放暂存, 不用等下一次第 1 片来

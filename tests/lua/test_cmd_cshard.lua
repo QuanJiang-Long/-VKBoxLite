@@ -173,7 +173,14 @@ check("① 第 2 片回 OK", a2 == "RET:CSHARD=2=OK\r\n", string.format("%q", a2
 local _, a3 = ask(lines[3])
 check("① 第 3 片回 OK", a3 == "RET:CSHARD=3=OK\r\n", string.format("%q", a3))
 local _, fin = ask(lines[4])
-check("① 收尾走的是和 W:CFG 同一个应答", fin == "RET:CFG=OK\r\n", string.format("%q", fin))
+check("① 收尾成功回自己的键 RET:CFINISH=OK", fin == "RET:CFINISH=OK\r\n", string.format("%q", fin))
+-- ⚠️ 这一条是 11-13 现场那一坑的护栏。上一版这里回的是 RET:CFG=OK("和 W:CFG 同一个应答"
+--   看着更整齐), 而前端 sendCmd(line,'CFINISH') 的匹配条件是 resp.cmd == 在途指令的键 ——
+--   应答没人认领, 5s 超时 → 重发 → 会话已清 → 判失败 → 弹"收尾失败"。
+--   设备那头 rows=60 早就落盘了。键名不匹配这类 bug 单看设备日志是"全对",
+--   只有对着【调用方的匹配规则】才看得见, 所以断言写的是应答串而不是"提交成功了"。
+check("① 不许同时回 RET:CFG=(前端会当成另一条指令的应答)",
+    not fin:find("RET:CFG=", 1, true), string.format("%q", fin))
 check("① 只落一次盘", #SAVED == 1, #SAVED)
 check("① 落的是 manual 槽 = ds_poll", SAVED[1] and SAVED[1].slot == "poll", SAVED[1] and SAVED[1].slot)
 check("① 攒齐了 60 行", SAVED[1] and SAVED[1].rows == ROWS_N, SAVED[1] and SAVED[1].rows)
@@ -212,7 +219,7 @@ check("④ 没落盘", #SAVED == 0, #SAVED)
 local _, go3 = ask(lines[3])
 check("④ 会话还在: 补发第 3 片照收", go3 == "RET:CSHARD=3=OK\r\n", string.format("%q", go3))
 local _, fin4 = ask(lines[4])
-check("④ 补完就能提交", fin4 == "RET:CFG=OK\r\n", string.format("%q", fin4))
+check("④ 补完就能提交", fin4 == "RET:CFINISH=OK\r\n", string.format("%q", fin4))
 check("④ 落盘一次 60 行", #SAVED == 1 and SAVED[1].rows == ROWS_N, #SAVED)
 
 -- ===== 5) 上传途中切档: 拒绝, 并且不能落进切过去的那个槽 =====
@@ -238,7 +245,7 @@ fresh()
 MODE = 'platform'
 send_pieces(lines)
 local _, fin6 = ask(lines[4])
-check("⑥ platform 档收尾成功", fin6 == "RET:CFG=OK\r\n", string.format("%q", fin6))
+check("⑥ platform 档收尾成功", fin6 == "RET:CFINISH=OK\r\n", string.format("%q", fin6))
 check("⑥ 落的是 pull 槽", #SAVED == 1 and SAVED[1].slot == "pull", SAVED[1] and SAVED[1].slot)
 
 -- ===== 7) 片太大 / 片数超上限: 明说, 不猜 =====

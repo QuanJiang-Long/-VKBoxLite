@@ -16,6 +16,15 @@
 // 5. 字节数按 UTF-8 算: 中文行名不能按字符数低估(低估 = 片切大 = 现场又收不下)
 // 6. 一行就超过预算 -> 当场说清, 不许切成两半送出去
 //
+// ⚠️ 桩必须连【应答键】一起模拟。11-13 第一次现场分片保存: 设备那边 4 片全收、
+//    rows=60 落盘、回了 RET:CFG=OK —— 前端却弹"收尾失败"。原因是 sendCmd(line,'CFINISH')
+//    等的是 CFINISH 这个键, app.js 的认领规则是"应答键 == 在途指令键"(FAIL 例外),
+//    RET:CFG=OK 谁都不匹配 → 5s 超时 → 重发(会话已清 → 真失败) → CSABORT。
+//    上一版这个桩把 expectCmd 扔一边、来什么 resolve 什么, 这类键名错位结构上就看不见。
+//    现在 deviceReply() 按 cmd.lua 的应答串回, 再走一遍协议解码 + 认领规则。
+//    对的那一侧另有护栏: tests/lua/test_cmd_cshard.lua ① 钉住设备回的就是
+//    RET:CFINISH=OK。两边各钉一半, 谁改谁红。
+//
 // 跑法: node tests/test_cshard_upload.js
 
 const fs = require('fs');
@@ -25,10 +34,22 @@ const { assertEq, assertTrue } = require('./setup');
 
 const FE = path.join(__dirname, '..');
 
+// 设备对每条上行命令回什么 —— 抄 firmware/svc/cmd.lua 的 M.reply 串
+function deviceReply(line) {
+  if (line.indexOf('W:CFG=') === 0) return 'RET:CFG=OK';
+  if (line.indexOf('W:CSHARD=') === 0) {
+    // 'W:CSHARD=2/4,[...]' -> RET:CSHARD=2=OK
+    return 'RET:CSHARD=' + line.slice(9).split(',')[0].split('/')[0] + '=OK';
+  }
+  if (line.indexOf('W:CFINISH=') === 0) return 'RET:CFINISH=OK';
+  if (line === 'W:CSABORT') return 'RET:CSABORT=OK';
+  return null;
+}
+
 // ---- 造一个装了 protocol.js + cfg.js 的沙箱, 串口用假的 ----
-function makeBox() {
+function makeBox(opt) {
+  opt = opt || {};
   const sent = [];          // 前端真正写出去的每一行
-  const replies = [];       // 每个 device 侧脚本按顺序 push 进来的应答行
   const statusMsgs = [];
   const ctx = vm.createContext({
     TextEncoder, JSON, Object, Array, String, Number, Math, Error, Promise, RegExp,
@@ -38,16 +59,21 @@ function makeBox() {
   ctx.status = (m) => { statusMsgs.push(m); };
   ctx.toast = () => {};
   ctx.S = {};
-  ctx.sendCmd = (line) => new Promise((resolve, reject) => {
+  ctx.sendCmd = (line, expectCmd) => new Promise((resolve, reject) => {
     sent.push(line);
-    const r = replies.length ? replies.shift() : null;
-    if (r === 'DROP') return reject(new Error('设备应答超时'));
-    if (r && r.indexOf('RET:FAIL') === 0) {
-      const body = r.slice(4);
-      const c = body.indexOf(':');
-      return reject(new Error(body.slice(c + 1)));
+    if (opt.drop && opt.drop(line)) return reject(new Error('设备应答超时：' + line));
+    const reply = deviceReply(line);
+    if (!reply) return reject(new Error('桩不认识这条命令: ' + line));
+    const resp = ctx.Protocol.decode(reply);
+    // app.js onSerialLine 的认领规则, 原样搬过来
+    const matched = resp && (resp.cmd === expectCmd || !resp.ok ||
+      (resp.cmd === 'OK' && expectCmd !== 'SN'));
+    if (!matched) {
+      return reject(new Error('应答键错位: 设备回 ' + reply + '(键=' + resp.cmd +
+        '), 前端等在途的是 ' + expectCmd + ' —— 没人认领就是 5s 超时'));
     }
-    resolve();
+    if (!resp.ok) return reject(new Error(resp.data));
+    resolve(resp);
   });
   vm.runInContext(fs.readFileSync(path.join(FE, 'protocol.js'), 'utf8'), ctx);
   vm.runInContext(fs.readFileSync(path.join(FE, 'renderer', 'cfg.js'), 'utf8'), ctx);
@@ -94,6 +120,10 @@ async function main() {
     const shards = b.sent.filter(l => l.indexOf('W:CSHARD=') === 0);
     const fin = b.sent.filter(l => l.indexOf('W:CFINISH=') === 0);
     assertEq(fin.length, 1, '② 收尾一条');
+    // 一条不多不少 = 没有任何一次重发。上一版现场就是靠这条看出来的:
+    // 应答键错位 → 收尾被重发两次 → sent 比 n+1 多。设备回得对但【没人认领】,
+    // 只看"最后有没有报错"是看不出来的(它报的是失败, 而配置其实存进去了)
+    assertEq(b.sent.length, shards.length + 1, '② 成功路上一条都不许多发');
     assertTrue(shards.length >= 4, '② 60 行至少 4 片, 实际 ' + shards.length);
     assertTrue(shards.length <= 32, '② 片数不超过设备上限 32');
     for (const l of shards) {
@@ -126,15 +156,8 @@ async function main() {
 
   // ===== 3) 第 2 片送三次都不行: 放弃 + 说清是第几片 =====
   {
-    const b = makeBox();
-    // 换掉假串口: 第 2 片永远 timed out, 其余正常。这里直接覆盖 makeBox 里那个,
-    //   因为 writeCfgUp 走的正是"每条各一次 sendCmd", 谁超时看得见
-    b.sent.length = 0;
-    b.ctx.sendCmd = (line) => {
-      b.sent.push(line);
-      if (line.indexOf('W:CSHARD=2/') === 0) return Promise.reject(new Error('设备应答超时：' + line));
-      return Promise.resolve();
-    };
+    // 让第 2 片永远"应答超时", 其余照旧走 makeBox 里那套设备应答 + 认领规则
+    const b = makeBox({ drop: (l) => l.indexOf('W:CSHARD=2/') === 0 });
     let err = null;
     try { await b.ctx.writeCfgUp(CFG, rows(60)); } catch (e) { err = e; }
     assertTrue(err !== null, '③ 必须抛错, 不许假装保存成功');

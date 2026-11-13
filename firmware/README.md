@@ -161,7 +161,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 | R:MODE / W:MODE=idle\|poll\|pollpull\|sniff | 模式查询（返回 `{mode,busy,poll_src,pull_ready,pull,poll,mon,write}`）/ 切换。`pollpull` = 拉取配置档，进模式自动 hello 拉取 |
 | R:CFG / W:CFG={json} | 轮询配置读写，读返回 `{cfg, src}`，src=default 表示 fskv 里没写过。`W:CFG` 是**整份**写寄存器表的入口（regs 并进 cfg 一起发）；表大到一行传不过来时走下面三条分片指令，**提交路径是同一个函数** |
 | W:CSHARD=`<i>/<n>`,[regs 行数组] | **分片上行的第 i 片**（2026-11-13）。设备把行数组原样存进 RAM 暂存 `up.rows`，回 `RET:CSHARD=<i>=OK`。**没凑齐 n 片绝不动 fskv**。校验只做运输层的：片号必须是 `i/n`、`i` 必须是 `up.got+1`（同一片号重复送达回 OK 但不重复追加，覆盖"命令到了应答丢在路上"）、单片 ≤2048B、片数 ≤32、累计行数 ≤200 |
-| W:CFINISH=`<n>`,{除 regs 外的 cfg 字段} | 分片**收尾提交**：把暂存的行拼成 `regs`、和这条带的字段合成整份配置，走与 `W:CFG` 完全相同的 normalize→落盘→热更→回执路径，回 `RET:CFG=OK` / `RET:FAIL:CFG:原因`。片数不齐回 `RET:FAIL:CFINISH:只收到 2/3 片`（**暂存不清**，补发那一片即可）；上传途中切了模式回 `RET:FAIL:CFINISH:上传途中模式从 manual 变成了 platform`（写哪个槽是模式决定的，不能替你猜） |
+| W:CFINISH=`<n>`,{除 regs 外的 cfg 字段} | 分片**收尾提交**：把暂存的行拼成 `regs`、和这条带的字段合成整份配置，走与 `W:CFG` 完全相同的 normalize→落盘→热更→回执路径，回 `RET:CFINISH=OK` / `RET:FAIL:CFG:原因`。⚠️ **成功应答必须用 `CFINISH` 这个键**，不许图整齐回 `RET:CFG=OK`：前端 `sendCmd(line,'CFINISH')` 按"应答键 == 在途指令键"认领，回 `CFG` 谁都不匹配 → 5s 超时 → 重发 → 会话已清 → 判失败，而设备那边配置**早就存进去了**（11-13 现场第一课，护栏在 `test_cmd_cshard.lua` ① 与 `frontend/tests/test_cshard_upload.js` 的应答桩）。片数不齐回 `RET:FAIL:CFINISH:只收到 2/3 片`（**暂存不清**，补发那一片即可）；上传途中切了模式回 `RET:FAIL:CFINISH:上传途中模式从 manual 变成了 platform`（写哪个槽是模式决定的，不能替你猜） |
 | W:CSABORT | 放弃本次分片上传，清掉 RAM 暂存，回 `RET:CSABORT=OK`。**不发也行**：暂存在 RAM，切档 / 插一条 `W:CFG` / `W:CLRPOLL` / `W:CLRPULL` 都会把它作废，断电自然消失——设备里那份老配置从头到尾没被碰过 |
 | R:REG | 读寄存器表（= `R:CFG` 的 `cfg.regs`，因前端单独读它才留） |
 | R:VAL | 实时值快照。**2026-11-13 起不再骗人**：`json.encode` 拼不出这份快照（池子不够）时回 `RET:FAIL:VAL:<真实异常> pool <已用>/<总量>`，而不是回一条 `RET:VAL=` 加空数组。后者在前端长成"一个点都没采到"，实际是设备连应答都编不出来 |
@@ -332,7 +332,7 @@ Q3: W:MODE=sniff → ctrl → mon(纯 RX) → CRC 试探切帧 → REQ/RSP 配�
 W:CSHARD=1/3,[{...},{...}…]   → RET:CSHARD=1=OK      第 1 片(寄存器行数组)
 W:CSHARD=2/3,[…]              → RET:CSHARD=2=OK      第 2 片
 W:CSHARD=3/3,[…]              → RET:CSHARD=3=OK      第 3 片
-W:CFINISH=3,{"baud":9600,…}  → RET:CFG=OK / RET:FAIL:CFG:原因
+W:CFINISH=3,{"baud":9600,…}  → RET:CFINISH=OK / RET:FAIL:CFG:原因
 ```
 
 设计上的四条硬规则：

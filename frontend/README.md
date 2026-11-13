@@ -269,7 +269,7 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 | 读 poll 配置 | `R:CFG` | `RET:CFG={json}` | `{cfg:{baud,databits,parity,stopbits,slave,interval_ms,timeout_ms,regs},src,slot}`；`slot`=`poll`/`pull` 由当前运行模式决定 |
 | 保存 poll 配置 | `W:CFG={json}` | `RET:CFG=OK` / `RET:FAIL:CFG:原因` | 串口参数变化自动重启轮询任务；间隔/寄存器表热更新。**写哪个槽同样由运行模式决定**：`poll（拉取配置）` 档写 `ds_pull`，其余写 `ds_poll`。读写同槽才有"所见即所存"。整行超过 1200 字节时前端**自动改走下面的分片上行**，用户无感 |
 | 分片上传寄存器表 | `W:CSHARD=<i>/<n>,[regs 行数组]` | `RET:CSHARD=<i>=OK` / `RET:FAIL:CSHARD:原因` | 一片 ≤1200 字节的寄存器行。设备只在 RAM 里暂存，**没凑齐 n 片之前一个字节都不写 fskv** |
-| 分片收尾提交 | `W:CFINISH=<n>,{除 regs 外的 cfg 字段}` | `RET:CFG=OK` / `RET:FAIL:CFG:原因` | 把暂存的行拼成 regs、和这里带的字段合成整份配置，走与 `W:CFG` **完全相同**的校验+落盘+热更路径 |
+| 分片收尾提交 | `W:CFINISH=<n>,{除 regs 外的 cfg 字段}` | `RET:CFINISH=OK` / `RET:FAIL:CFG:原因` | 把暂存的行拼成 regs、和这里带的字段合成整份配置，走与 `W:CFG` **完全相同**的校验+落盘+热更路径。应答键必须是 `CFINISH`——`sendCmd` 按"应答键==在途指令键"认领，键错了就是 5s 超时后重发（11-13 现场：设备存成功、面板报"收尾失败"） |
 | 放弃分片上传 | `W:CSABORT` | `RET:CSABORT=OK` | 某一片重发 3 次仍没送达时前端发这条，清掉设备暂存。**不发也行**——暂存在 RAM，断电/切档/插一条 `W:CFG` 都会自动作废，设备里那份老配置动不了 |
 | 读寄存器表 | `R:REG` | `RET:REG=[json]` | `[{addr,count,name,alias,dtype}]`。**只有读**：写寄存器表走 `W:CFG`（`regs` 并进 cfg 一起发），`W:REG` 已删 |
 | 读实时值 | `R:VAL` | `RET:VAL=[json]` / `RET:FAIL:VAL:原因` | `[{name,addr,value,hex,ts,dtype}]`，设备已解好值。**2026-11-13 起**：设备拼不出这份 JSON（池子不够）时改回 `RET:FAIL:VAL:` + 原因 + `pool 已用/总量` 水位，不再回一条空的 `RET:VAL=` 冒充"一个点都没采到" |
