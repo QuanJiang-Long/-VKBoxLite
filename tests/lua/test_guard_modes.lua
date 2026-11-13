@@ -12,6 +12,10 @@
 --   落盘失败那台设备, poll 于 uptime=1117 起来, uptime=1120 的 monitor 算出
 --   stall=611s 直接重启 —— 用户看到"改完配置 3 秒后设备自己重启"。
 --
+-- 2026-11-13 加了【Lua 池保险丝】的用例 (见 gc_fuse): 没烧 SN 的设备 iot 不
+--   启动, 而所有完整回收都挂在 iot 那边 → 60 点跑到 used 302528/307192 时
+--   一次回收都没跑过, 一个 672B 分配失败把 VM 打死。保险丝搬到 monitor 上。
+--
 -- 跑法(仓库根目录):  lua tests/lua/test_guard_modes.lua
 --   也可以走 tools/run_lua_tests.bat (它会先把 firmware/ 挂进 package.path)
 
@@ -28,6 +32,10 @@ local engine_running = false
 local mode_now = 'manual'
 local rebooted = 0
 local tasks, timers = {}, {}
+-- 假 Lua 池读数 (2026-11-13 保险丝用例要改它): meminfo('lua') 的顺序是
+-- total, used, 峰值
+local lua_used_now = 1000
+local lua_meminfo_fails = false
 
 local function stub(name, t) package.preload[name] = function() return t end end
 stub('bus/poll', {
@@ -37,7 +45,10 @@ stub('bus/poll', {
 stub('bus/mon', { is_running = function() return engine_running end })
 stub('bus/ctrl', { get_mode = function() return mode_now end })
 stub('rtos', {
-  meminfo = function() return 307192, 1000 end,
+  meminfo = function(what)
+    if what == 'lua' and lua_meminfo_fails then error('not enough memory') end
+    return 307192, lua_used_now, 307192
+  end,
   reboot = function() rebooted = rebooted + 1 end,
 })
 stub('sys', {
@@ -57,6 +68,19 @@ local function advance(n)
     for i = 1, #tasks do coroutine.resume(tasks[i]) end
   end
 end
+
+-- 抓 guard 打的日志行(保险丝那句话是给现场读的, 内容要钉住)。
+--   util.log() 取的是【全局 log】, 所以必须在 dofile guard 之前挂好
+local logs = {}
+local function log_rec(tag, ...)
+    local t = { tag }
+    for i = 1, select('#', ...) do
+        local v = select(i, ...)
+        t[#t + 1] = type(v) == 'string' and v or tostring(v)
+    end
+    logs[#logs + 1] = table.concat(t, ' ')
+end
+_G.log = { debug = log_rec, info = log_rec, warn = log_rec, error = log_rec }
 
 local guard = dofile('firmware/svc/guard.lua')
 
@@ -130,9 +154,69 @@ eq(guard.stall_of('manual'), 5, '同档连续拍: stall 正常按秒累积')
 mode_now = 'platform'
 eq(guard.stall_of('platform'), 0, '切档那一拍也重定基')
 
+-- ============ Lua 池保险丝 (2026-11-13) ============
+-- 起因: 现场那台 SN 为空的设备, 60 点第一轮采集后 used 302528/307192, 一个
+--   672 字节的分配拿不到 → prov.poll 抛 not enough memory → Lua VM exit,
+--   15 秒后整机重启。全仓库的 collectgarbage("collect") 保险丝原先都在 iot
+--   那边(reclaim_if_high / 12-fix-5), 而 main.lua 只在烧了 SN 才 iot.start()
+--   —— 那台设备从头到尾一次完整回收都没跑过。保险丝搬到 guard 的心跳上:
+--   它由定时器驱动, 和 SN/MQTT/档位都无关, 是唯一必然在跑的周期任务。
+local collects = 0
+local real_cg = collectgarbage
+collectgarbage = function(op, ...)
+    if op == 'collect' then collects = collects + 1 end
+    return real_cg(op, ...)
+end
+local FUSE = require('core/config').GC_FUSE_FREE
+
+local function find_line(pat)
+    for i = #logs, 1, -1 do
+        if logs[i]:find(pat, 1, true) then return logs[i] end
+    end
+    return nil
+end
+
+-- 剩余充足: 一次都不扫(常态零开销, 每拍都扫会把毫秒级停顿变成日常)
+logs = {}
+lua_used_now = 307192 - FUSE - 1
+local before = collects
+timers[1]()
+eq(collects, before, '剩余 > GC_FUSE_FREE 不扫水')
+eq(find_line('扫一轮'), nil, '没到水位不占日志')
+
+-- 压到水位以下: 11-13 崩之前那一拍正是 used 302528 (剩 4664B)
+lua_used_now = 302528
+timers[1]()
+eq(collects, before + 1, '剩 4664B(<=GC_FUSE_FREE) 扫一轮')
+timers[1]()
+eq(collects, before + 2, '还在水位以下就每拍都扫, 不是一次性放弃')
+
+-- 那句话必须带【回收前后两个数】: 现场就靠这两个数判剩下的到底是垃圾还是
+--   活对象 —— 差不多就是"下一刀砍常驻", 差得多就是"砍分配次数"。
+--   (12-fix-8 早证过 GC 切不出连续大块, 光说"扫过了"没有决策价值)
+local sweep_line = find_line('扫一轮')
+eq(sweep_line ~= nil, true, '扫水打了一行日志')
+eq(sweep_line and sweep_line:find('剩 4664', 1, true) ~= nil, true, '日志说了剩多少字节')
+eq(sweep_line and sweep_line:find('302528->302528', 1, true) ~= nil, true,
+    '日志带了回收前后的已用量')
+
+-- meminfo 自己抛(池子见底时它真会抛): 保险丝不许把整拍心跳一起带走
+lua_meminfo_fails = true
+local mok = pcall(timers[1])
+eq(mok, true, 'meminfo 抛异常时心跳照常跑完')
+lua_meminfo_fails = false
+lua_used_now = 1000
+
+-- 阈值本身钉住: 判据必须是 rtos.meminfo('lua') 的真实字节。
+--   照 collectgarbage('count') 定阈值等于在最需要的那一段永不触发(少报约 1/3)
+eq(type(FUSE) == 'number' and FUSE >= 16384 and FUSE <= 65536, true, 'GC_FUSE_FREE 是个合理的字节数')
+
+collectgarbage = real_cg
+
 if fails > 0 then
   print(string.format('FAIL: %d 个断言不过', fails))
   os.exit(1)
 end
 print('PASS: guard stall 判据 —— 档位覆盖 manual/poll/platform/sniff、引擎没起不判、'
-  .. '起停/换档时时钟重定基、不喂心跳超 120s 照常自愈 (22 个断言通过)')
+  .. '起停/换档时时钟重定基、不喂心跳超 120s 照常自愈; '
+  .. '外加 Lua 池保险丝按真实剩余字节扫水、扫完打出前后水位 (31 个断言通过)')

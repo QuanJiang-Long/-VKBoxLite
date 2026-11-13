@@ -420,6 +420,18 @@ manual 或 platform——`cbegin_guard` 是这一个判断的唯一一份，开�
 开场成功那条应答自己就带水位（`RET:CBEGIN=OK max:… used:…`），现场不用再单独
 跑一轮 `R:MEM` 才知道设备这次接不接得住。
 
+这条路 2026-11-13 下午**当场验通**（`W:CBEGIN=4,1200` → 4 片 `OK` →
+`RET:CFINISH=OK` → `started(poll), regs=60` → `round 1 ok=1`）。之后 30 毫秒整机
+重启是**另一件事**：不在运输路上，在池子见底之后任何一个分配都可能抛，而抛出来
+的那个协程会带走整个 VM——详见下面「第六刀」的 changelog 与
+`tests/lua/test_prov_rx.lua` 第 7 组。查这类崩法只看三行新日志：
+
+| 日志 | 读法 |
+|---|---|
+| `E/user.prov line take fail: … pool 302528/307192` | 切一行时分配失败，**第 1 次**：只回收，下一拍重试，前端不会收到任何应答 |
+| `E/user.prov rx lost: take fail x2, drop 3019B (…)` | **连着第 2 次**：整包丢掉，串口回 `RET:FAIL:rx 丢弃, 请重发`，前端重发即可，设备活着 |
+| `W/user.guard lua 池剩 4664, 扫一轮 302528->301200 剩 5992` | 扫水保险丝（心跳 + 每轮 poll 开头）。**前后两个数**决定下一刀：差得多是垃圾，接着砍分配次数；差不多是活对象，砍常驻 |
+
 ## 手动配置 / 拉取配置隔离（`ds_poll` vs `ds_pull`）
 
 平台配置原本和手动配置**共用 `ds_poll` 一个槽**，`iot.auto_apply()` 一落盘就把用户
@@ -2560,6 +2572,45 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
   CSABORT 也还轮询、提交只 start 一次、sniff 档什么都不许动）+
   `frontend/tests/test_cshard_upload.js` ①②⑦⑧⑨（每次保存先开场、开场失败一条配置
   都不许送、超时认成"不配套"、整行那条路失败也要还回轮询）。
+
+- **第六刀：崩的那一步不在保护圈里（2026-11-13 傍晚）**。第五刀当天就跑通了：
+  `W:CBEGIN=4,1200` → `max:8192 used:276488` → 4 片全 `OK` → `RET:CFINISH=OK` →
+  `started(poll), regs=60` → `round 1 ok=1`。**运输这条路到此没有问题**，可是第一轮
+  采完 30 毫秒后整机重启：
+  ```
+  E/mem memory allocation failed total 307192, used 302528, alloc 672
+  E/user.coroutine.resume not enough memory
+      /luadb/prov.luac: in function 'prov.poll'
+      /luadb/prov.luac: in function </luadb/prov.luac:354>
+  E/main Lua VM exit!! reboot in 15000ms
+  ```
+  两个缺陷，一个是老账，一个是这次的**新账**：
+  ① **保护点还是漏了**。刀1a 把 `table.concat` 包进了 `pcall`，但 `M.poll` 里切一行
+  还要走 `rx_buf:find` / `:byte` / `:sub`（前半段）/ `:sub`（余下）/ `trim` —— 后两步
+  各是一整份字符串拷贝，全都裸着。栈里只有 `prov.poll` **自己这一帧**（没有
+  `rx_merge` 帧）正是证据：死在 concat 的保护圈内、切行的保护圈外。
+  ② **这台设备从来没回收过**。全仓库的 `collectgarbage("collect")` 保险丝都在 `iot.lua`
+  那边（`reclaim_if_high` / task_main 那条 12-fix-5），而 `main.lua` 只在**烧了 SN**
+  才 `iot.start()`。现场这台是 `W/user.sn empty` —— 从开机到崩，used 从 276488 一路
+  爬到 302528，一次完整回收都没跑过。
+  修法：`prov.lua` 把取行整段包成 `take_line()`，失败**第 1 次只回收、下一拍重试**
+  （整行还在 `rx_buf` 里，多半是垃圾没倒），**连着第 2 次**才整包丢掉换前端重发；
+  `start_loop` 那个 `while true` 再兜最后一层（协程里跑出去的异常不是"这条命令没了"
+  而是整机），连着失败只报头两回 + 每 250 拍一回，免得刷串口。
+  **串口上那句应答一个字没改**（仍 `RET:FAIL:rx 丢弃, 请重发`），SN 烧写工具按它认。
+  保险丝搬到 `svc/guard.lua` 的 `M.sweep()`：判据是 `rtos.meminfo("lua")` 的**真实
+  剩余字节** ≤ `cfg.GC_FUSE_FREE`（32768，≈池子 10%），不到水位零开销。两个调用点 ——
+  心跳（兜住所有档位、和 SN/MQTT 无关）+ **`poll` 每轮开头**。后者是必须的：11-13
+  那次崩在上一拍心跳之后 3.6 秒，10 秒一拍根本赶不上；而放轮开头不放轮收尾，是因为
+  回收得发生在**这一轮的分配之前**才救得到这一轮。
+  ⚠️ 它仍然**切不出连续大块**（12-fix-8 已证分配器不合并相邻空闲块），只保证几百字节
+  到几 KB 的分配有货可拿。所以现场要读的是这一行的**两个数**：
+  `W/warn guard lua 池剩 4664, 扫一轮 302528->301200 剩 5992` —— 前后差得多是垃圾，
+  继续砍分配次数；差不多就是**全是活对象**，GC 这条路到头了，得砍常驻（下一刀）。
+  护栏 `tests/lua/test_prov_rx.lua` 第 7 组（把 `string.sub` 换成"大请求一定抛"复现
+  同一个落点：第 1 次不回话、连着第 2 次才丢包、丢完下一行照常、计数归零）+
+  `tests/lua/test_guard_modes.lua` 保险丝 8 条（不到水位不扫也不占日志、到了每拍都扫、
+  前后两个数都在、`meminfo` 自己抛不许带走心跳）。
 
 - **三处"失败了但说不出为什么"改成如实回报（2026-11-13）**。同一个坑在三个位置：
   应答发不出去/编不出来的时候，代码回了一条**看起来像成功**的空应答。

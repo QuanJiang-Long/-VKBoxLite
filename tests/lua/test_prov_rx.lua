@@ -16,6 +16,9 @@
 --   5) 2026-11-12: 并串那一步【自己】分配失败时不许打死 VM, 而且必须如实
 --      回一条 RET:FAIL —— 现场那次是 "prov.lua:190: not enough memory for
 --      buffer allocation" 直接 Lua VM exit, 整机 15 秒后重启
+--   6) 2026-11-13: 并串之外的取行那几步(rx_buf:find/sub/trim)同样不许杀 VM。
+--      第 5 条修完之后现场又崩了一次, 栈停在 prov.luac:354 的 M.poll 【自己
+--      这一帧】, 也就是保护点漏在 concat 圈内、切行圈外
 --
 -- 跑法: tools\run_lua_tests.bat test_prov_rx.lua
 
@@ -247,6 +250,84 @@ do
     reset()
     feed_lines("R:STAT")
     check("并串失败后下一行照常收", fed[1] == "R:STAT", tostring(fed[1]))
+end
+
+-- ===== 7) 取行那一步自己分配失败: 先收垃圾重试, 连着两次才丢包换重发 =====
+-- 11-13 现场(60 点导入成功后 30ms):
+--   E/mem memory allocation failed total 307192, used 302528, alloc 672
+--   E/user.coroutine.resume not enough memory
+--     /luadb/prov.luac: in function 'prov.poll'
+--     /luadb/prov.luac: in function </luadb/prov.luac:354>
+--   E/main Lua VM exit!! reboot in 15000ms
+-- 栈只有 M.poll 自己这一帧 —— 说明死的不是第 6 段保护的 concat, 而是它下面
+--   那几步裸着的 rx_buf:sub。这里把 sub 换成"大请求一定抛"复现同一个落点
+--   (真机上抛的是 C 层的分配失败, 位置一样; 小请求照旧成功, 替身才像)
+do
+    reset()
+    local real_sub = string.sub
+    -- 只对【大请求】抛, 和小请求分不开 —— 真机上就是这样: 只剩 1024 连续块时
+    --   要 3KB 的那次失败, 要 40 字节的照常成功
+    local function fake_sub(s, i, j)
+        if type(s) == "string" and #s > 2048 then
+            local need = j and (j - i + 1) or (#s - i + 1)
+            if need > 2048 then error("not enough memory for buffer allocation") end
+        end
+        return real_sub(s, i, j)
+    end
+
+    local big = 'W:CFG={"regs":[' .. string.rep("1,", 1500) .. '0]}'   -- 约 3KB
+    string.sub = fake_sub
+    prov._rx_feed(big .. "\r\n")
+    local ok1 = pcall(prov.poll)
+    check("取行失败第 1 次不冒到外面(以前这条打死 VM)", ok1)
+    check("取行失败不派活", #fed == 0, "派了 " .. #fed .. " 条")
+    check("第 1 次不急着回 FAIL(整行还在手上, 收完垃圾还能再切)",
+        #uart_writes == 0, string.format("%q", table.concat(uart_writes, "")))
+    local fails1 = 0
+    for _, l in ipairs(logs) do
+        if l:find("line take fail", 1, true) then fails1 = fails1 + 1 end
+    end
+    check("第 1 次留下一句查得到的话", fails1 == 1, "找到 " .. fails1 .. " 条")
+
+    local ok2 = pcall(prov.poll)
+    string.sub = real_sub
+    check("取行失败第 2 次也不冒到外面", ok2)
+    local rep = table.concat(uart_writes, "")
+    check("连着两次才丢包并如实回", rep:find("RET:FAIL:rx 丢弃, 请重发", 1, true) ~= nil,
+        string.format("%q", rep))
+    check("一轮只回一次", #uart_writes == 1, "写了 " .. #uart_writes .. " 段")
+    local lost_line
+    for _, l in ipairs(logs) do
+        if l:find("rx lost", 1, true) then lost_line = l end
+    end
+    -- 丢掉的是整包, 连没切掉的行尾一起数
+    local dropped = #big + 2
+    check("日志说清连着几次 + 丢掉多少字节",
+        lost_line ~= nil and lost_line:find("take fail x2", 1, true) ~= nil
+            and lost_line:find("drop " .. dropped .. "B", 1, true) ~= nil,
+        string.format("%q", lost_line or ""))
+    check("日志带 C 层那句原话 + 池水位",
+        lost_line ~= nil and lost_line:find("not enough memory", 1, true) ~= nil
+            and lost_line:find("pool 293544/307192", 1, true) ~= nil,
+        string.format("%q", lost_line or ""))
+
+    -- 丢完必须还能干活: rx_buf 和分片一起清了, 连着失败计数也要跟着归零 ——
+    --   不归零的话, 下一波的第 1 次失败会被当成"x3"直接丢包, 那次 GC 重试的
+    --   机会就永久没了
+    reset()
+    feed_lines("R:STAT")
+    check("取行失败丢包后下一行照常", fed[1] == "R:STAT", tostring(fed[1]))
+
+    reset()
+    string.sub = fake_sub
+    prov._rx_feed(big .. "\r\n")
+    pcall(prov.poll)   -- 这一波的第 1 次失败: 只回收, 不回话
+    check("下一波的第 1 次失败仍然先给一次重试机会", #uart_writes == 0,
+        string.format("%q", table.concat(uart_writes, "")))
+    pcall(prov.poll)   -- 连着第 2 次: 丢包 + 如实回
+    string.sub = real_sub
+    check("下一波仍然连着两次才丢包", #uart_writes == 1,
+        string.format("%q", table.concat(uart_writes, "")))
 end
 
 if failed > 0 then

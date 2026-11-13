@@ -29,6 +29,8 @@ local rx_buf, rx_parts, rx_len = "", {}, 0
 -- 这一批被丢掉的原因(超限/OOM), 由 M.poll 取走并如实回一次, 不静默吞
 local rx_lost
 local cb_registered, loop_started = false, false
+-- 命令循环连续异常的次数, 只用来限流那句日志(见 start_loop)
+local loop_crashes = 0
 
 -- V1-1 修复 (2026-11-06): SN 烧写期间暂停 INFER_PUSH 推送
 -- 烧写工具在 W:SN 后紧跟 R:SN 回读校验，期间如果收到 RET:INFER_PUSH
@@ -248,6 +250,37 @@ local function rx_merge()
     return true
 end
 
+-- 从 rx_buf 切出一整行。找换行/取前半/取余下 这三步里, 后两步各是一
+--   【整份字符串拷贝】。刀1a 只把 table.concat 包进了 pcall, 这三步还裸着 ——
+--   11-13 现场 60 点第一轮采集后 used 302528/307192, 一个 672B 的分配拿不到,
+--   异常正是从 M.poll 【自己这一帧】跑出去的(prov.luac:354 → Lua VM exit!!),
+--   也就是说死在 concat 的保护圈之内、这几步的保护之外。
+-- 返回整行(已 trim); 没有完整行时返回 nil。这一步自己分配失败就往上抛,
+--   由 take_line 接住
+local function take_line_raw()
+    local nl = rx_buf:find("\n", 1, true)
+    if not nl then return nil end
+    local end_pos = nl - 1
+    -- \r\n 行尾: 跳过 \r, 避免 gsub 对大字符串二次分配
+    if end_pos > 0 and rx_buf:byte(end_pos) == 13 then end_pos = end_pos - 1 end
+    local line = rx_buf:sub(1, end_pos)
+    rx_buf = rx_buf:sub(nl + 1)
+    return trim(line)
+end
+
+-- 返回 (取到一行吗, 行, 失败原因)。三个值分开是因为"没有完整行"是正常状态,
+--   而"取行这一步自己失败"才是要 GC/丢包的那种, 两者不能混成一个 nil
+local function take_line()
+    local ok, line = pcall(take_line_raw)
+    if not ok then return false, nil, why_and_pool(line) end
+    return line ~= nil, line, nil
+end
+
+-- 取行连续失败的次数。第 1 次当作"垃圾没倒", 收一轮下一拍重来; 连着第 2 次
+--   就是池子真接不住这一行, 再死磕只会每 20ms 抛一次 —— 整包丢掉换前端重发。
+--   只要这一步没失败就归零(包括"没有完整行"): 缓冲区走空说明这一波已经过去
+local take_fail = 0
+
 function M.poll()
     local n = 0
     while n < 8 do
@@ -256,14 +289,24 @@ function M.poll()
         --   并进来才能和老代码一样在同一轮 poll 里接着切下一行
         local okr, why = rx_merge()
         if not okr then rx_lost = why end
-        local nl = rx_buf:find("\n", 1, true)
-        if not nl then break end
-        local end_pos = nl - 1
-        -- \r\n 行尾: 跳过 \r, 避免 gsub 对大字符串二次分配
-        if end_pos > 0 and rx_buf:byte(end_pos) == 13 then end_pos = end_pos - 1 end
-        local line = rx_buf:sub(1, end_pos)
-        rx_buf = rx_buf:sub(nl + 1)
-        line = trim(line)
+        local has, line, wfail = take_line()
+        if wfail then
+            take_fail = take_fail + 1
+            if take_fail == 1 then
+                log.error("prov", "line take fail:", wfail)
+                pcall(collectgarbage, "collect")
+                break
+            end
+            -- rx_buf 里剩下的行也一起丢: 留着下一拍照样取不出, 还不如让前端
+            --   重发。分片(rx_parts)同理, 而 CSHARD 已收进 cmd 那侧的暂存不受影响
+            local bytes = #rx_buf
+            rx_buf, rx_parts, rx_len = "", {}, 0
+            local note = "take fail x" .. take_fail .. ", drop " .. bytes .. "B (" .. wfail .. ")"
+            rx_lost = rx_lost and (rx_lost .. " + " .. note) or note
+            break
+        end
+        take_fail = 0
+        if not has then break end
         if #line > 0 then
             -- ⚠️ 吞掉错误会掩盖整类故障: 2026-11-10 情况1 整条 90 点 W:CFG
             --   收到了、日志也打了, 却一个应答都没有 —— 因为分配失败发生在
@@ -353,7 +396,23 @@ function M.start_loop()
     loop_started = true
     sys.taskInit(function()
         while true do
-            M.poll()
+            -- 最后一层保险: M.poll 里点名保护的是并串和取行, 但这一帧里还有
+            --   日志、应答这些会自己分配的地方。协程里跑出去的异常不是"这条
+            --   命令没了", 而是整机 —— 11-13 那句 "E/main Lua VM exit!! reboot
+            --   in 15000ms" 的上一条就是 prov.luac:354 这个循环。命令循环停一拍
+            --   只损失一次串口配置机会, 15 秒后重启损失的是正在跑的采集。
+            --   连着失败只报头两回 + 每 250 拍(约 5 秒)一回: 池子见底时每打
+            --   一行日志又是一次分配, 逐拍刷会把串口堵死(和上面 rx_lost 一轮
+            --   只回一次同一个道理)
+            local ok, err = pcall(M.poll)
+            if ok then
+                loop_crashes = 0
+            else
+                loop_crashes = loop_crashes + 1
+                if loop_crashes <= 2 or loop_crashes % 250 == 0 then
+                    pcall(log.error, "prov", "poll crashed x" .. loop_crashes .. ":", tostring(err))
+                end
+            end
             sys.wait(20)
         end
     end)

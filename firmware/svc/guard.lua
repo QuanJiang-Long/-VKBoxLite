@@ -96,8 +96,43 @@ end
 -- 导出: 单元测试用 (tests/lua/test_guard_modes.lua)
 M.stall_of = stall_of
 
+-- Lua 池保险丝: 剩余空间低于 GC_FUSE_FREE 就完整回收一轮, 并打一行前后水位。
+--   ⚠️ 为什么挂在 guard 而不是继续加在 iot 里: 全仓库的 collectgarbage
+--   ("collect") 保险丝原先都在 iot 那边(reclaim_if_high / task_main 那条
+--   12-fix-5), 而 main.lua 只在【烧了 SN】才 iot.start()。11-13 现场那台
+--   SN 为空的机器, 60 点第一轮采集后 used 302528/307192 —— 从头到尾一次
+--   完整回收都没跑过, 一个 672 字节的分配拿不到, prov.poll 抛 not enough
+--   memory 打死整个 VM。monitor 由定时器驱动, 和 SN/MQTT/档位都无关, 是
+--   唯一一档必然在跑的周期任务, 所以这条保险丝只能住在这里。
+--   两个调用点: 心跳(兜住所有档位) + poll 每轮开头(见 bus/poll.lua)。11-13
+--   那次崩在上一拍心跳之后 3.6 秒, 光靠 10 秒一拍赶不上; 而一轮采集正是
+--   全系统分配最密的时段, 和 iot 那句"拼大包前先回收"同一个道理。
+--   判据用 rtos.meminfo("lua") 的真实字节, 不用 collectgarbage("count"):
+--   后者少报约 1/3, 照它定阈值等于在最需要的那一段里永不触发。
+--   ⚠️ 它救不了大块(12-fix-8 已证: 分配器不合并相邻空闲块), 只保证几百字节
+--   到几 KB 的分配有货可拿。所以那一行的两个数字才是重点: 若 B 和 A 差不
+--   多, 说明剩下的全是活对象, 得回去砍常驻, 而不是再来一轮回收。
+function M.sweep()
+    if not rtos then return false end
+    local ok, total, used = pcall(rtos.meminfo, "lua")
+    if not ok or type(total) ~= "number" or type(used) ~= "number" then return false end
+    if total - used > cfg.GC_FUSE_FREE then return false end
+    pcall(collectgarbage, "collect")
+    local ok2, t2, u2 = pcall(rtos.meminfo, "lua")
+    if ok2 and type(t2) == "number" and type(u2) == "number" then
+        log.warn("guard", string.format("lua 池剩 %d, 扫一轮 %d->%d 剩 %d",
+            total - used, used, u2, t2 - u2))
+    else
+        log.warn("guard", string.format("lua 池剩 %d, 扫一轮", total - used))
+    end
+    return true
+end
+
 local function monitor()
     local mode = cur_mode()
+    -- 先扫水再打日志: 日志那一行自己也要分配字符串, 排在后面的话正好可能
+    -- 死在最该报出这句话的时候
+    M.sweep()
     -- "manual" 才是当前 mode 名; "poll" 是历史别名, 老 fskv 软切会同时返回 "poll",
     -- 也算 manual 行为 (MQTT 手动档 + 寄存器手配)
     local is_manual = mode == "manual" or mode == "poll"

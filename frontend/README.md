@@ -274,6 +274,7 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
 | 放弃分片上传 | `W:CSABORT` | `RET:CSABORT=OK` | 某一步没成时前端发这条：清掉设备暂存 **并把开场停掉的轮询还回去**。暂存本身不叫也会作废（断电/切档/插一条 `W:CFG`），但**不叫就要多等 60 秒**才看见数据继续上来 |
 | 读寄存器表 | `R:REG` | `RET:REG=[json]` | `[{addr,count,name,alias,dtype}]`。**只有读**：写寄存器表走 `W:CFG`（`regs` 并进 cfg 一起发），`W:REG` 已删 |
 | 读实时值 | `R:VAL` | `RET:VAL=[json]` / `RET:FAIL:VAL:原因` | `[{name,addr,value,hex,ts,dtype}]`，设备已解好值。**2026-11-13 起**：设备拼不出这份 JSON（池子不够）时改回 `RET:FAIL:VAL:` + 原因 + `pool 已用/总量` 水位，不再回一条空的 `RET:VAL=` 冒充"一个点都没采到" |
+| 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,mqtt}` 全量状态；`mqtt` 段另带 `push_n/push_seen/push_err/autosaved/autosave_at`（平台主动重推横幅用，见下）；`write` 段是写队列的 queued/done/fail |
 
 ### 为什么保存配置要先腾水、大表还要分片上行（2026-11-13）
 
@@ -316,7 +317,13 @@ MQTT 密码以前是纯 `type="password"`，加密看不了，配错了只能猜
   和「设备腾不出接收窗口」分开报——前者去烧固件，后者改配置，混成一句就都查不动了
 - ⚠️ 代价（已确认接受）：开场会让设备**停几秒轮询**并清掉采集缓存，包括断网补报用的
   ring。这几秒的数据不会补回来；保存成功后轮询按**新**配置重新开始
-| 读运行状态 | `R:STAT` | `RET:STAT={json}` | `{mode,data,guard,mqtt}` 全量状态；`mqtt` 段另带 `push_n/push_seen/push_err/autosaved/autosave_at`（平台主动重推横幅用，见下）；`write` 段是写队列的 queued/done/fail |
+- ⚠️ **保存成功不等于设备之后不重启**，前端对这一节**没有任何改动**。2026-11-13 现场
+  就是这样：4 片全 OK、`RET:CFINISH=OK`、状态栏报"保存成功"，**30 毫秒后设备自己重启**。
+  崩的不是运输，是设备端第一轮采集把池子用干之后的一个 672 字节分配 —— 修在固件
+  （`sn/prov.lua` 的取行保护 + `svc/guard.lua` 的扫水保险丝，见 `../firmware/README.md`
+  的「第六刀」）。前端这次唯一的可见变化是：设备真接不住时才回那句
+  `RET:FAIL:rx 丢弃, 请重发`，走的是既有失败路 —— 分片路径重发**同一片**最多 3 次，
+  整行那条不重试；两条最后都叫一声 `W:CSABORT` 把开场停掉的轮询还回去
 
 ### 平台配置拉取
 

@@ -422,6 +422,12 @@ local function poll_task()
     local mygen = gen
     local okBefore = stat.ok
     while gen == mygen and running do
+        -- 每轮开头扫一次水(svc/guard.lua 的保险丝, 到了水位以下才真回收):
+        --   一轮要发几十帧、每帧一行 Rx 日志, 是全系统分配最密的时段; 11-13
+        --   那次 672B 分配失败就压在"换完配置的 0.6 秒 + 第一轮采集"中间,
+        --   光靠 10 秒一拍的心跳赶不上。放在轮开头而不是轮收尾: 回收要发生在
+        --   【这一轮的分配之前】才救得到这一轮
+        if guard and guard.sweep then guard.sweep() end
         for _, blk in ipairs(cur_plan()) do
             if gen ~= mygen or not running then break end
             drain_write_queue(mygen)      -- 空队列时立刻返回, 不必先判长度
