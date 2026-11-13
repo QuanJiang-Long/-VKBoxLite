@@ -457,12 +457,15 @@ function cfgErr(raw) {
 }
 
 //=====================================================================
-// 配置上行：整行 W:CFG，或者超过一行接得下的尺寸时改走分片上传
-//   (2026-11-13, 甲。为什么必须分片见 protocol.js 的 cfgShard 注释)
+// 配置上行：W:CBEGIN 开场腾水 -> 整行 W:CFG，或者分片 W:CSHARD + W:CFINISH
+//   (2026-11-13, 甲 + 乙。为什么必须分片、又为什么光分片不够, 见 protocol.js
+//    的 cfgShard / cfgBegin 注释)
 //=====================================================================
 // 单行字节上限。判据不是"设备能不能存"，而是"设备能不能把这一行【拼出来】"：
 //   现场轮询中只给得出 max:3072 的连续块，收 4072B 那一行就是在这里死的。
-//   1200 是 3072 的三分之一，留出串口缓冲和分片对齐的余量
+//   1200 是 3072 的三分之一，留出串口缓冲和分片对齐的余量。
+//   ⚠️ 11-13 下午同一台设备再量是 max:1024 —— 光靠切小赌不赢，所以多了
+//   W:CBEGIN 这一步：先让设备把轮询停掉腾出连续块，再由它回报腾完还剩多大
 const SHARD_LIMIT = 1200;
 const SHARD_PREFIX = 16;      // 'W:CSHARD=99/99,' 按最坏位数算的行头
 const SHARD_PIECES_MAX = 32;  // 和固件 UP_PIECES_MAX 同值，超了设备会直接拒收
@@ -509,24 +512,59 @@ async function sendTry(line, cmd) {
   throw last;
 }
 
+// 放弃这次上传。设备那边要清两样东西：RAM 里的半份暂存 + 被开场停掉的轮询，
+//   所以【每条失败路】都得叫一声，不能只管自己报错。
+//   这句自己失败不当成错误往外抛：这时候串口可能已经断了，而设备侧还有一条
+//   "静默 60 秒自己把轮询捡回来"的兜底，别把真原因(那一片为什么没过)盖掉。
+async function abortUpload() {
+  try { await sendCmd(Protocol.Enc.cfgAbort(), 'CSABORT', 3000); } catch (e) {}
+}
+
+// 开场：让设备把接收窗口腾出来。n=后面要发的行数(整行那条路就是 1)，
+//   maxLine=后面每一条【整行】的字节上限，设备照着它试分配。
+//   ⚠️ 每次保存都发，小配置也发：从 60 行删到 12 行时那份 W:CFG 是一整行
+//   ~1.1KB，撞的还是轮询中那堵 max:1024 的墙。
+async function openUpload(n, maxLine) {
+  try {
+    return await sendCmd(Protocol.Enc.cfgBegin(n, maxLine), 'CBEGIN', 5000);
+  } catch (e) {
+    // 超时和"设备明确回了 FAIL"是两件事，分开说：前者几乎只有一个原因 ——
+    //   固件里还没有 W:CBEGIN(设备和前端要一起更新)，后者是设备看了水位说的实话
+    if (String(e.message || '').indexOf('应答超时') >= 0) {
+      throw new Error('设备不认 W:CBEGIN 这条指令(固件太旧，和本前端不配套，先烧本仓库快照)');
+    }
+    throw new Error('设备腾不出接收窗口：' + e.message);
+  }
+}
+
 // 上行一份配置。返回 'plain'(整行 W:CFG 一条搞定) 或 'shard'(走了分片)。
 //   失败一律 throw，消息里带着"死在第几片"——现场要区分【设备拒收】和
 //   【某一片根本没送到】，这两件事的处理方式不一样
 async function writeCfgUp(cfg, regs) {
   const whole = Protocol.Enc.writeCfg(Object.assign({}, cfg, { regs: regs }));
-  if (byteLen(whole) <= SHARD_LIMIT) {
-    await sendCmd(whole, 'CFG', 5000);
+  const wholeSize = byteLen(whole);
+  if (wholeSize <= SHARD_LIMIT) {
+    await openUpload(1, wholeSize);
+    status('设备已腾出接收窗口，写入中…', false);
+    try {
+      await sendCmd(whole, 'CFG', 5000);
+    } catch (e) {
+      await abortUpload();
+      throw e;
+    }
     return 'plain';
   }
   const pieces = planShards(regs);
   const n = pieces.length;
+  await openUpload(n, SHARD_LIMIT);
+  status('设备已腾出接收窗口，分片上传…', false);
   for (let i = 1; i <= n; i++) {
     try {
       await sendTry(Protocol.Enc.cfgShard(i, n, pieces[i - 1]), 'CSHARD');
     } catch (e) {
       // 会话留在设备里是半份暂存(它不会写进 flash)，明确放弃再报错，
-      //   免得下一次保存的第 1 片之前先撞上一条"顺序不对"
-      try { await sendCmd(Protocol.Enc.cfgAbort(), 'CSABORT', 3000); } catch (e2) {}
+      //   免得下一次保存的第 1 片之前先撞上一条"顺序不对"；轮询也顺手还回去
+      await abortUpload();
       throw new Error('第 ' + i + '/' + n + ' 片没有送达：' + e.message);
     }
     status('分片上传 ' + i + '/' + n + ' 片…', false);
@@ -536,7 +574,7 @@ async function writeCfgUp(cfg, regs) {
   try {
     await sendTry(Protocol.Enc.cfgFinish(n, fields), 'CFINISH');
   } catch (e) {
-    try { await sendCmd(Protocol.Enc.cfgAbort(), 'CSABORT', 3000); } catch (e2) {}
+    await abortUpload();
     throw new Error('收尾失败：' + e.message);
   }
   return 'shard';

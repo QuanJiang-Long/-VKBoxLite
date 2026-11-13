@@ -417,6 +417,159 @@ local function up_reset(why)
     up.rows = {}
 end
 
+-- ==== 上传期间的"轮询占用" ====
+--   W:CBEGIN 会把轮询停下来腾接收窗口(见下面 W:CBEGIN 那段的实测)。停了的
+--   轮询必须有人还回去, 否则前端一关页面, 设备就永远不采数了 —— 而这恰恰是
+--   这条命令【唯一】新增的失败面。三个还回去的时机:
+--     1) W:CSABORT  前端明确放弃(cfg.js 每条失败路都会发)
+--     2) W:CFINISH 提交成功 —— commit_config 已经按新配置把轮询起了,
+--        这里只是取消兜底, is_running() 那一层守卫让它自动变成空操作
+--     3) 静默兜底   会话超过 HOLD_IDLE_S 没有任何一片到达
+--   ⚠️ 为什么兜底是"静默"而不是"整场上传限时": 一片丢了前端会重试 3 次、
+--   每次等 5 秒, 32 片的合法上传本来就可能跑到一两分钟, 定死的总时限会在
+--   正常路上把轮询抢回来, 后面几片又撞回那 1024 的墙上。所以每条被接受的
+--   指令都刷新 hold.touched, 只有【安静了 60 秒】才当前端不干了。
+local HOLD_IDLE_S  = 60
+local HOLD_TICK_MS = 5000
+local hold = { armed = false, stopped = false, touched = 0, gen = 0 }
+
+-- 前向声明: hold_arm 里那个兜底协程要调它, 而 Lua 的 local 只看得到【之前】
+--   的声明 —— 不先挂这个名字, 协程里的 hold_restore 会解析成全局(=nil),
+--   兜底一触发就是 "attempt to call a nil value", 而那正是最需要它的时候。
+local hold_restore
+
+-- W:CBEGIN 的档位闸门。实现挂在 reg_cmds 末尾的 sniff 那一节(和"谁靠 poll/
+--   collector 干活"写在一起, 改那边的人看得见)。没挂 = 不拦。
+local cbegin_guard
+
+-- 试分配阶梯, 量【最大连续块】。R:MEM 和 W:CBEGIN 用同一个函数: 现场两个数
+--   对不上就会多养一个假结论(11-12 复盘过)。每档前 full GC 一次 —— 上一档的
+--   探测块要真还回去才测得准下一档, 代价是毫秒级停顿, 所以只在人工命令里用。
+--   返回 (最后一档成功, 第一档失败)。
+local function max_block(steps)
+    local last_ok, first_fail = 0, 0
+    for i = 1, #steps do
+        local n = steps[i]
+        collectgarbage("collect")
+        local ok, s = pcall(string.rep, "x", n)
+        if ok and type(s) == "string" and #s == n then
+            last_ok = n
+        else
+            first_fail = n
+            break
+        end
+    end
+    return last_ok, first_fail
+end
+
+-- Lua 池已用字节。拿不到就回 nil —— 0 会被读成"池子空着"(R:MEM 同口径)
+local function lua_used()
+    if not rtos then return nil end
+    local ok, total, used = pcall(rtos.meminfo, "lua")
+    if ok and type(used) == "number" then return used, total end
+    return nil
+end
+
+-- 腾水: 把"为了让下一行收得进来"能放掉的都放掉。返回放了哪几样(只给日志)。
+--   四样东西按【谁攥着配置】挑的, 不是按谁占得多:
+--     poll.stop()  regs + lastCfg + 【合并计划 plan】(plan.rows 里是每行的
+--                  直接引用, 60 行就是 60 份, 原来 stop() 不清它 —— 见 bus/poll.lua)
+--     clear_all()  dataCache(值/dtype/conf) + frames + ring
+--                  ⚠️ ring 里没上报完的历史值会一起丢掉: 换配置本来就要重采,
+--                  旧参数下的点没有意义, 2026-11-13 和用户明确定过这一条
+--     drop_cache() cfg.lua 那份解码缓存 = 整份配置的表 + 各分片原始 JSON,
+--                  现场最大的一块水, 且它缓存的正是马上要被换掉的那份
+--     alias 缓存   iot 那张 name->alias 映射(从配置派生, 128 行几 KB)
+--   动完收两轮垃圾: 这些都是【纯引用】, 不收到 GC 就等于没放。
+local function make_room()
+    local did = {}
+    local poll = pollmod(false)
+    if poll and poll.is_running and poll.is_running() then
+        -- 只有真是我们停的, hold_restore 才负责还回去(别的场合轮询本来就没跑,
+        --   还回去等于在 idle/sniff 档凭空起一个轮询)
+        poll.stop()
+        hold.stopped = true
+        did[#did + 1] = "poll"
+    end
+    if collector.clear_all then
+        local n = collector.clear_all()
+        did[#did + 1] = "cache:" .. tostring(n or "?")
+    end
+    if cfgstore.drop_cache then
+        did[#did + 1] = "cfgcache:" .. tostring(cfgstore.drop_cache() or "?")
+    end
+    if iot and iot.drop_alias_cache then pcall(iot.drop_alias_cache) end
+    collectgarbage("collect")
+    collectgarbage("collect")
+    return did
+end
+
+local function hold_disarm()
+    hold.armed = false
+    hold.gen = hold.gen + 1     -- 让在跑的兜底协程下一轮自己退出
+end
+
+-- 装兜底协程。sys 拿不到(单元测试/裁掉协程库)就只打一行警告: 少一层保险,
+--   但 CSABORT 那条明路还在, 不能因为这个拒绝开场。
+local function hold_arm()
+    hold.armed = true
+    hold.touched = os.time()
+    hold.gen = hold.gen + 1
+    local mygen = hold.gen
+    local sok, sys = pcall(require, "sys")
+    if not sok or not sys or not sys.taskInit or not sys.wait then
+        log.warn("cmd", "分片上传的静默兜底没装上(没有 sys 协程), 只能靠 W:CSABORT 还轮询")
+        return
+    end
+    sys.taskInit(function()
+        while hold.armed and mygen == hold.gen do
+            sys.wait(HOLD_TICK_MS)
+            if not (hold.armed and mygen == hold.gen) then break end
+            if os.time() - hold.touched >= HOLD_IDLE_S then
+                log.warn("cmd", "分片上传静默超 " .. HOLD_IDLE_S .. "s, 作废会话并交还轮询")
+                up_reset("静默超时")
+                hold_restore("静默超时")
+                return
+            end
+        end
+    end)
+end
+
+-- 有进展就把静默计时归零。没装兜底(armed=false)时空转, 不碰任何状态。
+local function hold_touch()
+    if hold.armed then hold.touched = os.time() end
+end
+
+-- 把 CBEGIN 停掉的轮询交还回去。幂等, 三条路都敢重复调。
+hold_restore = function(why)
+    hold_disarm()
+    if not hold.stopped then return end
+    hold.stopped = false
+    local m = ctrl.get_mode()
+    -- idle/sniff 档不该有轮询。上传途中切了档就跟着新档的规则走, 别硬起
+    if m ~= "manual" and m ~= "platform" then
+        log.info("cmd", "分片上传结束(" .. tostring(why) .. "), 当前档 " .. tostring(m) .. " 不起轮询")
+        return
+    end
+    local poll = pollmod(false)
+    if not poll then
+        log.warn("cmd", "分片上传结束(" .. tostring(why) .. ") 但 bus/poll 不在, 轮询没还回来")
+        return
+    end
+    if poll.is_running() then return end   -- commit_config 已经按新配置起了
+    log.info("cmd", "分片上传结束(" .. tostring(why) .. "), 按 fskv 里那份旧配置恢复轮询")
+    -- 不传第二个参数 = poll 自己 reload_cfg 从 fskv 读。上传期间 flash 一个字
+    --   没动过(暂存只在 RAM), 所以这份就是开场之前跑着的那张表
+    local ok, err = pcall(poll.start, (m == "platform") and SLOT_PULL or SLOT_POLL)
+    if not ok then log.warn("cmd", "恢复轮询失败:", tostring(err)) end
+end
+
+-- 单元测试用: 直接触发一次静默兜底(测试环境没有 sys 协程, 等不到那 60 秒)
+function M._cshold_fire()
+    up_reset("_cshold_fire")
+    hold_restore("_cshold_fire")
+end
+
 -- A 类：上位软件业务必需的 16 条指令
 local function reg_cmds()
     -- R:INFO: 前端打开串口读设备信息用的第一条指令
@@ -530,25 +683,35 @@ local function reg_cmds()
         M.reply("RET:CFG=OK")
     end)
 
-    -- ==== 分片上传(W:CSHARD / W:CFINISH / W:CSABORT) ====
+    -- ==== 分片上传(W:CBEGIN / W:CSHARD / W:CFINISH / W:CSABORT) ====
     --   ⚠️ 为什么非有不可: 11-13 现场把这件事钉死了 —— 轮询跑起来之后
     --   R:MEM 是 max:3072 fail:4096, 而 60 行那份 W:CFG 是【一整行 4072B】,
     --   prov 把分片并成一行时 table.concat 要的正是那么大的连续块, 于是在
     --   【还没解析】的时候整条就被丢掉:
     --     E/mem used 293544, alloc 4089
     --     E/user.prov rx lost: concat fail, drop 4072B
-    --   而 max 塌下去之后在同一次开机里不再回来(清空配置 + W:GC 两次仍
-    --   3072), 只有重启才恢复 —— 所以"第一次保存能成、之后怎么存都失败"是
-    --   结构性的, 不是等一等能等到的。清多少水都不解决问题(乙 已实测否掉),
-    --   只能让【单行本身】变小。
     --   方案只做传输分片: 每片一个 <=2KB 的小 JSON 数组, 设备在 RAM 里攒成
     --   行表, W:CFINISH 时交给 commit_config —— 和 W:CFG 同一条提交路径,
     --   存储格式(fskv 分片槽)、校验(normalize_poll)一个字节都没改。
     --   好处不只是能收: 上传没走完就断电/放弃时, flash 里那份【老配置】完好
     --   无损(暂存只在 RAM), 比现在 st=w 那种半写状态更安全。
-    -- 单片 body 上限。前端按 <=1200B 切, 设备只在明显离谱时拒收 —— 这里
-    --   留 2048 是因为"片必须收得下"的判据是 max:3072, 2048 加行头仍在
-    --   安全区; 收到更大的片说明前端切错了, 当场拒绝比让它把池子打死好。
+    --
+    -- ⚠️ 2026-11-13 下午现场补正(这一段之前写着"清多少水都不解决问题(乙已
+    --   实测否掉)", 那句是【错的】, 错在用一条已经被推翻的测量当地基):
+    --   片切到 1200B 之后, 第二次保存【还是】失败, 而且死得更早 ——
+    --     RET:MEM=mode:manual lua:294688/307192 max:1024 fail:2048
+    --     E/user.prov rx lost: not enough memory for buffer allocation ... drop 1177B
+    --   轮询跑着的时候连 R:STAT 都要不到 1280B(每 5 秒一条 handler error),
+    --   14:21:26 更是 used 302184/307192、160B 都给不出。池子只剩 ~11KB 而
+    --   最大连续块 1024 —— 片再切小只是把赌注从 1177 挪到 600, 不是解法。
+    --   "腾水没用"这个结论当初只验到 W:GC: 实测 W:GC(trim_cache + 两轮 GC)
+    --   前后 max 一点没抬(1024), 因为水不在【可回收】的对象里, 在【轮询自己在
+    --   用】的那几张表里。而切一次 idle(= poll.stop + collector.clear_all +
+    --   清配置)max 就从 1024 回到 6144 —— 同一次开机内就回来了。所以腾水有效,
+    --   只是必须把轮询停下来腾。这就是下面 W:CBEGIN 的全部职责。
+    -- 单片 body 上限。前端按 <=1200B 切, 设备只在明显离谱时拒收: 收到更大的
+    --   片说明前端切错了, 当场拒绝比让它把池子打死好。
+    --   ("片到底收不收得下"不再由这个常数担保, 那是 W:CBEGIN 现场探出来的)
     local UP_PIECE_MAX  = 2048
     local UP_PIECES_MAX = 32      -- n 的上限: 32 片 x 每片几十行, 远超 128 点
     local UP_ROWS_MAX   = 200     -- 暂存行数上限(和 cfg.lua 的 MAX_REGS 同量级)
@@ -557,6 +720,57 @@ local function reg_cmds()
         log.warn("cmd", "CSHARD 第" .. i .. "片拒收:", why)
         return M.reply("RET:FAIL:CSHARD:" .. why)
     end
+
+    -- ==== 开场: W:CBEGIN=<片数>,<单行预算字节> ====
+    --   存在的理由只有一个: 【片自己】也得先收得进来。轮询跑着的时候最大连续块
+    --   只有 1024B, 一片 1177B 的行在 prov 拼行阶段就被丢掉(2026-11-13 现场),
+    --   后面写得再对都没用。所以先发一条【一定收得进来】的短命令(十来字节),
+    --   由它把轮询停掉、把配置那一堆表放掉, 然后把腾完的水位如实回报。
+    --   水还是不够就当场 FAIL —— 前端这时候一片都不用发, 用户立刻看到原因,
+    --   而不是发满 N 片、每片重试 3 次、每次干等 5 秒超时。
+    --   ⚠️ 只有这条命令会停轮询。W:CSHARD 第 1 片自己开会话(老前端不发 CBEGIN
+    --   时的兼容路)保持原样: 不安兜底、不停轮询, 传不进去就跟今天一样失败。
+    --   把"背后停掉正在跑的轮询"这件事收在一条显式开场命令里, 失败面只有一处,
+    --   恢复也只有一处 —— 两条命令都能悄悄停轮询, 迟早会出现"没人记得是谁停的"。
+    M.reg("W:CBEGIN", function(arg)
+        if blocked_while_detecting("CBEGIN") then return end
+        if cbegin_guard then
+            local no = cbegin_guard()
+            if no then return M.reply("RET:FAIL:CBEGIN:" .. no) end
+        end
+        local c = arg:find(",", 1, true)
+        local n = tonumber(c and arg:sub(1, c - 1) or arg)
+        if not n or n < 1 or n > UP_PIECES_MAX then
+            return M.reply("RET:FAIL:CBEGIN:片数非法(1.." .. UP_PIECES_MAX .. ")")
+        end
+        -- 预算 = 前端那一行的【整行】字节数(含 W:CSHARD=i/n, 行头)。老前端不带
+        --   就按设备自己的单片上限探。上下界都要卡: 太小等于没探, 太大说明
+        --   前端切错了, 让它拿一个更大的数字来逼设备试分配没有意义。
+        local budget = c and tonumber(arg:sub(c + 1)) or UP_PIECE_MAX
+        if budget < 64 or budget > UP_PIECE_MAX + 256 then
+            return M.reply("RET:FAIL:CBEGIN:单行预算 " .. tostring(budget)
+                .. "B 不在 64.." .. (UP_PIECE_MAX + 256) .. " 之间")
+        end
+        up_reset("W:CBEGIN")
+        up.on, up.n, up.got, up.mode = true, n, 0, ctrl.get_mode()
+        local used = lua_used()          -- 先取水位的数, 再去试分配(探测本身吃块)
+        local did = make_room()
+        hold_arm()
+        local mx = max_block({ 1024, 2048, 3072, 4096, 6144, 8192 })
+        log.info("cmd", "分片上传开场 n=" .. n .. " mode=" .. tostring(up.mode)
+            .. " 腾出[" .. table.concat(did, " ") .. "] max=" .. mx
+            .. " used=" .. tostring(used))
+        if mx < budget then
+            -- 腾完还是接不住: 会话作废, 轮询原样还回去, 一句话把现场原因讲清。
+            --   这句话会直接弹给用户, 所以带着"下一步该干什么"
+            up_reset("CBEGIN 水位不够")
+            hold_restore("CBEGIN 水位不够")
+            return M.reply("RET:FAIL:CBEGIN:腾完水仍接不住 " .. budget
+                .. "B 的单行(最大连续块只有 " .. mx .. "B), 重启设备后立刻保存, 或把表改小")
+        end
+        -- max 一起回报: 现场下一次不用为了"到底剩多少"再单独跑一轮 R:MEM
+        M.reply("RET:CBEGIN=OK max:" .. mx .. " used:" .. tostring(used))
+    end)
 
     M.reg("W:CSHARD", function(arg)
         if blocked_while_detecting("CSHARD") then return end
@@ -574,7 +788,11 @@ local function reg_cmds()
             return up_fail(i, "单片太大 " .. #body .. ">" .. UP_PIECE_MAX)
         end
 
-        if i == 1 then
+        if i == 1 and up.on and up.n == n and up.got == 0 then
+            -- 第 1 片接到【W:CBEGIN 已经开好】的会话上: 不重开。重开等于把开场
+            --   时记下的模式换一遍、把刚腾好的空暂存再清一遍, 一点好处没有
+            log.info("cmd", "第 1 片接上 CBEGIN 开的会话 n=" .. n .. " mode=" .. tostring(up.mode))
+        elseif i == 1 then
             -- 第 1 片: 开新会话。同时记下【此刻】的模式 —— 落盘落在哪个槽
             --   是由模式决定的(commit_config 里按 get_mode 选 ds_poll/ds_pull),
             --   上传途中切档会把这 N 片送进另一个槽, 那才是真的灾难
@@ -591,6 +809,7 @@ local function reg_cmds()
             -- 同一片重发: 上一次已经收进暂存了, 只是应答在路上丢了。
             --   不能再追加一遍(追加=同一行存两份), 补一次 OK 让前端接着发下一片
             log.info("cmd", "第" .. i .. "片重复到达, 已按原样回 OK")
+            hold_touch()
             return M.reply("RET:CSHARD=" .. i .. "=OK")
         elseif i ~= up.got + 1 then
             local want = up.got + 1
@@ -623,6 +842,7 @@ local function reg_cmds()
         end
         up.got = i
         up.bytes = up.bytes + #body
+        hold_touch()      -- 有进展就把"静默 60 秒"的计时归零
         M.reply("RET:CSHARD=" .. i .. "=OK")
     end)
 
@@ -678,7 +898,16 @@ local function reg_cmds()
         trc_begin(bytes_n)
         local ok, reason = commit_config(base)
         -- 校验/落盘失败的原因仍挂 CFG: 那是"这份配置被拒了", 与 W:CFG 逐字节同一句
-        if not ok then return M.reply("RET:FAIL:CFG:" .. reason) end
+        if not ok then
+            -- 提交失败 = 会话到此为止(CFINISH 已经把暂存清了), 那就得由这一条
+            --   把开场停掉的轮询还回去。前端这时候会跟着发 W:CSABORT, 但把设备
+            --   停在"不采数"上等那句应答, 不如现在就恢复
+            hold_restore("CFINISH 提交失败")
+            return M.reply("RET:FAIL:CFG:" .. reason)
+        end
+        -- 成功: commit_config 里已按【新配置】把轮询起回来了, hold_restore 走到
+        --   is_running() 那层守卫就是空操作 —— 它在这里的活只剩取消静默兜底
+        hold_restore("CFINISH 提交")
         log.info("cmd", "分片上传提交完成 rows=" .. rows_n)
         -- ⚠️ 成功应答必须用【自己的键】RET:CFINISH。11-13 现场第一次分片保存
         --   就是这么骗人的: 设备 77.778s 已 rows=60 落盘并回了 RET:CFG=OK,
@@ -692,10 +921,13 @@ local function reg_cmds()
     -- 放弃上传: 前端取消/重试整个流程时显式释放暂存, 不用等下一次第 1 片来
     --   覆盖。行为上 up_reset 在每条会动配置的命令里都会做, 这条只是让它立刻发生
     M.reg("W:CSABORT", function()
-        if not up.on then return M.reply("RET:CSABORT=OK") end
-        local n = up.got
+        local n = up.on and up.got or 0
         up_reset("W:CSABORT")
-        log.info("cmd", "分片上传被放弃, 已暂存 " .. n .. " 片")
+        -- 归还轮询放在 up.on 判断【外面】: 会话可能早被中间插进来的 W:MODE /
+        --   W:CFG 清掉了, 而 CBEGIN 停掉的轮询还停着。那句"没有会话"要是顺手
+        --   把归还也跳过, 设备就一直不采数, 只能等 60 秒兜底
+        hold_restore("W:CSABORT")
+        if n > 0 then log.info("cmd", "分片上传被放弃, 已暂存 " .. n .. " 片") end
         M.reply("RET:CSABORT=OK")
     end)
 
@@ -1046,6 +1278,23 @@ local function reg_cmds()
         mon.request_detect()
         M.reply("RET:AUTODETECT=BUSY")
     end)
+
+    -- ==== sniff 档别被 W:CBEGIN 停掉 ====
+    --   11-13 加 W:CBEGIN 时撞出来的口径缺口: 腾水里最狠的两刀是 poll.stop()
+    --   和 collector.clear_all(), 而 sniff 档【也在用这两个东西】—— mon 自己
+    --   起停轮询做参数探测, 抓到的帧就落在 collector 那份缓存里。sniff 跑到一半
+    --   被一条开场命令停了轮询、清了帧, 那一轮推断就废了, 而前端根本不会在
+    --   sniff/idle 档保存配置(README 的档位说明里写着)。
+    --   所以这一条不是"支持在 sniff 档上传", 是一道【别越界】的门。
+    --   ⚠️ 重定义【不行】: hold_restore 是 hold_arm 里那个兜底协程的 upvalue,
+    --   在这儿换个同名的新 local, 兜底那条路还在调旧的 —— 现场就变成"明路会拦、
+    --   暗路不拦"。加一个标志位, 让两条路共用同一个函数。
+    cbegin_guard = function()
+        if ctrl.get_mode() == "sniff" then
+            return "sniff 档在靠 poll/collector 做推断, W:CBEGIN 不能在这儿停轮询腾水; 要改配置先切 manual 或 platform"
+        end
+        return nil
+    end
 end
 
 -- B 类：仅开发调试用的 5 条指令。发布版整个函数不调用,
@@ -1110,19 +1359,8 @@ local function reg_debug_cmds()
                 end
             end
         end
-        local last_ok, first_fail = 0, 0
-        local steps = { 1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384 }
-        for i = 1, #steps do
-            local n = steps[i]
-            collectgarbage("collect")
-            local ok, s = pcall(string.rep, "x", n)
-            if ok and type(s) == "string" and #s == n then
-                last_ok = n
-            else
-                first_fail = n
-                break
-            end
-        end
+        -- 阶梯挪进 max_block 了: W:CBEGIN 也要量同一个数, 两处口径必须一样
+        local last_ok, first_fail = max_block({ 1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384 })
         p[#p + 1] = string.format("max:%d fail:%d", last_ok, first_fail)
         M.reply("RET:MEM=" .. table.concat(p, " "))
     end)

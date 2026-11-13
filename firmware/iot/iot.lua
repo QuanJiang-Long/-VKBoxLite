@@ -288,6 +288,13 @@ local function alias_map(c)
     return m
 end
 
+-- 放掉那张 name->alias 映射。2026-11-13 为 W:CBEGIN(配置上传前排空池子)加的:
+--   它是【从配置派生】的, 128 行就是几 KB, 而上传要换掉的正是配置本身。
+--   清了不需要任何补偿: 键里带 cfg.version(), 下一次 alias_map() 自然重建。
+function M.drop_alias_cache()
+    alias_map_cache, alias_map_key = nil, nil
+end
+
 -- 推断结果补 name/id: 与上报同一套映射(用户别名表优先, 再 cfg alias_map)
 --
 -- ⚠️ 12-fix-9 (2026-10-29): 【不再复制行】, 名字表挂到【顶层】。

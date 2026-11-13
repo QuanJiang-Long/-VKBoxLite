@@ -647,7 +647,13 @@ function M.stop()
     --   fskv 里的 ds_poll/ds_pull, 但 poll 模块内部的 regs 是另外存的,
     --   stop() 不清就导致切回 manual 时 R:REG 还返回上次的寄存器表 (ds_poll
     --   实际是空的). 让 stop 顺手清, 下次 start() 会从 fskv 重新 load
-    regs, interval, lastCfg = {}, cfg.POLL_INTERVAL_MS, nil
+    -- ⚠️ 2026-11-13: plan 必须跟着一起清。_build_plan 出来的每个块里是
+    --   rows={{r=行表, off=n}} —— 那是配置行的【直接引用】, 60 行就是 60 份。
+    --   所以原来 stop() 把 regs 清了, 整张点位表还被 plan 攥着不放, "停了轮询
+    --   就把配置腾出去"这件事只做了一半。现场量到的 max:1024 有相当一块是这么
+    --   占着的(见 svc/cmd.lua 的 W:CBEGIN 一节)。
+    --   重建是免费的: cur_plan() 本来就惰性建, apply_cfg/reload_cfg 也早置 nil。
+    regs, interval, lastCfg, plan = {}, cfg.POLL_INTERVAL_MS, nil, nil
     -- 16-fix-1: 删除 de_low(), 依赖内核 485 自动控制 DE
     --
     -- ⚠️ 12-fix (2026-10-27): 必须解绑 UART 接收回调并关串口, 与 mon.stop()

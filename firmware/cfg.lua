@@ -95,6 +95,25 @@ local cfg_ver = 0
 
 function M.version() return cfg_ver end
 
+-- 放掉【解码缓存】这一堆引用, 不动 fskv、不动版本号。2026-11-13 为 W:CBEGIN 加的。
+--   为什么是它: 轮询中池子只剩 max:1024 的连续块, 一整行配置在【被拼出来之前】
+--   就接不住(现场 drop 1177B / drop 4072B 都是死在这儿)。上传前得先腾水, 而
+--   现场最大的一块水就是这份缓存 —— 它装着整份配置的解码表 + 各分片的原始
+--   JSON 串, 60 行是十几 KB, 且缓存的正是"马上要被换掉的那份"。
+--   语义和写盘后 kv_set 里那次 json_cache[k]=nil 是同一件事, 只是提前到"还没写"。
+--   不清版本号: fskv 里内容没变, 涨版本号等于让所有下游缓存白失效一遍。
+--   代价: 下一次 load_* 要重读 fskv 再解一次 —— 那本来就是腾完水之后才做得动
+--   的事(而且 W:CBEGIN 之后紧接着就是提交新配置, 这份旧表多半根本不会再读)。
+-- 返回放掉的项数, 只给日志看。
+function M.drop_cache()
+    local n = 0
+    for k in pairs(json_cache) do
+        json_cache[k] = nil
+        n = n + 1
+    end
+    return n
+end
+
 -- fskv 单值硬顶 4096B。超限 (以及 flash 空间不足) 时 C 层只打一行
 --   E/fskv value too big N max 4096 然后【返回 false】, 不 raise —— 所以
 --   pcall 那一关是过的。原来 kv_set 只看 pcall 的 ok, 把"没写进去"当成

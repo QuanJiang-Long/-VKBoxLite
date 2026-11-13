@@ -30,10 +30,14 @@ local SAVED = {}           -- 每次落盘记录: { slot, rows, fields, mode }
 local NORM_FAIL = nil      -- 非 nil = normalize_poll 拒了, 值是原因
 local POLLL = {}           -- poll 替身的行为记录
 local RUN = false          -- poll.is_running()
+local CLEAR = 0            -- collector.clear_all 被叫了几次 (W:CBEGIN 腾水)
+local DROPC = 0            -- cfg.drop_cache 被叫了几次 (同上)
+local ALIAS = 0            -- iot.drop_alias_cache 被叫了几次 (同上)
 
 local function fresh()
   writes, SAVED, NORM_FAIL, POLLL = {}, {}, nil, {}
-  MODE, RUN = 'manual', false
+  CLEAR, DROPC, ALIAS, RUN = 0, 0, 0, false
+  MODE = 'manual'
 end
 
 package.preload["util"] = function()
@@ -48,6 +52,17 @@ package.preload["util"] = function()
       if k == "lua" then return 307192, 287384, 307192 end
       return 198000, 76000, 90000
     end },
+    -- ⚠️ iot 走的是 util.try, 不是 require —— 挂到 package.preload 上永远不
+    --   会被读到(cmd.lua 拿到的还是 nil)。原来 iot 是 nil 的时候, "开场到底
+    --   有没有叫 drop_alias_cache" 只存在于注释里(名字打错了也是静默不叫),
+    --   所以这里补一张替身表。装本文件会走到的那几位就够: cmd.lua 对 iot 的
+    --   调用全是 if iot and iot.x 的守卫式, 缺的字段就是不走。
+    ["iot/iot"] = {
+      drop_alias_cache = function() ALIAS = ALIAS + 1 end,
+      reply_config = function() return true end,
+      attach_names = function(x) return x end,
+      status = function() return {} end,
+    },
   }
   return { log = function() return L end,
            get = function(n) return libs[n] end,
@@ -69,7 +84,10 @@ package.preload["bus/ctrl"] = function()
 end
 package.preload["bus/mon"] = function() return { is_detecting = function() return false end } end
 package.preload["data/collector"] = function()
-  return { stats = function() return {} end, snapshot = function() return {} end }
+  return { stats = function() return {} end, snapshot = function() return {} end,
+           trim_cache = function() return 0 end,
+           -- W:CBEGIN 腾水的四刀之一。替身按真函数的口径回"放掉了几条"
+           clear_all = function() CLEAR = CLEAR + 1 return 7 end }
 end
 package.preload["iot/mqttcfg"] = function() return { load = function() return {} end } end
 package.preload["bus/poll"] = function()
@@ -78,8 +96,13 @@ package.preload["bus/poll"] = function()
     is_running = function() return RUN end,
     stop = function() POLLL[#POLLL + 1] = "stop" RUN = false end,
     apply_cfg = function(n) POLLL[#POLLL + 1] = "apply:" .. #(n.regs or {}) end,
+    -- ⚠️ 第二个参数可以没有, 而且【两种意思不一样】: 传表 = 用这张表起,
+    --   不传 = 自己去 fskv 重读(reload_cfg)。W:CBEGIN 交还轮询走的是后者,
+    --   替身原来写死 #(n.regs) 会把这条路直接崩掉 —— 那种崩法在测试里长得
+    --   像"代码写错了", 其实是替身不像。
     start = function(slot, n)
-      POLLL[#POLLL + 1] = "start:" .. tostring(slot) .. ":" .. #(n.regs or {})
+      POLLL[#POLLL + 1] = "start:" .. tostring(slot) .. ":"
+          .. (n and tostring(#(n.regs or {})) or "fskv")
       RUN = true
     end,
   }
@@ -96,6 +119,8 @@ package.preload["cfg"] = function()
   return {
     -- 和真 normalize_poll 一样: inplace=true 时返回的就是传进来的那张表
     normalize_poll = function(t) if NORM_FAIL then return nil, NORM_FAIL end return t end,
+    -- W:CBEGIN 腾水的一刀。真函数返回放掉的项数, 替身给个固定数就够(只看叫没叫)
+    drop_cache = function() DROPC = DROPC + 1 return 3 end,
     save_poll_norm = save("poll"),
     save_pull_norm = save("pull"),
     load_poll = function() return { regs = {} }, nil end,
@@ -131,6 +156,14 @@ local function ask(line)
   writes = {}
   local matched = cmd.handle(line)
   return matched, table.concat(writes, "")
+end
+
+-- 只要应答串。⚠️ 别写成 (ask(x)):find(...) —— 括号截的是【第一个】返回值,
+--   那是"这条指令有没有匹配上注册表"的布尔值, 于是测出来一个 "attempt to
+--   index a boolean" 而真正该看的应答字符串根本没进断言。
+local function ask1(line)
+  local _, a = ask(line)
+  return a
 end
 
 local function row(i)
@@ -322,6 +355,138 @@ check("⑫ 整行一次到的尺寸就是现场接不进来的那种(>4KB 那堵
     #whole > 4096, #whole)
 check("⑫ 分片后最大单行落在设备给得出的连续块以内", peak <= 2048, peak)
 check("⑫ 小了不止一半", peak * 2 < #whole, peak .. " vs " .. #whole)
+
+-- ===== 13) W:CBEGIN 正常开场: 把轮询停下、把配置那堆表放掉, 再报水位 =====
+--   这一组是 11-13 下午那轮现场补出来的: 片切到 1200B 之后第二次保存【还是】
+--   进不来(轮询中 max:1024, 一片 1177B 在拼行之前就被丢掉), 而 W:GC 前后 max
+--   一点没抬 —— 水不在可回收的对象里, 在轮询自己在用的表里。所以开场命令的
+--   职责就是"把轮询停下来腾地方", 并且把腾完的水位如实报给前端。
+fresh()
+RUN = true
+local _, cb = ask("W:CBEGIN=3,1200")
+check("⑬ 开场回自己的键, 带着实测到的最大连续块",
+    cb:find("RET:CBEGIN=OK max:", 1, true) ~= nil, string.format("%q", cb))
+check("⑬ 水位一起报了(现场不用再单独跑一轮 R:MEM)",
+    cb:find(" used:", 1, true) ~= nil, string.format("%q", cb))
+check("⑬ 停的是【正在跑的】轮询", table.concat(POLLL, " ") == "stop", table.concat(POLLL, " "))
+check("⑬ 清了采集缓存(含 ring)", CLEAR == 1, CLEAR)
+check("⑬ 放了配置解码缓存", DROPC == 1, DROPC)
+check("⑬ 放了 iot 那张别名映射", ALIAS == 1, ALIAS)
+check("⑬ 轮询真的停了", RUN == false, RUN)
+
+-- ===== 14) 第 1 片接到 CBEGIN 开的会话上, 而不是重开一次 =====
+local _, p2first = ask(lines[2])
+check("⑭ 会话是开场就开好的: 抢发第 2 片被按顺序拦下",
+    p2first:find("顺序不对, 下一片应该是 1", 1, true) ~= nil, string.format("%q", p2first))
+-- 上一条把会话作废了(顺序断 = 作废), 重新开场再走一遍正路
+fresh()
+RUN = true
+ask("W:CBEGIN=3")     -- 预算不带: 按设备自己的单片上限探, 老前端也走得通
+local _, q1 = ask(lines[1])
+check("⑭ 第 1 片接得上(回自己的片号 OK)", q1 == "RET:CSHARD=1=OK\r\n", string.format("%q", q1))
+check("⑭ 第 1 片没有把轮询再停一次", POLLL[2] == nil, table.concat(POLLL, " "))
+local _, q2 = ask(lines[2])
+check("⑭ 第 2 片照常收下", q2 == "RET:CSHARD=2=OK\r\n", string.format("%q", q2))
+-- CBEGIN 说了 3 片, 片里却说 4: 拒收(n 是两端的合同, 不能各说各的)。
+--   ⚠️ 要在【会话还活着】的时候测: 抢发第 2 片那次已经把会话作废了(顺序断=作废),
+--   而作废之后再发第 1 片走的是"没开场就自己开一次"的兼容路 —— 它按片里的 n
+--   重开, 不会报不一致。测错状态就等于什么都没测出来。
+fresh()
+RUN = true
+ask("W:CBEGIN=3,1200")
+ask(lines[1])
+local _, mism = ask(mock.line("W:CSHARD", "2/4", { row(1) }))
+check("⑭ 开场说的片数和片里说的不一致 → 当场拒", mism:find("片数", 1, true) ~= nil,
+    string.format("%q", mism))
+
+-- ===== 15) 腾完水还是接不住: 当场说清, 一片都不用发, 轮询立刻还回来 =====
+--   模拟"最大连续块 = 0": 把试分配用的 string.rep 换成一叫就 raise。
+--   ⚠️ 必须换完立刻换回来 —— 这文件后面每一条都要靠真 string.rep 之外的
+--   路径, 但把全局函数留在坏状态里, 下一个失败就查不动了。
+fresh()
+RUN = true
+local realrep = string.rep
+string.rep = function() error("not enough memory") end
+local _, cbad = ask("W:CBEGIN=3,1200")
+string.rep = realrep
+check("⑮ 水位不够回 FAIL 且挂在自己的键上",
+    cbad:find("RET:FAIL:CBEGIN:腾完水仍接不住 1200B", 1, true) ~= nil, string.format("%q", cbad))
+check("⑮ 说清实际只腾出多大一块", cbad:find("最大连续块只有 0B", 1, true) ~= nil,
+    string.format("%q", cbad))
+check("⑮ 下一句告诉用户该干什么", cbad:find("重启设备", 1, true) ~= nil, string.format("%q", cbad))
+check("⑮ 会话没留下(再发片就是【没有会话】而不是【顺序不对】)",
+    ask1(lines[2]):find("没有上传会话", 1, true) ~= nil, "见上一条")
+check("⑮ 轮询当场还回去了, 不让人干等 60 秒兜底",
+    table.concat(POLLL, " ") == "stop start:poll:fskv", table.concat(POLLL, " "))
+check("⑮ 还回去是从 fskv 重读(不拿任何手上的表)", RUN == true, RUN)
+
+-- ===== 16) 静默兜底: 前端一去不回, 设备自己把轮询捡起来 =====
+fresh()
+RUN = true
+ask("W:CBEGIN=3,1200")
+ask(lines[1])
+cmd._cshold_fire()      -- 测试环境没有 sys 协程, 直接触发那一条兜底
+check("⑯ 兜底把轮询按旧配置起回来了",
+    table.concat(POLLL, " ") == "stop start:poll:fskv", table.concat(POLLL, " "))
+check("⑯ 兜底同时作废了会话", ask1(lines[2]):find("没有上传会话", 1, true) ~= nil, "见上一条")
+check("⑯ 一个字都没落盘", #SAVED == 0, #SAVED)
+-- 兜底再来一次也不该起第二个轮询(is_running 那层守卫)
+local before16 = #POLLL
+cmd._cshold_fire()
+check("⑯ 重复触发是空操作", #POLLL == before16, table.concat(POLLL, " "))
+
+-- ===== 17) CSABORT 也会还轮询, 而且【没有会话】时照样还 =====
+fresh()
+RUN = true
+ask("W:CBEGIN=3,1200")
+ask(lines[1])
+local _, ab17 = ask("W:CSABORT")
+check("⑰ 放弃回 OK", ab17 == "RET:CSABORT=OK\r\n", string.format("%q", ab17))
+check("⑰ 放弃把轮询还回来",
+    table.concat(POLLL, " ") == "stop start:poll:fskv", table.concat(POLLL, " "))
+-- 会话被中途的 W:MODE 清掉了, 但轮询还停着: CSABORT 不能因为"没会话"就跳过归还
+fresh()
+RUN = true
+ask("W:CBEGIN=3,1200")
+ask(lines[1])
+ask("W:MODE=platform")          -- 这条会 up_reset, 但不会替我们把轮询起回来
+local _, ab17b = ask("W:CSABORT")
+check("⑰ 没会话时放弃仍回 OK", ab17b == "RET:CSABORT=OK\r\n", string.format("%q", ab17b))
+check("⑰ 归还不能被【没有会话】那句跳过", RUN == true,
+    POLLL and table.concat(POLLL, " ") or "-")
+
+-- ===== 18) 提交成功: 起轮询的是 commit_config, 兜底只负责取消 =====
+fresh()
+RUN = true
+ask("W:CBEGIN=3,1200")
+send_pieces(lines)
+local _, fin18 = ask(lines[4])
+check("⑱ 收尾成功", fin18 == "RET:CFINISH=OK\r\n", string.format("%q", fin18))
+local starts = 0
+for _, v in ipairs(POLLL) do if v:find("^start") then starts = starts + 1 end end
+check("⑱ 只起了一次轮询(第二次是白解一遍旧配置, 池子最紧的时候干这个)",
+    starts == 1, table.concat(POLLL, " "))
+check("⑱ 起的是【新】那 60 行, 不是从 fskv 重读",
+    POLLL[#POLLL] == "start:poll:60", POLLL[#POLLL])
+check("⑱ 落盘一次 60 行", #SAVED == 1 and SAVED[1].rows == ROWS_N, #SAVED)
+
+-- ===== 19) 参数闸门 与 sniff 档不越界 =====
+fresh()
+check("⑲ n 超上限被拒", ask1("W:CBEGIN=99,1200"):find("片数非法", 1, true) ~= nil, "见上一条")
+check("⑲ n=0 被拒", ask1("W:CBEGIN=0,1200"):find("片数非法", 1, true) ~= nil, "见上一条")
+check("⑲ 预算大得离谱被拒", ask1("W:CBEGIN=3,9000"):find("单行预算 9000B", 1, true) ~= nil,
+    "见上一条")
+check("⑲ 预算小得不像话也被拒(等于没探)", ask1("W:CBEGIN=3,8"):find("单行预算 8B", 1, true) ~= nil,
+    "见上一条")
+check("⑲ 这四次一条都没停轮询", #POLLL == 0, table.concat(POLLL, " "))
+fresh()
+MODE = "sniff"
+RUN = true
+local _, cbs = ask("W:CBEGIN=3,1200")
+check("⑲ sniff 档拒绝开场(那边的推断正靠 poll+collector 跑)",
+    cbs:find("RET:FAIL:CBEGIN:sniff 档", 1, true) ~= nil, string.format("%q", cbs))
+check("⑲ 拒绝的时候什么都没动", #POLLL == 0 and CLEAR == 0 and DROPC == 0 and RUN == true,
+    table.concat(POLLL, " ") .. " clear=" .. CLEAR)
 
 if failed > 0 then
   print(string.format("FAIL: %d 条不过 (%d 条)", failed, checked))

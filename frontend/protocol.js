@@ -38,6 +38,14 @@
     // 成行表, W:CFINISH 时交回和 W:CFG 【同一条】提交流程 —— 存储格式、校验、
     // 起轮询的规矩一个字没变。前端只在整行超过阈值时才走这条路, 小改动仍然
     // 直接发 W:CFG。好处: 上传中断时 flash 里那份老配置完好无损(暂存只在 RAM)
+    // ⚠️ 上面"清多少水都不解决问题"那句是 11-13 上午的话, 当天下午就被推翻了:
+    //   片切到 1200B 之后第二次保存【还是】进不来(轮询中 max:1024, 一片 1177B
+    //   在拼行之前就被丢掉), 而切一次 idle 就把 max 从 1024 带回 6144 —— 水在
+    //   【轮询自己在用的表】里, GC 收不到, 停轮询才还得出来。所以发片之前要先
+    //   发 cfgBegin 让设备把水腾出来, 腾不出来的话它当场就说, 不用一片片撞。
+    //   ⇒ cfgBegin 和上面这一组分片指令是配套的一套；老固件不认 cfgBegin
+    //   (不匹配任何已注册命令, 一个字节都不回)，前端只能等到超时。
+    cfgBegin:   (n, maxLine) => 'W:CBEGIN=' + n + ',' + maxLine,
     cfgShard:   (i, n, rows) => 'W:CSHARD=' + i + '/' + n + ',' + JSON.stringify(rows),
     cfgFinish:  (n, obj)     => 'W:CFINISH=' + n + ',' + JSON.stringify(obj),
     cfgAbort:   ()           => 'W:CSABORT',
