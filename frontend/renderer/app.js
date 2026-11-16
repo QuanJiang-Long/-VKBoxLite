@@ -667,6 +667,30 @@ function sendCmd(line, expectCmd, timeout = 3000) {
   });
 }
 
+// 等串口空出来（上一条指令落地）再发下一条。
+// 现场问题：切档时 5s 自动刷新(R:STAT)或 sniff 的 R:AUTODETECT 正在途，
+// sendCmd 会被单未决保护瞬拒，用户点一次"没反应"，得再点一次才切过去。
+// 这里最多等 ms 毫秒，超时也返回 false 让调用方继续（sendCmd 自己会报错）。
+async function waitPortIdle(ms = 4000) {
+  const end = Date.now() + ms;
+  while (S.pending && Date.now() < end) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return !S.pending;
+}
+
+// 发一条"必须落地"的指令：撞上在途指令时先等它结束再重试一次。
+// 只用于切档这类用户显式操作（自动刷新链路上不能这么排队，会把轮询拖死）。
+async function sendCmdQueued(line, expectCmd, timeout, waitMs) {
+  try {
+    return await sendCmd(line, expectCmd, timeout);
+  } catch (e) {
+    if (!/上一条指令尚未返回/.test(String(e && e.message || ''))) throw e;
+    await waitPortIdle(waitMs || 4000);
+    return await sendCmd(line, expectCmd, timeout);
+  }
+}
+
 // 收到一行 -> 路由到等待中的指令
 function onSerialLine(line) {
   const resp = Protocol.decode(line);
@@ -997,7 +1021,7 @@ async function applyMode(mode) {
   // 35b-fix: idle 是逃生口, 哪怕在 waitPullDone 期间 (S.modeSwitching=true)
   //   也要能切回 idle. 串口单未决不会冲突, 新发的 W:MODE=idle 会在切
   //   platform 那条应答之后被设备处理
-  if (S.modeSwitching && mode !== 'idle') return;
+  if (S.modeSwitching && mode !== 'idle') { toast('正在切换模式，请稍候…'); return; }
   // 28-fix: 串口未连接时禁止切档. 4 个 mode-card (mcIdle/mcPoll/mcPollpull/mcSniff)
   //   都走 applyMode, 在这里统一拦截 + toast 提示
   if (!S.open) {
@@ -1061,6 +1085,8 @@ async function applyMode(mode) {
   //   弹窗, 让用户自由进. 进入后 platform 面板顶部用 pMqttHint 横条提示
   //   MQTT 未连接, 「知道了」可点掉 (本会话内). 切走再回来还会再弹.
   //   设备端 (ctrl.lua) 仍会报清晰错误, 拉不到配置时用户能看到
+  // 2026-11-16: 先把"切换中"立起来再等在途指令落地，否则等待期间连点
+  //   会进来第二条 applyMode（守卫在函数开头，已经过了）。
   S.modeSwitching = true;
   S.modePending = mode;          // 先记下用户所选，防止 5s 定时刷新把高亮打回旧模式
   // 33-fix: 切到非 platform 档时清掉两个提示横幅的 dismiss/pending 状态,
@@ -1074,7 +1100,12 @@ async function applyMode(mode) {
   renderMode();
   try {
     status('正在切换到 ' + (MODE_LABEL[mode] || mode) + ' …', true);
-    const r = await sendCmd(Protocol.Enc.setMode(mode), 'MODE', 8000);
+    // 2026-11-16: 发 W:MODE 之前先等在途指令落地。踩过的坑：sniff 档后台在跑
+    //   R:AUTODETECT/R:INFER、首页 5s 定时在跑 R:STAT，用户点档位时正好撞上，
+    //   sendCmd 被单未决保护瞬拒 → 只弹一句"上一条指令尚未返回"，得再点一次。
+    //   idle 是逃生口，等得更久一些。
+    await waitPortIdle(mode === 'idle' ? 8000 : 4000);
+    const r = await sendCmdQueued(Protocol.Enc.setMode(mode), 'MODE', 8000, 6000);
     await readMode();            // 设备已确认，读回真实状态
     S.modePending = null;        // 确认成功，清除待应用标记
     // 2026-11: W:MODE 成功后再清槽 (避免 stop_sniff 保存覆盖清除)
@@ -1181,6 +1212,10 @@ async function applyMode(mode) {
     readMode();
   } finally {
     S.modeSwitching = false;
+    // 2026-11-16: 必须在清掉 modeSwitching 之后重绘一次，否则卡片上的
+    //   .switching 类（灰掉 + 进度光标）会一直留着，直到下一次 renderMode()
+    //   才恢复 —— 用户看到的是"切完了但卡片还是灰的"。
+    renderMode();
   }
 }
 
@@ -2206,7 +2241,12 @@ function applyParsedData(pre, d, importMqtt) {
     const m = d.mqtt;
     console.log('[applyParsedData] MQTT data received:', m);
     // 检查 MQTT 数据是否有效
-    const hasMqttData = m.host || m.port || m.user || m.pass || m.client_id || m.pub_topic || m.sub_topic;
+    // 2026-11-16: 判定"这份文件带 MQTT 配置"必须以 host 为准。
+    // 之前用 m.host || m.port || ... 判，port 缺省 1883 永远为真，
+    // 于是未配 MQTT 的设备导出的 JSON(host:"")回导时会把 MQTT 表单冲成空，
+    // 再调 saveMqtt() 又被"服务器地址不能为空"拦住 —— 用户看到的是
+    // 导入失败，其实 485 那份已经写进去了。host 为空就当这份文件没 MQTT 段。
+    const hasMqttData = !!(m.host && String(m.host).trim());
     console.log('[applyParsedData] hasMqttData:', hasMqttData);
     if (hasMqttData) {
       E(pre, 'mqHost').value = m.host || '';
@@ -2512,9 +2552,15 @@ async function importCfg(pre) {
         snapClean(pre);                // 导入的内容成为新基线
         // 自动保存到设备 (串口配置 + MQTT 配置)
         await saveCfg();
-        // 只有 manual 档导入时才保存 MQTT 配置
-        if (importMqtt && data.mqtt && (data.mqtt.host || data.mqtt.port || data.mqtt.user || data.mqtt.pass)) {
+        // 只有 manual 档导入时才保存 MQTT 配置。
+        // 2026-11-16: 文件里 host 为空 = 这份配置本来就没配 MQTT（未配 MQTT 的
+        //   设备导出来就是这形态），此时跳过写 MQTT 而不是让 saveMqtt 抛
+        //   "MQTT 服务器地址不能为空" 把导入搞成看起来失败了。
+        const impMqttHost = data.mqtt && data.mqtt.host ? String(data.mqtt.host).trim() : '';
+        if (importMqtt && impMqttHost) {
           await saveMqtt();
+        } else if (importMqtt && data.mqtt) {
+          toast('配置已导入；该文件没有 MQTT 服务器地址，已跳过 MQTT 配置');
         }
       } catch (e) {
         toast('导入失败：不是合法的配置文件 (' + e.message + ')');
@@ -2730,16 +2776,11 @@ document.querySelectorAll('.mode-card').forEach(c => {
     if (c.classList.contains('locked')) return;  // 35-fix: locked 卡片不响应
     // 点的就是设备当前模式且没有待应用选择：只重绘，不发命令、不弹窗
     if (m === S.mode && !S.modePending) { renderMode(); return; }
-    // 切换中忽略连点（applyMode 内部也有同样的保护）
-    if (S.modeSwitching) return;
-    const label = MODE_LABEL[m] || m;
-    const curLabel = MODE_LABEL[S.mode] || S.mode;
-    if (!await askConfirm('确定把 485 运行模式从「' + curLabel + '」切换到「' + label + '」？\n\n'
-                 + '切换时设备会先停掉旧模式再启动新模式（互斥），'
-                 + '正在进行的采集会中断。'
-                 // 切回空闲不只是停总线, 设备会顺带复位用户配置。这是不可恢复的
-                 // 删除动作, 必须在同一个弹窗里一次说清, 不能让用户点完才知道
-                 + idleWipeWarn(m), '切换运行模式')) return;
+    // 切换中连点：交给 applyMode 里的守卫处理（它会 toast 提示，不再静默）
+    // 2026-11-16: 这里不再单独弹"确认切到 X"。以前这里一次通用确认、
+    //   applyMode 里又一次针对性确认（是否清空 ds_poll / ds_pull / ds_infer），
+    //   同一个动作连弹两个框。现在只留 applyMode 里那次"会丢什么"的确认，
+    //   没东西可丢的档位直接切；idle 例外（会复位配置），上面已确认过。
     applyMode(m);
   };
 });
