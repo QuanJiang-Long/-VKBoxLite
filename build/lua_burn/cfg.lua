@@ -122,6 +122,38 @@ end
 
 local FSKV_VALUE_MAX = 4096
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+local function probe_block(n)
+collectgarbage("collect")          -- 上一轮的碎渣先收掉, 否则探不准
+local ok, s = pcall(string.rep, "x", n)
+return ok and type(s) == "string" and #s == n
+end
+
+local function ensure_block(n)
+if n <= 0 then return true end
+if probe_block(n) then return true end
+local freed = M.drop_cache()
+if probe_block(n) then
+log.info("cfg", "写盘前腾出连续块:", n, "B, 丢解码缓存", freed, "项")
+return true
+end
+return false, "连续块不足 " .. n .. "B" .. pool_tag()
+end
+
 local function kv_set(k, s, noflush)
 if not fskv then return false, "no fskv" end
 local n = type(s) == "string" and #s or 0
@@ -129,6 +161,13 @@ if n > FSKV_VALUE_MAX then
 log.warn("cfg", "value too big", k, n, "max", FSKV_VALUE_MAX)
 return false, "配置 " .. n .. "B 超 fskv 单值上限 " .. FSKV_VALUE_MAX .. "B"
 end
+
+local okb, berr = ensure_block(n + 96)
+if not okb then
+log.warn("cfg", "fskv.set 前连续块不足:", k, n .. "B", tostring(berr))
+return false, "fskv.set 前连续块不足(值 " .. n .. "B): " .. tostring(berr)
+end
+collectgarbage("collect")          -- 把探测用的那块还回去, 再交给 fskv.set
 local ok, ret = pcall(fskv.set, k, s)
 if not ok or ret == false then
 log.warn("cfg", "fskv.set failed:", k, n .. "B", brief(ret))
@@ -249,10 +288,11 @@ end
 
 local function shards_save(k, t)
 local rows = (type(t.regs) == "table") and t.regs or {}
-local segs, cur, cur_sz = {}, {}, 2
+local segs, seg_sz, cur, cur_sz = {}, {}, {}, 2
 local function close_seg()
 if #cur == 0 then return true end
 segs[#segs + 1] = cur
+seg_sz[#seg_sz + 1] = cur_sz    -- 编码后的段宽(含 [ ] 和逗号), 预检用
 cur, cur_sz = {}, 2
 return true
 end
@@ -286,6 +326,19 @@ local on = shard_of(oh)
 if on and on > 0 then old_n = on end
 end
 
+
+
+
+
+local worst = 0
+for i = 1, #seg_sz do
+if seg_sz[i] > worst then worst = seg_sz[i] end
+end
+local okb, berr = ensure_block(worst + 96)
+if not okb then
+return false, "写盘前连续块不够(最宽一段 " .. worst .. "B): " .. tostring(berr)
+end
+
 head.v, head.n, head.st = SHARD_VER, n, SHARD_W
 local ok1, err1 = put_json(k, head, true)
 if not ok1 then return false, err1 end
@@ -294,6 +347,8 @@ local ok2, err2 = put_json(shard_key(k, i), segs[i], true)
 if not ok2 then
 return false, "分片" .. i .. "/" .. n .. "写入失败: " .. tostring(err2)
 end
+
+collectgarbage("collect")
 end
 head.st = SHARD_R
 local ok3, err3 = put_json(k, head) -- 提交: 只有这一次 flush
