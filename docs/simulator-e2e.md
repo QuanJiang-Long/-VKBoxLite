@@ -93,15 +93,18 @@ cd frontend; npm start
 
 ## 6. 自动化跑一遍（可选）
 
-用 Electron 自带调试口 + CDP 驱动真实 GUI：
+仓库里已经有脚本了，不用手写 CDP：
 
 ```powershell
-$env:VKBOX_SIM_WEBC='18921'; $env:VKBOX_DOWNLOAD_DIR="$env:TEMP\vkbox_dl"
-Start-Process frontend\node_modules\electron\dist\electron.exe `
-  -ArgumentList "--remote-debugging-port=9333", "." -WorkingDirectory frontend
-# 另开一个终端：连 http://127.0.0.1:9333/json/list 拿 webSocketDebuggerUrl，
-# 用 Runtime.evaluate 点 comSel/btnOpen/btnReadInfo/mcPoll/... 即可
+node tools\sim_e2e.js --webc 18921 --launch
 ```
 
-覆盖到的 14 个环节：枚举 → 打开 → 读信息 → 模式页刷新 → 切 manual → 读配置 →
-加寄存器 → 存配置（W:CFG）→ 导出 JSON → 导入 JSON → 切 sniff → 推断 → 切回 idle → 页面错误汇总。
+`--launch` 会自己拉起 Electron（带调试端口 + `VKBOX_DOWNLOAD_DIR`），
+依次跑：页面就绪 → 枚举 → 打开 → 读信息 → 读模式 → 切 manual → 读配置 →
+建测试点 → 存配置（W:CFG）→ 导出 JSON → 导入 JSON → 读实时值 → R:MEM →
+R:NET → R:MQTT → 切 sniff + 推断 → 切回 idle（验证复位）→ 还原配置 → 关串口 →
+页面错误汇总。
+
+模拟器没有从站/4G/总线流量，所以读实时值、R:NET、MQTT 未就绪、推断这四步
+会记 **SKIP**（属预期，不是失败）。真机用 `tools/real_device_e2e.js` 跑同一份
+流程，见 [`docs/real-device-e2e.md`](real-device-e2e.md)。
