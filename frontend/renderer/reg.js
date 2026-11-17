@@ -12,7 +12,7 @@
 //---------------------------------------------------------------------
 const ALL_TYPES = ['uint16', 'int16', 'uint32', 'int32', 'float32', 'uint64', 'int64', 'float64'];
 
-function renderRegTable(pre) {
+function renderRegTable(pre, force) {
   // Step 2e: 拆 m/p 分支, pre 由 readCfg/readCfgSilent/activateTab 传入
   if (pre === undefined) pre = cfgPrefix();
   const tbody = E(pre, 'paramTbody');
@@ -21,11 +21,15 @@ function renderRegTable(pre) {
   // ② 对应 tab 标签页不可见且表里已有真实数据行 —— 切走时浏览器会把焦点里的
   //    输入框 blur 掉，activeElement 变成 <body>，只判焦点会漏。
   //    ⚠️ 必须确认表里真的有 .c-addr 行才跳过：空表/占位行时该渲染
+  // ③ force=true: 导入配置时必须强刷。导入按钮在顶部工具栏, 任何页签都能点;
+  //    在"模式/首页"页导入时 ② 会跳过重建 → S.regs 已是新数据, 但 DOM 还是
+  //    旧表 → 紧接着的 saveCfg 按 DOM 收集, 把【旧表】写回设备。
+  //    现场表现: 提示"已导入 N 个寄存器", 设备里还是老配置（数据静默丢失）。
   const ae = document.activeElement;
-  if (ae && ae.closest && tbody.contains && tbody.contains(ae)) return;
+  if (!force && ae && ae.closest && tbody.contains && tbody.contains(ae)) return;
   const tabName = pre ? (pre === 'm' ? 'tabManual' : 'tabPlatform') : 'tabPoll';
   const pane = $(tabName);
-  if (pane && !pane.classList.contains('active') && tbody.querySelector && tbody.querySelector('.c-addr')) return;
+  if (!force && pane && !pane.classList.contains('active') && tbody.querySelector && tbody.querySelector('.c-addr')) return;
   tbody.innerHTML = '';
   const rows = toArr(S.regs);
   if (rows.length === 0) {

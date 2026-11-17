@@ -3,7 +3,7 @@
 // 2026-11-16: 真机/模拟器跑测脚本（tools/e2e + tools/*_e2e.js）的冒烟测试。
 //
 // 脚本本身不进 Electron, 但同样是"会被现场直接用"的代码, 至少守住:
-//   1. 5 个文件语法都能过（曾经因为模板字符串写错, 整个 journey 加载失败）;
+//   1. 6 个文件语法都能过（曾经因为模板字符串写错, 整个 journey 加载失败）;
 //   2. journey 导出 runJourney, 且 SKIP 是个独立错误类型;
 //   3. 真机脚本没给 --port 时给明确提示 + 退出码 2（而不是崩栈）;
 //   4. --help 能打印用法;
@@ -21,6 +21,7 @@ const files = [
   path.join(root, 'tools', 'e2e', 'cli.js'),
   path.join(root, 'tools', 'real_device_e2e.js'),
   path.join(root, 'tools', 'sim_e2e.js'),
+  path.join(root, 'tools', 'mem_scale_e2e.js'),
 ];
 
 // === 点 1: 文件存在 + 语法通过 ===
@@ -67,5 +68,14 @@ assertEq(/simulator-e2e\.md/.test(fs.readFileSync(realDoc, 'utf8')), true,
   '真机手册链到模拟器手册');
 assertEq(/--expect-slave/.test(fs.readFileSync(realDoc, 'utf8')), true,
   '真机手册写了 SKIP 升级开关');
+assertEq(/mem_scale_e2e\.js/.test(fs.readFileSync(realDoc, 'utf8')), true,
+  '真机手册写了内存规模测试脚本');
 
-console.log('PASS: 跑测脚本冒烟（5 文件语法 + 参数/帮助 + 手册互链，13 个测试点通过）');
+// === 点 6: 内存规模脚本缺 --port 时退出码 2 ===
+const noPort2 = spawnSync(process.execPath, [path.join(root, 'tools', 'mem_scale_e2e.js')], {
+  encoding: 'utf8', cwd: root, timeout: 20000,
+});
+assertEq(noPort2.status, 2, 'mem_scale: 没给 --port 时退出码 2');
+assertEq(/--port/.test((noPort2.stderr || '') + (noPort2.stdout || '')), true, 'mem_scale: 提示里指出 --port');
+
+console.log('PASS: 跑测脚本冒烟（6 文件语法 + 参数/帮助 + 手册互链，15 个测试点通过）');

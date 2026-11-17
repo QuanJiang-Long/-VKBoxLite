@@ -502,12 +502,27 @@ function planShards(regs) {
 // 一条指令最多试几次。为什么只重试【同一片】：设备按片号记账，重发同一片
 //   要么被认成重复到达(原样补一次 OK)，要么正好把上一轮没进去的那片补上。
 //   两次重试足够盖住"应答在路上丢了"和"那一片被池子丢掉"这两种
+// ⚠️ 只对【超时】重试。设备明确回 FAIL 时不能重发：那时会话/数据已经变了，
+//   重发换来的是一条无关的错，把真正的原因整个盖掉 —— 2026-11-17 真机 60 点
+//   保存实测:
+//     CFINISH → RET:FAIL:CFG:分片5/5写入失败: fskv.set 拒写(共961B):
+//               not enough memory for buffer allocation      ← 真原因: 池子不够
+//     重发 1  → RET:FAIL:CFINISH:没有上传会话, 先发 W:CSHARD   ← 会话已被上一条清掉
+//     重发 2  → 同上
+//   用户最后看到的是"没有上传会话/收尾失败"，跟内存不足毫无关系，现场只会去
+//   查线、查前端，永远查不到"设备内存不够"。
 const SHARD_TRIES = 3;
+function isTimeoutErr(e) {
+  return String((e && e.message) || '').indexOf('应答超时') >= 0;
+}
 async function sendTry(line, cmd) {
   let last = null;
   for (let k = 0; k < SHARD_TRIES; k++) {
     try { return await sendCmd(line, cmd, 5000); }
-    catch (e) { last = e; }
+    catch (e) {
+      last = e;
+      if (!isTimeoutErr(e)) throw e;      // 设备说不行就是不行，重发没有意义
+    }
   }
   throw last;
 }

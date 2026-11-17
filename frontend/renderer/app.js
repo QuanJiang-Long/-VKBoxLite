@@ -2236,7 +2236,10 @@ function applyParsedData(pre, d, importMqtt) {
   if (c.server) el.fUrl.value = c.server;
   const regs = d.registers || d.regs || [];
   S.regs = toArr(regs);
-  renderRegTable(pre);
+  // force=true：导入必须重建表格。导入按钮在顶部工具栏，用户可能正停在
+  // 「模式/首页」页；此时 renderRegTable 的"页签不可见就不重建"会跳过，
+  // 紧接着 saveCfg 从 DOM 收集 → 把旧表写回设备（提示导入成功，实际没生效）。
+  renderRegTable(pre, true);
   if (importMqtt && d.mqtt) {
     const m = d.mqtt;
     console.log('[applyParsedData] MQTT data received:', m);

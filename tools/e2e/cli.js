@@ -91,8 +91,11 @@ async function main(spec, argv) {
     label: spec.kind,
     real: spec.kind === '真机',
     downloadDir,
-    writeCfg: !args['no-write'],
-    restore: !args['no-restore'],
+    // --read-only：只读巡检。不写配置、不切档、不导入、不切空闲。
+    // 第一次接陌生设备（可能是客户现场机）时先跑这一档，保证不动设备状态。
+    readOnly: !!args['read-only'],
+    writeCfg: !args['no-write'] && !args['read-only'],
+    restore: !args['no-restore'] && !args['read-only'],
     expectSlave: !!args['expect-slave'],
     expectNet: !!args['expect-net'],
     minMaxBlock: Number(args['min-max-block'] || 2048),

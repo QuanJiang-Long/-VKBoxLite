@@ -53,6 +53,7 @@ async function runJourney(ctx) {
   const { ev, client, cfg } = ctx;
   const results = [];
   const notes = [];
+  let originalRows = -1;        // 测试前设备上有几个寄存器（决定要不要还原）
   const note = m => notes.push(m);
   const click = sel => ev('const e=document.querySelector(' + JSON.stringify(sel)
     + '); if(!e) return false; e.click(); return true;');
@@ -221,7 +222,20 @@ async function runJourney(ctx) {
       const x = await ui();
       return x.sn ? x : null;
     }, cfg.real ? 12000 : 8000, 400);
-    if (!u) throw new Error('SN 没读到: ' + (await ui()).stMsg);
+    if (!u) {
+      const x = await ui();
+      // SN 空是真机上很常见的一种"设备没做完产线工序": 固件能跑, R:INFO 也答,
+      // 但 sn_state=empty、前端 SN 栏空、MQTT 的 clientId 会变成 "nil"。
+      // 这里的报错要直接告诉现场怎么补, 而不是只说"没读到"。
+      const st = await ev(`
+        try { const r = await sendCmd('R:SN', 'SN', 4000); return String(r.raw || ''); }
+        catch (e) { return 'ERR ' + e.message; }`);
+      if (/EMPTY/.test(st)) {
+        throw new Error('SN 未烧录（R:SN=EMPTY）。设备能采集, 但平台侧身份会变成 "nil";'
+          + ' 产线需要用 W:SN=<SN> 烧写后再测 MQTT/平台');
+      }
+      throw new Error('SN 没读到: ' + x.stMsg + '（R:SN 应答: ' + st + '）');
+    }
     if (cfg.real) {
       if (u.sn.trim().length < 8) throw new Error('SN 异常: ' + u.sn);
       if (!u.imei) note('IMEI 为空 —— 模组未注网/未插卡时会这样, 不影响 485 链路');
@@ -245,7 +259,11 @@ async function runJourney(ctx) {
 
   // ---------------------------------------------------------------- 5 manual
   await step('5 切 manual（轮询）', async () => {
-    if ((await ev("return S.mode;")) === 'manual') return { already: true, mode: 'manual' };
+    const cur = await ev("return S.mode;");
+    if (cur === 'manual') return { already: true, mode: 'manual' };
+    // 只读巡检不切档：从 platform 切 manual 会问"清空 ds_pull"，
+    // 从 manual 切走也会问"清空 ds_poll"，都会改设备上的槽位。
+    if (cfg.readOnly) throw new Skip('--read-only：不切档（当前 ' + cur + '）');
     const r = await switchTo('#mcPoll', 'manual', 10000, cfg.real ? 15000 : 12000);
     if (!r.ok) throw new Error('模式没切到 manual（弹窗 ' + r.modals + ' 次）: ' + r.u.stMsg + ' / ' + r.u.toast);
     return { mode: r.u.mode, modals: r.modals };
@@ -271,11 +289,13 @@ async function runJourney(ctx) {
     }
     const baud = await ev("const e = document.getElementById('selBaud'); return e ? e.value : '';");
     const rows = await manualRows();
+    if (originalRows < 0) originalRows = rows;   // 第一次读到即"测试前状态"
     return { baud, rows, stMsg: (await ui()).stMsg };
   });
 
   // ---------------------------------------------------------------- 7 测试点
   await step('7 准备测试寄存器', async () => {
+    if (cfg.readOnly) throw new Skip('--read-only：不新增寄存器');
     const before = await manualRows();
     if (before > 0) return { reused: before, note: '沿用设备上已有配置，不写入测试点' };
     await click('#btnAddReg');
@@ -313,9 +333,38 @@ async function runJourney(ctx) {
     return { stMsg: ok.good.stMsg, toast: ok.good.toast };
   });
 
+  // -------------------------------------------------------------- 8b 峰值内存
+  // R:CTRACE 是固件给 W:CFG 留的分阶段采样（enter/freed/norm/saved/done 各一次
+  // rtos.meminfo("lua")）。真机上最有价值的指标就是这里：水位看着正常，
+  // 但 W:CFG 峰值可能已经贴到池顶（固件注释里 95.8% 就会 OOM）。
+  await step('8b W:CFG 分阶段内存（R:CTRACE）', async () => {
+    if (cfg.readOnly || !cfg.writeCfg) throw new Skip('本轮没写 W:CFG，没有采样');
+    const r = await cmd('R:CTRACE', 'CTRACE', 8000);
+    await sleep(400);   // 这条会回两行(#2/#1)，留点时间吃完
+    if (!r.ok) throw new Skip('R:CTRACE 没有应答（该固件可能没开 TR）: ' + r.err);
+    if (/empty/i.test(r.raw)) throw new Skip('设备没记录到 W:CFG 采样: ' + r.raw);
+    const stages = [];
+    String(r.raw).replace(/RET:CTRACE=/g, ' | ').split('|').forEach(seg => {
+      const m = /^\s*(enter|freed|norm|saved|done)\s+(\d+)\/(\d+)\s*$/.exec(seg);
+      if (m) stages.push({ stage: m[1], used: Number(m[2]), total: Number(m[3]) });
+    });
+    if (!stages.length) throw new Skip('R:CTRACE 格式不认识: ' + r.raw.slice(0, 200));
+    const peak = stages.reduce((a, b) => (b.used > a.used ? b : a), stages[0]);
+    const pct = peak.total ? Math.round(peak.used / peak.total * 100) : 0;
+    if (pct >= 95) {
+      throw new Error('W:CFG 峰值已用 ' + pct + '%（' + peak.stage + ' ' + peak.used + '/'
+        + peak.total + '），距 OOM 只剩 ' + (peak.total - peak.used) + 'B: ' + r.raw.slice(0, 300));
+    }
+    if (pct >= 90) note('W:CFG 峰值 ' + pct + '%（' + peak.stage + '），大配置再加点就要 OOM 了');
+    return { peak: peak.stage + ' ' + peak.used + '/' + peak.total, pct, stages };
+  });
+
   // ---------------------------------------------------------------- 9 导出
   let exportedFile = null;
   await step('9 导出配置 JSON', async () => {
+    if (cfg.readOnly && (await ev("return S.mode;")) !== 'manual') {
+      throw new Skip('--read-only 且不在 manual：导出依赖读到的配置，先跳过');
+    }
     fs.mkdirSync(cfg.downloadDir, { recursive: true });
     const t0 = Date.now();
     await click('#btnExport');
@@ -352,6 +401,7 @@ async function runJourney(ctx) {
 
   // ---------------------------------------------------------------- 10 导入
   await step('10 导入配置（回环）', async () => {
+    if (cfg.readOnly) throw new Skip('--read-only：不导入（会写设备）');
     if (!exportedFile) throw new Skip('上一步没导出成功，无从导入');
     const expectRows = await manualRows();
     await client.send('Page.setInterceptFileChooserDialog', { enabled: true });
@@ -448,38 +498,62 @@ async function runJourney(ctx) {
     const r = await cmd('R:MQTT', 'MQTT', 10000);
     if (!r.ok) throw new Skip('R:MQTT 没有应答: ' + r.err);
     const d = (r.data && typeof r.data === 'object') ? r.data : {};
-    const ready = d.ready === true || d.ready === 1 || d.ready === 'true';
-    if (!ready) {
-      const why = 'MQTT 未就绪' + (d.err ? '（' + d.err + '）' : '') + ' —— 没配服务器/没网/平台不可达都会这样';
-      if (cfg.expectNet) throw new Error(why);
+    const st = (d.stat && typeof d.stat === 'object') ? d.stat : {};
+    // ⚠️ ready 只表示"配置齐全、能连"(mqttcfg.effective: ready = profile ~= nil),
+    // 不代表连上了。判断在线必须看 stat.connected, 否则无卡设备也会报 PASS。
+    const connected = st.connected === true;
+    if (!connected) {
+      const parts = [];
+      parts.push(d.ready === true ? '配置齐全' : '配置不全');
+      parts.push('want_run=' + (st.want_run === true));
+      if (st.failed) parts.push('failed=' + st.failed);
+      if (st.backoff) parts.push('backoff=' + st.backoff);
+      if (d.err) parts.push('err=' + d.err);
+      const why = 'MQTT 未连接（' + parts.join(', ') + '）'
+        + (st.want_run === true ? ' —— 已要求连接但没连上' : ' —— 当前没要求连接')
+        + '；无卡/未注网/平台不可达时正常';
+      if (cfg.expectNet && st.want_run === true) throw new Error(why);
       throw new Skip(why);
     }
-    return { ready: true, pub: d.pub, sub: d.sub };
+    return { connected: true, pub: st.pub, sub: st.sub };
   });
 
   // ---------------------------------------------------------------- 15 sniff
   await step('15 切 sniff + 推断（需总线流量）', async () => {
+    if (cfg.readOnly) throw new Skip('--read-only：不切 sniff（切档会问是否清空 ds_poll）');
     const r = await switchTo('#mcSniff', 'sniff', 12000, cfg.real ? 25000 : 20000);
     if (!r.ok) throw new Error('模式没切到 sniff（弹窗 ' + r.modals + ' 次）: ' + r.u.stMsg);
     await ev("document.querySelector('.tab-item[data-tab=\"tabSniff\"]').click(); return 1");
     await sleep(400);
     await click('#btnInfer');
-    const n = await waitFor(async () => {
-      const c = await ev(`
-        if (typeof S === 'undefined' || !S.infer) return 0;
-        return Array.isArray(S.infer) ? S.infer.length : Object.keys(S.infer).length;`);
-      return c > 0 ? c : null;
+    // ⚠️ S.infer 是个对象（regs/slaves/stat/total...，固定 10 个键），
+    // 不能用 Object.keys(S.infer).length 判"推断到东西了" —— 没有总线流量时
+    // 它照样有 10 个键。要看 total（本轮推断到的点数）。
+    const info = await waitFor(async () => {
+      const d = await ev(`
+        if (typeof S === 'undefined' || !S.infer) return { total: 0, rows: 0, stat: {} };
+        return {
+          total: Number(S.infer.total || 0),
+          rows: (S.infer.regs || []).length,
+          stat: S.infer.stat || {},
+        };`);
+      return (d && d.total > 0) ? d : null;
     }, 25000, 500);
     const u = await ui();
-    if (!n) {
+    if (!info) {
+      const d = await ev(`
+        if (typeof S === 'undefined' || !S.infer) return null;
+        return { total: Number(S.infer.total || 0), stat: S.infer.stat || {} };`);
       throw new Skip('推断表为空（' + (u.stMsg || u.toast)
-        + '）—— 总线上没有报文时正常：接上从站/让主站跑起来再测');
+        + (d ? '；total=' + d.total + ', stat=' + JSON.stringify(d.stat).slice(0, 160) : '')
+        + '）—— 总线上没有报文时正常，接上从站/让主站跑起来再测');
     }
-    return { inferred: n, stMsg: u.stMsg };
+    return { inferred: info.total, rows: info.rows, stMsg: u.stMsg };
   });
 
   // ---------------------------------------------------------------- 16 idle
   await step('16 切回 idle（并确认配置已复位）', async () => {
+    if (cfg.readOnly) throw new Skip('--read-only：不切空闲（切到空闲会复位用户配置）');
     const before = await ev("return (typeof S !== 'undefined') ? S.mode : null;");
     if (before === 'idle') {
       throw new Skip('设备本来就在 idle（前面没切到其它档），这一步验证不了"切档复位"');
@@ -502,6 +576,9 @@ async function runJourney(ctx) {
   // ---------------------------------------------------------------- 17 还原
   await step('17 还原现场配置', async () => {
     if (!cfg.restore) throw new Skip('--no-restore：不还原（设备保持空闲/空配置）');
+    // 设备原本就是空配置时,"还原"没有意义 —— 反而会把联调用的测试点写回去。
+    // 这种设备测完就该是空闲 + 空配置, 直接跳过。
+    if (originalRows === 0) throw new Skip('设备原本没有配置（0 个寄存器），保持空闲即可，不写入测试点');
     if (!exportedFile) throw new Skip('没有可还原的导出文件');
     const r = await switchTo('#mcPoll', 'manual', 10000, cfg.real ? 15000 : 12000);
     if (!r.ok) throw new Error('切回 manual 失败: ' + r.u.stMsg);
