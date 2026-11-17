@@ -122,6 +122,38 @@ end
 --   写成 not ret 会把所有正常保存都判成失败。
 local FSKV_VALUE_MAX = 4096
 
+-- ===== 写盘前的"连续块"预检 (2026-11-17 真机 60 点保存失败) =====
+--   现场(COM4, Air780, 开发版固件, 60 点配置):
+--     W:CBEGIN → RET:CBEGIN=OK max:4096 used:297056
+--     CSHARD 1..5 → 全 OK
+--     W:CFINISH   → RET:FAIL:CFG:分片5/5写入失败: fskv.set 拒写(值 961B):
+--                   not enough memory for buffer allocation
+--   开场时明明还有 4096B 连续块, 写到第 5 段就没了 —— 中间逐行
+--   json.encode 的碎渣 + "上传途中 iot 又把旧配置读回缓存"叠在一起。
+--   这次分配失败还会把 header 留在 st=w: 新配置不完整、旧配置读侧不认,
+--   设备等于没有可用配置, 直到用户再存一次。
+--
+--   所以写任何一笔之前先【真分配一次】探一遍:
+--     · 探法必须和 R:MEM / W:CBEGIN 同源(string.rep), 总空闲不是连续块;
+--     · 不够就先丢"马上要被换掉"的那份解码缓存, 再收两轮垃圾;
+--     · 还不够就【在动 header 之前】失败, 把老配置原样留着。
+local function probe_block(n)
+    collectgarbage("collect")          -- 上一轮的碎渣先收掉, 否则探不准
+    local ok, s = pcall(string.rep, "x", n)
+    return ok and type(s) == "string" and #s == n
+end
+
+local function ensure_block(n)
+    if n <= 0 then return true end
+    if probe_block(n) then return true end
+    local freed = M.drop_cache()
+    if probe_block(n) then
+        log.info("cfg", "写盘前腾出连续块:", n, "B, 丢解码缓存", freed, "项")
+        return true
+    end
+    return false, "连续块不足 " .. n .. "B" .. pool_tag()
+end
+
 local function kv_set(k, s, noflush)
     if not fskv then return false, "no fskv" end
     local n = type(s) == "string" and #s or 0
@@ -129,6 +161,13 @@ local function kv_set(k, s, noflush)
         log.warn("cfg", "value too big", k, n, "max", FSKV_VALUE_MAX)
         return false, "配置 " .. n .. "B 超 fskv 单值上限 " .. FSKV_VALUE_MAX .. "B"
     end
+    -- 值字符串已经在手, 但 C 层 fskv.set 还要再搬一块同样大的: 先确认搬得动
+    local okb, berr = ensure_block(n + 96)
+    if not okb then
+        log.warn("cfg", "fskv.set 前连续块不足:", k, n .. "B", tostring(berr))
+        return false, "fskv.set 前连续块不足(值 " .. n .. "B): " .. tostring(berr)
+    end
+    collectgarbage("collect")          -- 把探测用的那块还回去, 再交给 fskv.set
     local ok, ret = pcall(fskv.set, k, s)
     if not ok or ret == false then
         log.warn("cfg", "fskv.set failed:", k, n .. "B", brief(ret))
@@ -249,10 +288,11 @@ end
 --   段字节由 json.encode(整段) 再产一次 —— 一次分配正好一个段宽。
 local function shards_save(k, t)
     local rows = (type(t.regs) == "table") and t.regs or {}
-    local segs, cur, cur_sz = {}, {}, 2
+    local segs, seg_sz, cur, cur_sz = {}, {}, {}, 2
     local function close_seg()
         if #cur == 0 then return true end
         segs[#segs + 1] = cur
+        seg_sz[#seg_sz + 1] = cur_sz    -- 编码后的段宽(含 [ ] 和逗号), 预检用
         cur, cur_sz = {}, 2
         return true
     end
@@ -286,6 +326,19 @@ local function shards_save(k, t)
         if on and on > 0 then old_n = on end
     end
 
+    -- 动 header 之前先确认"最宽的那一段"写得进去。
+    --   中途才失败会把 header 留在 st=w: 新配置不完整、旧配置读侧不认,
+    --   设备等于没有可用配置(2026-11-17 真机 60 点就是这样)。宁可这里就
+    --   说"内存不够", 老配置一个字节都不动。
+    local worst = 0
+    for i = 1, #seg_sz do
+        if seg_sz[i] > worst then worst = seg_sz[i] end
+    end
+    local okb, berr = ensure_block(worst + 96)
+    if not okb then
+        return false, "写盘前连续块不够(最宽一段 " .. worst .. "B): " .. tostring(berr)
+    end
+
     head.v, head.n, head.st = SHARD_VER, n, SHARD_W
     local ok1, err1 = put_json(k, head, true)
     if not ok1 then return false, err1 end
@@ -294,6 +347,8 @@ local function shards_save(k, t)
         if not ok2 then
             return false, "分片" .. i .. "/" .. n .. "写入失败: " .. tostring(err2)
         end
+        -- 每段写完收一次: 逐行 json.encode 的碎渣别攒到"最后一段写不进"
+        collectgarbage("collect")
     end
     head.st = SHARD_R
     local ok3, err3 = put_json(k, head) -- 提交: 只有这一次 flush

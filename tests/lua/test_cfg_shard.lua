@@ -209,6 +209,19 @@ package.preload['json'] = function()
   }
 end
 
+-- ===== "连续块"探针替身 =====
+-- cfg.lua 写盘前用 string.rep 真分配一次探连续块(和真机 R:MEM / W:CBEGIN 同源),
+--   这里让它在 REP_ENFORCE 打开时按 LIMIT 抛, 才能测到"写盘前预检"这条路。
+--   默认关闭: 用例 6/8 要往 flash 里塞 3700B 的假老配置, 那不是固件分配。
+local real_rep = string.rep
+local REP_ENFORCE = false
+string.rep = function(s, n, ...)
+  if REP_ENFORCE and type(n) == 'number' and n > LIMIT then
+    error('not enough memory for buffer allocation')
+  end
+  return real_rep(s, n, ...)
+end
+
 -- cfg.lua 里 json_cache/cfg_ver 是模块级状态, 换用例要拿一份干净的实例;
 --   flash 也一起清空, 否则上一例的值会串进这一例(用例 5/6 自己要 seed 就在
 --   fresh 之后写 store)
@@ -447,6 +460,35 @@ do
   eq(last, 'ds_poll', '最后一笔也是 header(提交 st=r)')
   eq(store['ds_poll']:find('"st":"r"', 1, true) ~= nil, true, '落盘的 header 是已提交状态')
   eq(store['ds_poll']:find('"st":"w"', 1, true), nil, '已提交的 header 里不该再有 st=w')
+end
+
+-- ===== 10) 写盘前预检: 最宽一段都装不下时, header 一个字节都不许动 =====
+-- 2026-11-17 真机 60 点保存实测:
+--   W:CBEGIN → RET:CBEGIN=OK max:4096 used:297056
+--   W:CFINISH → RET:FAIL:CFG:分片5/5写入失败: fskv.set 拒写(值 961B):
+--               not enough memory for buffer allocation
+-- 写第 5 段才失败, header 早已被改成 st=w → 新配置不完整、旧配置读侧不认,
+-- 设备等于没有可用配置。现在预检要在【写 header 之前】拦下来。
+do
+  local cfg = fresh()
+  local ok = cfg.save_poll({ slave = 1, regs = rows(16, 1) })
+  eq(ok, true, '先存一份好配置当"老配置": ' .. tostring(ok))
+  local before = store['ds_poll']
+  local c0 = cfg.load_poll()
+  eq(c0 and #c0.regs or -1, 16, '老配置读得回 16 行')
+
+  REP_ENFORCE = true
+  LIMIT = 600           -- 连续块只剩 600B, 16 行最宽一段(≈1KB)必然装不下
+  local ok2, err2 = cfg.save_poll({ slave = 1, regs = rows(20, 1) })
+  REP_ENFORCE = false
+  eq(ok2, false, '连续块不够时必须判保存失败')
+  has(tostring(err2), '连续块', '失败原因说清是连续块不够: ' .. tostring(err2))
+  eq(store['ds_poll'], before, 'header 一个字节都没动(老配置原样在 flash 里)')
+
+  LIMIT = math.huge
+  local c, why = dofile('firmware/cfg.lua').load_poll()
+  ok_(why, '老配置还能读: ' .. tostring(why))
+  eq(c and #c.regs or -1, 16, '读回来的还是原来那 16 行')
 end
 
 if fails > 0 then
