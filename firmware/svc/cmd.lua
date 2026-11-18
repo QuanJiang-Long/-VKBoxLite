@@ -656,7 +656,20 @@ local function reg_cmds()
         -- 之前这里写 poll_src() 永远查 K_POLL, 前端拿 src='default' 误判
         -- "平台没下发", 实际 ds_pull 已经有平台配置. 用 slot 决定查哪个 src
         local src = (slot == SLOT_PULL) and cfgstore.pull_src() or cfgstore.poll_src()
-        reply_json("RET:CFG=", jencode({ cfg = cfg, slot = slot, src = src }))
+        -- ⚠️ 编码失败不许回 {}: 2026-11-18 真机 32 点, 存完 used 296536/307192,
+        --   jencode 分配不出那条 2KB 应答, 兜底回 RET:CFG={} —— 前端把它读成
+        --   "0 个寄存器", 用户以为配置丢了, 再点一次保存就把设备清空了。
+        --   和 R:VAL 同一条规矩(见 jencode_err 的说明): 拼不出来就如实报。
+        --   先丢解码缓存 + 收两轮垃圾再试一次: 要的那块常常正被缓存占着。
+        local s, jerr = jencode_err({ cfg = cfg, slot = slot, src = src })
+        if not s then
+            if cfgstore.drop_cache then pcall(cfgstore.drop_cache) end
+            collectgarbage("collect")
+            collectgarbage("collect")
+            s, jerr = jencode_err({ cfg = cfg, slot = slot, src = src })
+        end
+        if not s then return M.reply("RET:FAIL:CFG:" .. tostring(jerr)) end
+        reply_json("RET:CFG=", s)
     end)
 
     M.reg("W:CFG", function(arg)
@@ -935,7 +948,15 @@ local function reg_cmds()
         -- poll 没加载 = 没起过轮询, 回空表即可(前端 manual 档下 poll 必然已加载)
         local pm = pollmod(false)
         local regs = pm and pm.get_regs() or nil
-        reply_json("RET:REG=", jencode(regs or {}))
+        -- 同 R:CFG: 拼不出来就如实报, 不许回 RET:REG={} 冒充"一个寄存器都没有"
+        local s, jerr = jencode_err(regs or {})
+        if not s then
+            collectgarbage("collect")
+            collectgarbage("collect")
+            s, jerr = jencode_err(regs or {})
+        end
+        if not s then return M.reply("RET:FAIL:REG:" .. tostring(jerr)) end
+        reply_json("RET:REG=", s)
     end)
 
     M.reg("R:VAL", function()

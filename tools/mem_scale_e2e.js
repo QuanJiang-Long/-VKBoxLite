@@ -202,11 +202,34 @@ function buildCfg(n) {
       const mem = await cmd('R:MEM', 'MEM', 10000);
       const rows = await rowsNow();
 
-      const rec = { n, ok, rows, ms: Date.now() - t0, err };
+      // 读回校验: "存进去了" != "读得回来"。
+      //   2026-11-18 真机 32 点: W:CFINISH 回 OK, 但 R:CFG 在池子见底时被
+      //   jencode 兜底成 RET:CFG={} —— 前端显示 0 行, 用户以为配置丢了。
+      //   只测"保存成功"会把可用上限算高, 所以这里单独读一次设备。
+      let readBack = null, readBackErr = '';
+      try {
+        const rb = await cmd('R:CFG', 'CFG', 20000);
+        if (!rb.ok) readBackErr = String(rb.err || '读取失败');
+        else {
+          const d = rb.data || {};
+          const g = d.cfg && d.cfg.regs;
+          readBack = Array.isArray(g) ? g.length : Object.keys(g || {}).length;
+        }
+      } catch (e) { readBackErr = String(e.message || e); }
+
+      const rec = { n, ok, rows, ms: Date.now() - t0, err, readBack, readBackErr };
       // 行数对不上就是没真正导入（脚本判定问题），不能当 PASS
       if (ok && rows !== n) {
         rec.ok = false;
         rec.err = '导入后表格只有 ' + rows + ' 行（期望 ' + n + '）';
+        ok = false;
+      }
+      // 设备读不回来 = 这份配置现场用不了(前端刷新一次就显示 0 行, 再保存还会清空)
+      if (ok && readBack !== n) {
+        rec.ok = false;
+        rec.err = '保存成功但读回失败: ' + (readBack == null
+          ? (readBackErr || '设备没给出配置')
+          : ('只有 ' + readBack + ' 行（期望 ' + n + '）'));
         ok = false;
       }
       if (trace.ok) {
@@ -238,6 +261,7 @@ function buildCfg(n) {
       const warn = (rec.luaPct != null && rec.luaPct >= 95) ? '  ⚠ 池子只剩 ' + Math.round((rec.luaTotal - rec.luaUsed) / 1024) + 'KB' : '';
       console.log(label + (ok ? ' OK  ' : ' FAIL')
         + '  rows=' + rec.rows
+        + (rec.readBack != null ? '  读回=' + rec.readBack : '  读回=--')
         + (rec.peak != null ? '  W:CFG峰值=' + rec.peak + '/' + rec.pool + ' (' + rec.peakPct + '% @' + rec.peakStage + ')' : '  W:CFG峰值=--')
         + (rec.luaUsed != null ? '  Lua=' + rec.luaUsed + '/' + rec.luaTotal + ' (' + rec.luaPct + '%)' : '')
         + (rec.maxBlock != null ? '  max=' + rec.maxBlock : '')
@@ -252,12 +276,14 @@ function buildCfg(n) {
     // ---- 汇总 ----
     console.log('');
     console.log('===== 内存规模结果 =====');
-    console.log('  N    W:CFG峰值(占池)      Lua水位    最大连续块  结果');
+    console.log('  N    W:CFG峰值(占池)      Lua水位    最大连续块  读回      结果');
     for (const r of results) {
       const peak = r.peak != null ? (r.peak + '/' + r.pool + ' ' + r.peakPct + '%') : '--';
       const lua = r.luaUsed != null ? (r.luaPct + '%') : '--';
+      const rb = (r.readBack == null ? '--' : String(r.readBack + ' 行'));
       console.log('  ' + String(r.n).padEnd(4) + ' ' + peak.padEnd(20) + ' ' + lua.padEnd(10) + ' '
-        + String(r.maxBlock != null ? r.maxBlock : '--').padEnd(11) + (r.ok ? 'PASS' : 'FAIL'));
+        + String(r.maxBlock != null ? r.maxBlock : '--').padEnd(11) + rb.padEnd(9)
+        + (r.ok ? 'PASS' : 'FAIL'));
     }
     const best = results.filter(r => r.ok).pop();
     if (best && best.peakPct != null) {
