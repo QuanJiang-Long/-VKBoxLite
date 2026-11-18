@@ -2641,3 +2641,22 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
   `clear_all()`——它按上限裁剪，不清空，用错函数等于没改。
   这一格腾出来的量正好是"下一次保存的入场费"，所以和分片上行放进同一版实测。
 
+- **读回路径：不重解、不整条编码（2026-11-18，60 点读不回）**。写侧（`W:CBEGIN` /
+  `W:CFINISH`）修好之后 60 点能存进去，但紧接着的 `R:CFG` 仍回
+  `RET:FAIL:CFG:内存/内部异常: not enough memory`。两处浪费，各治一处：
+  1) `cfg.lua` 的 `save_xxx_norm` 写成功后，把**刚提交的那份归一化表**挂进
+     `norm_cache`，`load_*` 先查它。没有这一条，读回要重读 fskv + 重解整表 +
+     再 `normalize` 造第二张表（60 点约 12KB），池子只剩 6.7KB 时必然失败。
+     挂的是 `poll` 正在用的同一张表，不多占内存；`kv_set` / `slot_clear` /
+     动笔前 / `drop_cache()` 全部同步作废。**只挂 `_norm` 路径**（那条路的入参
+     本来就是归一化产物），普通 `save_xxx` 不挂。
+  2) `cmd.lua` 的 `R:CFG` / `R:REG` 改成**边编边发**（`tx_stream`）：逐行
+     `jencode`，凑够 512B 就写一次串口，峰值与点数无关（原来整条 4KB 要给
+     `json.encode` 一块连续内存；就算先逐行编再一次性发，60 个小串也有 ~7KB）。
+     失败语义：一个字都没上串口才回 `RET:FAIL:CFG/REG:<原因 pool x/y>`；
+     已经写出去一部分则补 `\r\n` 收尾 + 日志（前端按解析失败重试），
+     绝不把半张表当完整配置发。
+  护栏：`test_cfg_shard.lua` 第 11 例、`test_cmd_cfgfail.lua`、`test_cmd_reg.lua`。
+  现场数据与"下一处卡点（`R:VAL` 的 `snapshot()` 本身要新建 60 行表）"
+  见 `docs/real-device-e2e.md` §8。
+

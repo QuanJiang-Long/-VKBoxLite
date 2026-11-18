@@ -213,6 +213,138 @@ local function jdecode_err(s)
     return nil, brief(ok and "解码结果为空" or t) .. pool_tag()
 end
 
+-- 流式发送器: 边拼边发, 峰值 = 一个 512B 缓冲 (2026-11-18)。
+--   为什么不能"攒成整条再发": 60 点的 R:CFG 应答 ~6.5KB, 而存完只剩 6.7KB,
+--   连"先攒起来"这一步都做不到 —— 逐行 encode 出来的一堆小串也各有串头开销。
+--   这里凑够 512B 就写一次串口, 内存与点数无关。
+--   安全性沿用 tx_frags 的结论: uart.write 是 C 调用不让出 CPU, 段与段之间
+--   没有 yield 点, 别的任务插不进来; 收端一律按 \r\n 切行, 分几次写对前端透明。
+--
+-- abort(msg) 的返回值:
+--   false, msg = 一个字都没上串口(还在缓冲里或第一段就失败) —— 调用方还能
+--                干干净净回一条 RET:FAIL:xxx
+--   true       = 已经写了一部分才失败: 补个 \r\n 把这一行收掉(前端按解析失败
+--                处理并重试), 日志里留原因。绝不把半张表当完整数据发。
+local function tx_stream(tag)
+    local st = { buf = {}, size = 0, sent = 0 }
+    function st.flush()
+        if st.size == 0 then return end
+        local s = table.concat(st.buf)
+        st.buf, st.size = {}, 0
+        pcall(uart.write, UART_ID, s)
+        st.sent = st.sent + #s
+    end
+    function st.add(s)
+        st.buf[#st.buf + 1] = s
+        st.size = st.size + #s
+        if st.size >= 512 then st.flush() end
+    end
+    function st.abort(msg)
+        if st.sent == 0 then
+            st.buf, st.size = {}, 0
+            return false, msg
+        end
+        st.flush()
+        pcall(uart.write, UART_ID, "\r\n")
+        log.warn("cmd", tag, "发送中途失败:", brief(msg))
+        return true
+    end
+    return st
+end
+
+-- 把一份配置【边编边发】, 既不整对象 json.encode, 也不先把整条攒出来
+-- (2026-11-18, 真机 60 点读不回)。
+--
+-- 现场: 60 点存完 used 300520/307192(只剩 6.7KB), R:CFG 要把 {cfg,slot,src}
+--   一次 encode 成 ~4KB 的串, 还要留 encode 内部的临时串 —— 池子拿不出来,
+--   设备回 RET:FAIL:CFG:内存/内部异常: not enough memory。
+--   逐行 encode 之后峰值只剩"最大一行"(~90B), 再用 tx_stream 发出去。
+-- 返回值: true / false, 原因 —— 见 tx_stream 的 abort。
+local function cfg_reply_stream(cfg, slot, src)
+    local st = tx_stream("R:CFG")
+    local add, abort = st.add, st.abort
+    local function enc(v, what)
+        local s, e = jencode_err(v)
+        if not s then return nil, what .. " 编码失败: " .. tostring(e) end
+        return s
+    end
+
+    add("RET:CFG={\"cfg\":{")
+    local first = true
+    -- 标量字段: 数字直接写(有限数), 字符串/布尔走 encode(单个值只有几十字节)
+    local keys = {}
+    for k, v in pairs(cfg) do
+        local tv = type(v)
+        if k ~= "regs" and (tv == "number" or tv == "string" or tv == "boolean") then
+            keys[#keys + 1] = k
+        end
+    end
+    table.sort(keys)
+    for i = 1, #keys do
+        local k = keys[i]
+        local v = cfg[k]
+        local jv
+        if type(v) == "number" then
+            if v ~= v or v == math.huge or v == -math.huge then
+                return abort("字段 " .. k .. " 不是有限数")
+            end
+            jv = tostring(v)
+        else
+            local e
+            jv, e = enc(v, "字段 " .. k)
+            if not jv then return abort(e) end
+        end
+        if not first then add(",") end
+        add('"' .. k .. '":' .. jv)
+        first = false
+    end
+    -- 寄存器行: 一行一个 encode, 峰值 = 最大一行
+    if type(cfg.regs) == "table" then
+        if not first then add(",") end
+        add('"regs":[')
+        for i = 1, #cfg.regs do
+            if i > 1 then add(",") end
+            local s, e = enc(cfg.regs[i], "第 " .. i .. " 行")
+            if not s then return abort(e) end
+            add(s)
+        end
+        add("]")
+        first = false
+    end
+    add('},"slot":')
+    local ss, se = enc(slot, "slot")
+    if not ss then return abort(se) end
+    add(ss)
+    add(',"src":')
+    local rs, re = enc(src, "src")
+    if not rs then return abort(re) end
+    add(rs)
+    add("}\r\n")
+    st.flush()
+    log.debug("cmd", "tx:", st.sent, "B:", "RET:CFG=(流式)")
+    return true
+end
+
+-- 逐行发一个 JSON 数组应答(R:REG)。60 点在池子见底时, 整表 encode(约 7KB)
+--   和 R:CFG 是同一个死法; 这里逐行 encode + 流式写, 峰值只剩最大一行。
+--   arr 本身就是 poll 正在用的那张表, 逐行写不复制它。
+local function reply_array_stream(key, arr)
+    local st = tx_stream(key)
+    st.add(key .. "[")
+    if type(arr) == "table" then
+        for i = 1, #arr do
+            if i > 1 then st.add(",") end
+            local s, e = jencode_err(arr[i])
+            if not s then return st.abort("第 " .. i .. " 行编码失败: " .. tostring(e)) end
+            st.add(s)
+        end
+    end
+    st.add("]\r\n")
+    st.flush()
+    log.debug("cmd", "tx:", st.sent, "B:", key .. "(流式)")
+    return true
+end
+
 local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
 
 -- W:MODE 的槽清单拼成 k:v 段。前端 protocol.js 按 ';' 分段、段内按【第一个】
@@ -656,20 +788,21 @@ local function reg_cmds()
         -- 之前这里写 poll_src() 永远查 K_POLL, 前端拿 src='default' 误判
         -- "平台没下发", 实际 ds_pull 已经有平台配置. 用 slot 决定查哪个 src
         local src = (slot == SLOT_PULL) and cfgstore.pull_src() or cfgstore.poll_src()
-        -- ⚠️ 编码失败不许回 {}: 2026-11-18 真机 32 点, 存完 used 296536/307192,
-        --   jencode 分配不出那条 2KB 应答, 兜底回 RET:CFG={} —— 前端把它读成
-        --   "0 个寄存器", 用户以为配置丢了, 再点一次保存就把设备清空了。
-        --   和 R:VAL 同一条规矩(见 jencode_err 的说明): 拼不出来就如实报。
-        --   先丢解码缓存 + 收两轮垃圾再试一次: 要的那块常常正被缓存占着。
-        local s, jerr = jencode_err({ cfg = cfg, slot = slot, src = src })
-        if not s then
+        -- ⚠️ 编码失败不许回 {}: 2026-11-18 真机 32 点, jencode 兜底回 RET:CFG={}
+        --   —— 前端读成"0 个寄存器", 用户以为配置丢了, 再点一次保存就清空设备。
+        --   应答改成【边编边发】(见 cfg_reply_stream): 60 点那次失败的根子是
+        --   "整条应答(4KB)要一块连续内存", 流式的峰值只有一个 512B 发送缓冲,
+        --   与点数无关。
+        --   第一次一个字都没发出去时, 先丢解码缓存 + 收两轮垃圾再试一次
+        --   (要的那块常被缓存占着), 还不行就如实报原因。
+        local sent_ok, ferr = cfg_reply_stream(cfg, slot, src)
+        if not sent_ok then
             if cfgstore.drop_cache then pcall(cfgstore.drop_cache) end
             collectgarbage("collect")
             collectgarbage("collect")
-            s, jerr = jencode_err({ cfg = cfg, slot = slot, src = src })
+            sent_ok, ferr = cfg_reply_stream(cfg, slot, src)
         end
-        if not s then return M.reply("RET:FAIL:CFG:" .. tostring(jerr)) end
-        reply_json("RET:CFG=", s)
+        if not sent_ok then return M.reply("RET:FAIL:CFG:应答拼不出来: " .. tostring(ferr)) end
     end)
 
     M.reg("W:CFG", function(arg)
@@ -948,15 +1081,15 @@ local function reg_cmds()
         -- poll 没加载 = 没起过轮询, 回空表即可(前端 manual 档下 poll 必然已加载)
         local pm = pollmod(false)
         local regs = pm and pm.get_regs() or nil
-        -- 同 R:CFG: 拼不出来就如实报, 不许回 RET:REG={} 冒充"一个寄存器都没有"
-        local s, jerr = jencode_err(regs or {})
-        if not s then
+        -- 同 R:CFG: 拼不出来就如实报, 不许回 RET:REG={} 冒充"一个寄存器都没有";
+        --   60 点整表 encode 要 ~7KB 连续块, 这里改成逐行 encode + 流式写。
+        local ok, jerr = reply_array_stream("RET:REG=", regs or {})
+        if not ok then
             collectgarbage("collect")
             collectgarbage("collect")
-            s, jerr = jencode_err(regs or {})
+            ok, jerr = reply_array_stream("RET:REG=", regs or {})
         end
-        if not s then return M.reply("RET:FAIL:REG:" .. tostring(jerr)) end
-        reply_json("RET:REG=", s)
+        if not ok then return M.reply("RET:FAIL:REG:" .. tostring(jerr)) end
     end)
 
     M.reg("R:VAL", function()

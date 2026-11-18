@@ -72,6 +72,7 @@ end
 package.preload["cfg"] = function()
     return { load_poll = function() return { regs = {} } end,
              poll_src = function() return "poll" end,
+             load_alias = function() return { regs = {} } end,
              load_sys = function() return { boot_mode = "idle" } end }
 end
 package.preload["iot/mqttcfg"] = function() return {} end
@@ -101,11 +102,14 @@ local function ask(line)
 end
 
 -- ===== 1) 应答体 3919B: 串口上的字节必须和整行发送完全一致 =====
+--   载体用 R:SALIAS(它仍然是一次 jencode 出一整串, 走 reply_json 分片写)。
+--   R:CFG / R:REG 2026-11-18 起改成【边编边发】, 形状不同, 由
+--   test_cmd_cfgfail.lua 与 test_cmd_reg.lua 分别钉。
 BODY = string.rep("x", 3919)
-local ok, out = ask("R:CFG")
-check("R:CFG 有应答", ok and out ~= "", "没发出东西")
-check("拼回去和整行一字不差", out == "RET:CFG=" .. BODY .. "\r\n",
-    string.format("长度 %d / 期望 %d", #out, #BODY + 12))
+local ok, out = ask("R:SALIAS")
+check("R:SALIAS 有应答", ok and out ~= "", "没发出东西")
+check("拼回去和整行一字不差", out == "RET:SALIAS=" .. BODY .. "\r\n",
+    string.format("长度 %d / 期望 %d", #out, #BODY + 13))
 check("行尾带 \\r\\n", out:sub(-2) == "\r\n", string.format("%q", out:sub(-4)))
 local segs = #writes
 local longest = 0
@@ -125,9 +129,9 @@ end
 local dirty = net_bytes(function()
     writes = {}
     logs = {}
-    cmd.handle("R:CFG")
+    cmd.handle("R:SALIAS")
 end)
-print(string.format("R:CFG(应答体 %dB) 一次发送净分配 %d 字节", #BODY, math.floor(dirty)))
+print(string.format("R:SALIAS(应答体 %dB) 一次发送净分配 %d 字节", #BODY, math.floor(dirty)))
 check("净分配不超过半份应答体", dirty < #BODY * 0.5,
     string.format("净分配 %d / 应答体 %d", math.floor(dirty), #BODY))
 
@@ -156,7 +160,7 @@ check("R:BOOTMODE 内容没变", s3:gsub("\r\n$", "") == "RET:BOOTMODE=idle", s3
 check("R:BOOTMODE 行尾带 \\r\\n", s3:sub(-2) == "\r\n", string.format("%q", s3:sub(-4)))
 
 -- ===== 5) 日志里的长度/预览 = 串口上的实际字节 =====
-ask("R:CFG")
+ask("R:SALIAS")
 local total = 0
 for i = 1, #writes do total = total + #writes[i] end
 local logged, preview
@@ -167,7 +171,7 @@ check("日志长度 = 实发字节数", logged == total,
     string.format("日志 %s / 实发 %d", tostring(logged), total))
 check("预览掐在 80 字节内", preview and #preview <= 80,
     preview and #preview or "没有预览")
-check("预览带着应答头", preview and preview:sub(1, 8) == "RET:CFG=",
+check("预览带着应答头", preview and preview:sub(1, 11) == "RET:SALIAS=",
     string.format("%q", tostring(preview and preview:sub(1, 40))))
 
 -- ===== 6) R:MEM: 现场日志只留前 80 字节, 应答必须压进去 =====

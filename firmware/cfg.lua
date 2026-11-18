@@ -88,6 +88,15 @@ end
 --   json_cache[k] = nil 会写到全局表上, 缓存永远不失效。
 local json_cache = {}   -- fskv key -> 解码后的原始表
 
+-- ⚠️ 2026-11-18 (真机 60 点读不回): 【已归一化】的那一份。
+--   只由 save_xxx_norm 的成功提交填 —— 那条路上落盘的表就是 W:CFINISH 解码
+--   出来、随后交给 poll 跑的那一张, 挂在这里不多占一个字节。
+--   为什么光有 json_cache 不够: load_* 命中原始缓存之后仍要 normalize 一遍
+--   (见 load_* 里的说明, 缓存的是"原始表"), 60 点又造一张 ~12KB 的表 ——
+--   真机池子只剩 6.7KB 时照样失败。这里挂的是归一化产物, 读回直接给。
+--   失效点和 json_cache 完全同步(kv_set / slot_clear / 动笔前 / drop_cache)。
+local norm_cache = {}   -- fskv key -> 已归一化的表(调用方只读)
+
 -- 12-fix-9 (2026-10-29): 配置版本号。写盘就 +1。
 --   给别的模块当缓存键用(别名映射一天可能只改一次, 不该每次 R:INFER
 --   都重建一遍 128 条的映射表 —— 那是十几 KB 的垃圾/次)。
@@ -109,6 +118,10 @@ function M.drop_cache()
     local n = 0
     for k in pairs(json_cache) do
         json_cache[k] = nil
+        n = n + 1
+    end
+    for k in pairs(norm_cache) do
+        norm_cache[k] = nil
         n = n + 1
     end
     return n
@@ -179,6 +192,7 @@ local function kv_set(k, s, noflush)
     -- 只有真写进去了才动缓存/版本号: 写失败时 fskv 里的内容没变,
     -- 清缓存+涨版本号等于白让所有下游解码缓存失效一遍
     json_cache[k] = nil   -- 12-fix-3: 写盘了, 解码缓存必须失效
+    norm_cache[k] = nil   -- 2026-11-18: 归一化缓存同理(下次读回看 flash 真实状态)
     cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号跟着涨(别名映射缓存靠它失效)
     -- noflush: 分片写要连写好几个键, 逐键 flush 等于一次保存擦一遍 flash。
     --   中间各段传 true, 由 shards_save 在"提交"那一下统一 flush
@@ -399,9 +413,28 @@ local function load_json(k, default, shard)
     return c
 end
 
-local function save_json(k, t, shard)
+local function save_json(k, t, shard, norm_out)
     if not json then return false, "no json lib" end
-    if shard then return shards_save(k, t) end
+    -- 动笔前就作废"已归一化"那份: 写失败时 flash 里可能已经是半成品
+    --   (header 已被改成 st=w), 这时再拿 RAM 里的旧表顶上去 = 让设备
+    --   以为有一份重启后就不存在的配置。
+    norm_cache[k] = nil
+    if shard then
+        local ok, err = shards_save(k, t)
+        -- ⚠️ 2026-11-18 (真机 60 点读不回): 写成功后把【已归一化】的这份挂进
+        --   norm_cache。kv_set 落盘时会作废 json_cache(原始表), 于是紧接着的
+        --   第一次 R:CFG 要重读 fskv + 重解 + 再 normalize 一遍 —— 60 点就是
+        --   连着两张 ~12KB 的表, 池子只剩 6.7KB 时必然失败, 现场那条是:
+        --     R:CFG → RET:FAIL:CFG:内存/内部异常: not enough memory
+        --   挂进去的是【刚提交、poll 正在用的同一个表】(不是复制), 不多占一字节。
+        --   ⚠️ 只挂 'norm' 路径: 那条路的入参本来就是归一化产物; 普通 save_xxx
+        --   的入参是原始表, 挂进 norm_cache 等于把"没归一化"的东西当归一化用。
+        --   也【不】往 json_cache 里挂: 那份缓存的契约是"flash 里那串的解码结果",
+        --   归一化表放进去就把两条缓存的语义搅在一起了(见上面 JSON 缓存的说明)。
+        --   写失败时不挂: fskv 里可能已经是半成品(header st=w), 必须回 flash 看。
+        if ok and norm_out then norm_cache[k] = t end
+        return ok, err
+    end
     local ok, s = pcall(json.encode, t)
     -- ⚠️ "encode fail" 这个前缀一个字都不能动: 上位机按它认这条失败。
     --   后面必须跟真原因 —— 11-12 现场第二次保存死在这里(不是 fskv):
@@ -416,7 +449,10 @@ local function save_json(k, t, shard)
     -- 曾设 512, 结果 5 个寄存器就超限, W:CFG 一直回 too large,
     -- 前端只看到"保存失败"却查不出原因
     if #s > 16384 then return false, "too large" end
-    return kv_set(k, s)
+    local ok, err = kv_set(k, s)
+    -- 同分片路径: 只挂"已归一化"的那份(见上面那段说明)
+    if ok and norm_out then norm_cache[k] = t end
+    return ok, err
 end
 
 M.default_poll = {
@@ -702,6 +738,11 @@ local SECTIONS = {
 
 for name, sec in pairs(SECTIONS) do
     M["load_" .. name] = function()
+        -- ⚠️ 2026-11-18: 刚提交的那份已经是归一化过的, 直接给(见 norm_cache 的说明)。
+        --   没有这一条, 60 点在真机上"存得进、读不回": 命中原始缓存之后
+        --   normalize 还要再造一张 ~12KB 的表, 而当时池子只剩 6.7KB。
+        local nc = norm_cache[sec.key]
+        if nc ~= nil then return nc end
         local raw, serr = load_json(sec.key, {}, sec.shard)
         if serr then
             -- 段没取齐/还没提交。这时 flash 里那几行很可能一个字没坏, 只是
@@ -739,7 +780,7 @@ for name, sec in pairs(SECTIONS) do
     --   normalize 一次 —— 那 128 个寄存器表(~30KB)白造一遍, 池子只剩几 KB
     --   时就是压死的一根。n 已是 norm 的产物, 落盘内容和 save_xxx 逐字节相同
     M["save_" .. name .. "_norm"] = function(n)
-        return save_json(sec.key, n, sec.shard)
+        return save_json(sec.key, n, sec.shard, true)
     end
 end
 
@@ -834,6 +875,7 @@ local function slot_clear(k, shard)
     local sok, serr = pcall(fskv.set, k, "")
     if not sok then return false, "清不掉: " .. brief(serr) end
     json_cache[k] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
+    norm_cache[k] = nil   -- 2026-11-18: 归一化缓存同理
     cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号也要涨(别名映射缓存靠它失效)
     for i = 1, n do
         pcall(fskv.set, shard_key(k, i), "")

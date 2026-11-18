@@ -27,6 +27,7 @@ local FSKV_MAX = 4096   -- fskv 单值硬顶(C 层), 与 cfg.lua 的常量同值
 
 local store = {}        -- fskv 的"flash": key -> 存进去的那串
 local set_log = {}      -- 本次保存的写序, 用来验两阶段提交
+local GETS = 0          -- fskv.get 被调了几次(验"存完读回不再重解")
 local LIMIT = math.huge -- 模拟"当前还能切出多大的连续块"; 现场最坏 = 2048
 local PEAK = 0          -- 本用例内成功分配过的最大尺寸(= 真机上的 alloc 请求)
 local COMMIT_FAIL = false
@@ -178,6 +179,7 @@ package.preload['fskv'] = function()
   return {
     init = function() end,
     get = function(k)
+      GETS = GETS + 1
       local v = store[k]
       if v == nil or v == '' then return nil end
       return alloc(v) -- C 层要把整块搬进 Lua 字符串: 尺寸不够就抛
@@ -229,6 +231,7 @@ local function fresh()
   for k in pairs(store) do store[k] = nil end
   PEAK, LIMIT, COMMIT_FAIL = 0, math.huge, false
   set_log = {}
+  GETS = 0
   return dofile('firmware/cfg.lua')
 end
 
@@ -489,6 +492,45 @@ do
   local c, why = dofile('firmware/cfg.lua').load_poll()
   ok_(why, '老配置还能读: ' .. tostring(why))
   eq(c and #c.regs or -1, 16, '读回来的还是原来那 16 行')
+end
+
+-- ===== 11) 存完读回: 不许再把整张表重解一遍 (2026-11-18, 60 点读不回) =====
+-- 真机 60 点: 存完 used 300520/307192(只剩 6.7KB), R:CFG 直接
+--   RET:FAIL:CFG:内存/内部异常: not enough memory。
+--   根子是"写盘把缓存作废了", 紧接着的读要重读 fskv + 重解 + 再 normalize
+--   一遍 —— 60 点就是连着两张 ~12KB 的表。
+--   save_xxx_norm 落盘的那张就是随后交给 poll 跑的那张, 挂住它读回 0 分配。
+do
+  local cfg = fresh()
+  LIMIT = 2048
+  local n = cfg.normalize_poll({ slave = 2, baud = 9600, interval_ms = 3000, regs = rows(40, 1) })
+  eq(cfg.save_poll_norm(n), true, '40 行(已归一化)存得下')
+
+  GETS, PEAK = 0, 0
+  local c = cfg.load_poll()
+  eq(c == n, true, '读回的是刚提交的同一张表(不复制)')
+  eq(GETS, 0, '读回没有再读 fskv(读一次 = 整块重解一遍)')
+  eq(PEAK, 0, '读回 0 分配')
+  eq(c and #c.regs or -1, 40, '内容还是 40 行')
+
+  -- 缓存必须能被作废: 丢了之后回到 flash 重读, 内容一样
+  cfg.drop_cache()
+  local c2, w2 = cfg.load_poll()
+  ok_(w2, '丢缓存后重读不带原因: ' .. tostring(w2))
+  eq(c2 and #c2.regs or -1, 40, '丢缓存后重读仍是 40 行')
+  eq(GETS > 0, true, '丢缓存后确实回到 fskv 读了')
+
+  -- 写失败时不许拿 RAM 里的旧表顶: flash 那边已经是 st=w 的半成品
+  --   (set_log 要清: 替身靠"同一键写两次"模拟提交失败, 上一笔保存的记录
+  --    会让第一笔 header 写就被拦下 —— 那就测不到"提交那一步"了)
+  set_log = {}
+  COMMIT_FAIL = true
+  local ok3 = cfg.save_poll_norm({ slave = 2, regs = rows(6, 1) })
+  COMMIT_FAIL = false
+  eq(ok3, false, '提交失败判失败')
+  local c3, w3 = cfg.load_poll()
+  has(w3, '未提交', '失败后读回必须看 flash 的真实状态, 不许拿 RAM 旧表顶')
+  eq(c3 == nil or #(c3.regs or {}) ~= 6, true, '不许把没提交的 6 行读出来')
 end
 
 if fails > 0 then
