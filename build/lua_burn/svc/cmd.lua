@@ -213,6 +213,138 @@ if ok and t ~= nil then return t end
 return nil, brief(ok and "解码结果为空" or t) .. pool_tag()
 end
 
+
+
+
+
+
+
+
+
+
+
+
+
+local function tx_stream(tag)
+local st = { buf = {}, size = 0, sent = 0 }
+function st.flush()
+if st.size == 0 then return end
+local s = table.concat(st.buf)
+st.buf, st.size = {}, 0
+pcall(uart.write, UART_ID, s)
+st.sent = st.sent + #s
+end
+function st.add(s)
+st.buf[#st.buf + 1] = s
+st.size = st.size + #s
+if st.size >= 512 then st.flush() end
+end
+function st.abort(msg)
+if st.sent == 0 then
+st.buf, st.size = {}, 0
+return false, msg
+end
+st.flush()
+pcall(uart.write, UART_ID, "\r\n")
+log.warn("cmd", tag, "发送中途失败:", brief(msg))
+return true
+end
+return st
+end
+
+
+
+
+
+
+
+
+
+local function cfg_reply_stream(cfg, slot, src)
+local st = tx_stream("R:CFG")
+local add, abort = st.add, st.abort
+local function enc(v, what)
+local s, e = jencode_err(v)
+if not s then return nil, what .. " 编码失败: " .. tostring(e) end
+return s
+end
+
+add("RET:CFG={\"cfg\":{")
+local first = true
+
+local keys = {}
+for k, v in pairs(cfg) do
+local tv = type(v)
+if k ~= "regs" and (tv == "number" or tv == "string" or tv == "boolean") then
+keys[#keys + 1] = k
+end
+end
+table.sort(keys)
+for i = 1, #keys do
+local k = keys[i]
+local v = cfg[k]
+local jv
+if type(v) == "number" then
+if v ~= v or v == math.huge or v == -math.huge then
+return abort("字段 " .. k .. " 不是有限数")
+end
+jv = tostring(v)
+else
+local e
+jv, e = enc(v, "字段 " .. k)
+if not jv then return abort(e) end
+end
+if not first then add(",") end
+add('"' .. k .. '":' .. jv)
+first = false
+end
+
+if type(cfg.regs) == "table" then
+if not first then add(",") end
+add('"regs":[')
+for i = 1, #cfg.regs do
+if i > 1 then add(",") end
+local s, e = enc(cfg.regs[i], "第 " .. i .. " 行")
+if not s then return abort(e) end
+add(s)
+end
+add("]")
+first = false
+end
+add('},"slot":')
+local ss, se = enc(slot, "slot")
+if not ss then return abort(se) end
+add(ss)
+add(',"src":')
+local rs, re = enc(src, "src")
+if not rs then return abort(re) end
+add(rs)
+add("}\r\n")
+st.flush()
+log.debug("cmd", "tx:", st.sent, "B:", "RET:CFG=(流式)")
+return true
+end
+
+
+
+
+local function reply_array_stream(key, arr)
+local st = tx_stream(key)
+st.add(key .. "[")
+if type(arr) == "table" then
+for i = 1, #arr do
+if i > 1 then st.add(",") end
+local s, e = jencode_err(arr[i])
+if not s then return st.abort("第 " .. i .. " 行编码失败: " .. tostring(e)) end
+st.add(s)
+end
+end
+st.add("]\r\n")
+st.flush()
+log.debug("cmd", "tx:", st.sent, "B:", key .. "(流式)")
+return true
+end
+
 local function trim(s) return (s:gsub("^%s*(.-)%s*$", "%1")) end
 
 
@@ -661,15 +793,16 @@ local src = (slot == SLOT_PULL) and cfgstore.pull_src() or cfgstore.poll_src()
 
 
 
-local s, jerr = jencode_err({ cfg = cfg, slot = slot, src = src })
-if not s then
+
+
+local sent_ok, ferr = cfg_reply_stream(cfg, slot, src)
+if not sent_ok then
 if cfgstore.drop_cache then pcall(cfgstore.drop_cache) end
 collectgarbage("collect")
 collectgarbage("collect")
-s, jerr = jencode_err({ cfg = cfg, slot = slot, src = src })
+sent_ok, ferr = cfg_reply_stream(cfg, slot, src)
 end
-if not s then return M.reply("RET:FAIL:CFG:" .. tostring(jerr)) end
-reply_json("RET:CFG=", s)
+if not sent_ok then return M.reply("RET:FAIL:CFG:应答拼不出来: " .. tostring(ferr)) end
 end)
 
 M.reg("W:CFG", function(arg)
@@ -949,14 +1082,14 @@ M.reg("R:REG", function()
 local pm = pollmod(false)
 local regs = pm and pm.get_regs() or nil
 
-local s, jerr = jencode_err(regs or {})
-if not s then
+
+local ok, jerr = reply_array_stream("RET:REG=", regs or {})
+if not ok then
 collectgarbage("collect")
 collectgarbage("collect")
-s, jerr = jencode_err(regs or {})
+ok, jerr = reply_array_stream("RET:REG=", regs or {})
 end
-if not s then return M.reply("RET:FAIL:REG:" .. tostring(jerr)) end
-reply_json("RET:REG=", s)
+if not ok then return M.reply("RET:FAIL:REG:" .. tostring(jerr)) end
 end)
 
 M.reg("R:VAL", function()

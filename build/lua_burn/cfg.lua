@@ -91,6 +91,15 @@ local json_cache = {}   -- fskv key -> 解码后的原始表
 
 
 
+
+
+
+
+local norm_cache = {}   -- fskv key -> 已归一化的表(调用方只读)
+
+
+
+
 local cfg_ver = 0
 
 function M.version() return cfg_ver end
@@ -109,6 +118,10 @@ function M.drop_cache()
 local n = 0
 for k in pairs(json_cache) do
 json_cache[k] = nil
+n = n + 1
+end
+for k in pairs(norm_cache) do
+norm_cache[k] = nil
 n = n + 1
 end
 return n
@@ -179,6 +192,7 @@ end
 
 
 json_cache[k] = nil   -- 12-fix-3: 写盘了, 解码缓存必须失效
+norm_cache[k] = nil   -- 2026-11-18: 归一化缓存同理(下次读回看 flash 真实状态)
 cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号跟着涨(别名映射缓存靠它失效)
 
 
@@ -399,9 +413,28 @@ json_cache[k] = c
 return c
 end
 
-local function save_json(k, t, shard)
+local function save_json(k, t, shard, norm_out)
 if not json then return false, "no json lib" end
-if shard then return shards_save(k, t) end
+
+
+
+norm_cache[k] = nil
+if shard then
+local ok, err = shards_save(k, t)
+
+
+
+
+
+
+
+
+
+
+
+if ok and norm_out then norm_cache[k] = t end
+return ok, err
+end
 local ok, s = pcall(json.encode, t)
 
 
@@ -416,7 +449,10 @@ if not s then return false, "encode fail(无返回)" end
 
 
 if #s > 16384 then return false, "too large" end
-return kv_set(k, s)
+local ok, err = kv_set(k, s)
+
+if ok and norm_out then norm_cache[k] = t end
+return ok, err
 end
 
 M.default_poll = {
@@ -702,6 +738,11 @@ infer = { key = K_INFER, norm = M.normalize_infer, default = M.default_infer, sh
 
 for name, sec in pairs(SECTIONS) do
 M["load_" .. name] = function()
+
+
+
+local nc = norm_cache[sec.key]
+if nc ~= nil then return nc end
 local raw, serr = load_json(sec.key, {}, sec.shard)
 if serr then
 
@@ -739,7 +780,7 @@ end
 
 
 M["save_" .. name .. "_norm"] = function(n)
-return save_json(sec.key, n, sec.shard)
+return save_json(sec.key, n, sec.shard, true)
 end
 end
 
@@ -834,6 +875,7 @@ end
 local sok, serr = pcall(fskv.set, k, "")
 if not sok then return false, "清不掉: " .. brief(serr) end
 json_cache[k] = nil   -- 12-fix-3: 绕过了 kv_set, 缓存要手动失效
+norm_cache[k] = nil   -- 2026-11-18: 归一化缓存同理
 cfg_ver = cfg_ver + 1 -- 12-fix-9: 版本号也要涨(别名映射缓存靠它失效)
 for i = 1, n do
 pcall(fskv.set, shard_key(k, i), "")
