@@ -656,7 +656,20 @@ if lerr then return M.reply("RET:FAIL:CFG:" .. lerr) end
 
 
 local src = (slot == SLOT_PULL) and cfgstore.pull_src() or cfgstore.poll_src()
-reply_json("RET:CFG=", jencode({ cfg = cfg, slot = slot, src = src }))
+
+
+
+
+
+local s, jerr = jencode_err({ cfg = cfg, slot = slot, src = src })
+if not s then
+if cfgstore.drop_cache then pcall(cfgstore.drop_cache) end
+collectgarbage("collect")
+collectgarbage("collect")
+s, jerr = jencode_err({ cfg = cfg, slot = slot, src = src })
+end
+if not s then return M.reply("RET:FAIL:CFG:" .. tostring(jerr)) end
+reply_json("RET:CFG=", s)
 end)
 
 M.reg("W:CFG", function(arg)
@@ -935,7 +948,15 @@ M.reg("R:REG", function()
 
 local pm = pollmod(false)
 local regs = pm and pm.get_regs() or nil
-reply_json("RET:REG=", jencode(regs or {}))
+
+local s, jerr = jencode_err(regs or {})
+if not s then
+collectgarbage("collect")
+collectgarbage("collect")
+s, jerr = jencode_err(regs or {})
+end
+if not s then return M.reply("RET:FAIL:REG:" .. tostring(jerr)) end
+reply_json("RET:REG=", s)
 end)
 
 M.reg("R:VAL", function()
