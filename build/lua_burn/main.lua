@@ -111,10 +111,13 @@ local ok, cfgstore = pcall(require, "cfg")
 cfgstore = mod("cfg", ok, cfgstore, nil)
 
 
-local ok, monmod = pcall(require, "bus/mon")
-monmod = mod("485 mon+ctrl", ok, monmod, nil)
+
+
+
+
+
 local ok, ctrl = pcall(require, "bus/ctrl")
-ctrl = mod("bus/ctrl", ok, ctrl, nil)
+ctrl = mod("485 ctrl", ok, ctrl, nil)
 local gpio = util.try("gpio")
 if gpio then
 pcall(gpio.setup, mbus.DE_PIN, 0)
@@ -123,6 +126,11 @@ end
 if ctrl then
 local sysc = cfgstore and cfgstore.load_sys()
 local boot = sysc and sysc.boot_mode or "idle"
+if boot == "sniff" then
+
+local okm, monmod = pcall(require, "bus/mon")
+mod("485 mon", okm, monmod, nil)
+end
 if boot == "manual" or boot == "platform" or boot == "sniff" then
 local ok, msg = ctrl.switch_mode(boot, true)
 log.info("boot", "  mode=" .. boot .. " -> " .. tostring(msg))

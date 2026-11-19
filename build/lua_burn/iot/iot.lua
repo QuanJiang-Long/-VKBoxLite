@@ -32,7 +32,40 @@ local mqttcfg = require "iot/mqttcfg"
 local pubsched = require "iot/pubsched"   -- 12-fix-4: 统一上报调度(节奏都在那管)
 local collector = require "data/collector"
 local cfgstore = require "cfg"
-local mon = require "bus/mon"
+
+
+
+
+
+local mon_mod
+local mon_tried = false
+local function monmod(load)
+if load then
+if not mon_tried then
+mon_tried = true
+local ok, m = pcall(require, "bus/mon")
+mon_mod = ok and m or nil
+if not mon_mod then log.warn("iot", "bus/mon 加载失败") end
+end
+return mon_mod
+end
+if not mon_tried then return nil end
+return mon_mod
+end
+
+
+local EMPTY_MON = {
+running = false, detecting = false, detected = nil, gen = 0, baud = 9600,
+frames = 0, rsps = 0, reqs = 0, pending = 0, last_rx = 0, buf = 0,
+rx_bytes = 0, errs = 0, alloc_err = 0, orphans = 0, paired = 0,
+hist_aliases = 0, infer_rows = 0, infer_view_n = 32, infer_view_off = 0,
+infer_clamped = 0, detect_round = 0, detect_fail = 0,
+}
+local function mon_status()
+local m = monmod(false)
+return (m and m.status()) or EMPTY_MON
+end
+
 local MqttUtil = require "util/mqtt_util"
 
 
@@ -433,7 +466,8 @@ local function build_items()
 
 
 pcall(collector.trim_cache)
-pcall(mon.trim_reqs)
+local mon = monmod(false)          -- sniff 没跑过就没有"最近请求"要清
+if mon then pcall(mon.trim_reqs) end
 collectgarbage("collect")
 collectgarbage("collect")
 
@@ -475,7 +509,7 @@ if vs then
 
 local slave
 if sniff_mode then
-local infer_data = mon.infer and mon.infer()
+local infer_data = mon and mon.infer and mon.infer()
 slave = (infer_data and infer_data.slave) or 1
 else
 slave = cfg_slave
@@ -558,7 +592,7 @@ end
 
 local function pub_blocked()
 if get_mode() ~= "sniff" then return false end
-local st = mon.status()
+local st = mon_status()
 if st.detecting then return true end
 local d = st.detected
 if not d or d.baud == nil then return true end
@@ -651,7 +685,7 @@ end
 
 local function census()
 local cs = collector.stats()
-local ms = mon.status()
+local ms = mon_status()
 local ps = pubsched.status()
 
 local fps, push = 0, 0
@@ -899,6 +933,8 @@ for i = 1, #prop_ids do prop_ids[i] = nil end
 local pos = {}
 if mode == "sniff" then
 
+local mon = monmod(true)
+
 
 local smap = cfgstore.alias_map()
 
@@ -1060,7 +1096,8 @@ local function topo_sig(only_ids)
 
 
 pcall(collector.trim_cache)
-pcall(mon.trim_reqs)
+local mtr = monmod(false)          -- manual/platform 档没有 mon 的请求缓存可清
+if mtr then pcall(mtr.trim_reqs) end
 collectgarbage("collect")
 collectgarbage("collect")
 reclaim_if_high()
@@ -2291,7 +2328,8 @@ while S.want_run do
 
 
 
-if mon.infer_watch() and mon.take_infer_dirty() then
+local miw = monmod(false)      -- 没开 sniff 就没有推断表要推, 不为此加载
+if miw and miw.infer_watch() and miw.take_infer_dirty() then
 local push = _G.cmd_push_infer
 if push then pcall(push) end
 end
@@ -2312,7 +2350,8 @@ if is_oom then
 
 
 collector.trim_cache()
-mon.trim_reqs()
+local moom = monmod(false)
+if moom then moom.trim_reqs() end
 collectgarbage("collect")
 local h1, h2 = heap_info()
 log.warn("iot", "oom, trim+gc done, heap total=" .. tostring(h1) .. " used=" .. tostring(h2))
@@ -2371,7 +2410,8 @@ end
 
 if (os.clock() - (S.trim_at or -1e9)) >= 15 then
 pcall(collector.trim_cache)
-pcall(mon.trim_reqs)
+local mtrim = monmod(false)
+if mtrim then pcall(mtrim.trim_reqs) end
 collectgarbage("collect")
 collectgarbage("collect")
 S.trim_at = os.clock()
@@ -2498,7 +2538,8 @@ local cur_slaves = {}  -- V2: 收集从机 ID
 local smap = cfgstore.alias_map()
 local mode = get_mode()
 if mode == "sniff" then
-for _, r in ipairs((mon.infer() or {}).regs or {}) do
+local mtopo = monmod(true)   -- sniff 档: mon 必已加载
+for _, r in ipairs(((mtopo and mtopo.infer()) or {}).regs or {}) do
 local sa = smap["reg" .. tostring(r.addr or "")]
 local id = (sa and sa.id ~= "" and sa.id) or "reg" .. tostring(r.addr or "")
 cur_pids[id] = true
@@ -2786,7 +2827,8 @@ log.warn("iot", "task_main error, restart: " .. tostring(err))
 S.want_run = want              -- 恢复用户原本的意图
 if not want then break end
 pcall(collector.trim_cache)
-pcall(mon.trim_reqs)
+local mredo = monmod(false)
+if mredo then pcall(mredo.trim_reqs) end
 collectgarbage("collect")
 if sys then sys.wait(1000) end
 end

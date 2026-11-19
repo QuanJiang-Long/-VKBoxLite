@@ -9,7 +9,6 @@ local mobile = util.try("mobile")
 
 local sn = require "sn/sn"
 local ctrl = require "bus/ctrl"
-local mon = require "bus/mon"
 local collector = require "data/collector"
 local cfgstore = require "cfg"
 local mqtt_cfg = require "iot/mqttcfg"
@@ -41,6 +40,34 @@ end
 
 function M.poll_loaded()
 return poll_mod ~= nil
+end
+
+
+
+
+
+
+
+
+local mon_mod
+local mon_tried = false
+local function monmod(load)
+if load then
+if not mon_tried then
+mon_tried = true
+local ok, m = pcall(require, "bus/mon")
+mon_mod = ok and m or nil
+if not mon_mod then log.warn("cmd", "bus/mon 加载失败") end
+end
+return mon_mod
+end
+if not mon_tried then return nil end
+return mon_mod
+end
+
+
+function M.mon_loaded()
+return mon_mod ~= nil
 end
 
 
@@ -139,7 +166,9 @@ end
 
 
 local function blocked_while_detecting(cmd)
-if not mon.is_detecting() then return false end
+
+local m = monmod(false)
+if not (m and m.is_detecting()) then return false end
 M.reply("RET:FAIL:" .. cmd .. ":BUSY: 正在识别通讯参数, 完成后自动开始旁"
 .. "听(或先 W:MODE=idle 放弃)")
 return true
@@ -370,6 +399,7 @@ end
 
 
 function M.push_infer()
+local mon = monmod(false)
 if not mon then return false end
 
 local prov = package.loaded["sn/prov"]
@@ -1316,7 +1346,8 @@ local ok, err = cfgstore.set_alias(key, s(t.id), s(t.name))
 if not ok then return M.reply("RET:FAIL:SALIAS:" .. tostring(err)) end
 
 local addr = tonumber(key:match("^reg(%d+)$"))
-if addr and mon.update_row_name then
+local mon = monmod(false)   -- sniff 没跑过就没有推断行要改, 不为此加载
+if addr and mon and mon.update_row_name then
 pcall(mon.update_row_name, addr, s(t.name), s(t.id), s(t.dtype))
 end
 M.reply("RET:SALIAS=OK")
@@ -1349,6 +1380,9 @@ if v then n = math.floor(v) end
 end
 if n < 1 then n = 1 end
 if n > 50 then n = 50 end
+
+local mon = monmod(true)
+if not mon then return reply_json("RET:FRAMES=", "[]") end
 reply_json("RET:FRAMES=", jencode(mon.recent_frames(n)))
 end)
 
@@ -1374,6 +1408,8 @@ local v = tonumber(arg)
 if v then off = v end
 end
 end
+local mon = monmod(true)
+if not mon then return M.reply("RET:FAIL:INFER:bus/mon 加载失败") end
 
 mon.set_infer_view(off, n)
 reply_big("RET:INFER=", jencode(iot.attach_names(mon.infer_page(off, n))))
@@ -1387,6 +1423,8 @@ end)
 
 M.reg("W:INFERWATCH", function(arg)
 local on = (arg == "1" or arg == "on" or arg == "true")
+local mon = monmod(true)
+if not mon then return M.reply("RET:FAIL:INFERWATCH:bus/mon 加载失败") end
 mon.set_infer_watch(on)
 M.reply("RET:INFERWATCH=" .. tostring(on))
 end)
@@ -1400,8 +1438,10 @@ end)
 
 
 M.reg("R:AUTODETECT", function(arg)
+
+local mon = monmod(false)
 if arg == "restart" then
-if not mon.is_running() then
+if not (mon and mon.is_running()) then
 return M.reply("RET:FAIL:AUTODETECT:not in sniff mode")
 end
 
@@ -1415,7 +1455,7 @@ return M.reply("RET:FAIL:AUTODETECT:" .. tostring(err))
 end
 return M.reply("RET:AUTODETECT=BUSY")
 end
-if not mon.is_running() then
+if not (mon and mon.is_running()) then
 return M.reply("RET:FAIL:AUTODETECT:not in sniff mode")
 end
 if mon.is_detecting() then

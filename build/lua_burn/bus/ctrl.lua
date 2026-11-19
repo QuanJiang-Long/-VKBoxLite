@@ -2,7 +2,35 @@ local util = require "util"
 local log = util.log()
 local sys = util.try("sys")
 
-local mon = require "bus/mon"
+
+
+
+
+local mon_mod
+local mon_tried = false
+local function monmod(load)
+if load then
+if not mon_tried then
+mon_tried = true
+local ok, m = pcall(require, "bus/mon")
+mon_mod = ok and m or nil
+if not mon_mod then log.warn("ctrl", "bus/mon 加载失败") end
+end
+return mon_mod
+end
+if not mon_tried then return nil end    -- 从没加载 => 一定没在跑
+return mon_mod
+end
+
+
+local EMPTY_MON = {
+running = false, detecting = false, detected = nil, gen = 0, baud = 9600,
+frames = 0, rsps = 0, reqs = 0, pending = 0, last_rx = 0, buf = 0,
+rx_bytes = 0, errs = 0, alloc_err = 0, orphans = 0, paired = 0,
+hist_aliases = 0, infer_rows = 0, infer_view_n = 32, infer_view_off = 0,
+infer_clamped = 0, detect_round = 0, detect_fail = 0,
+}
+
 local cfgstore = require "cfg"
 local mqttcfg = require "iot/mqttcfg"
 local iot = util.try("iot/iot")
@@ -70,7 +98,8 @@ end
 
 
 local function stop_sniff()
-if not mon.is_running() then return end
+local mon = monmod(false)       -- 没加载过 = 没在嗅探, 不为此把 23KB 拉进来
+if not (mon and mon.is_running()) then return end
 
 local save_data = nil
 if cfgstore and mon.infer then
@@ -119,6 +148,8 @@ function M.switch_mode(mode, from_boot)
 
 
 from_boot = from_boot or false
+
+local mon = monmod(false)
 if type(mode) ~= "string" then
 return false, "FAIL unknown mode (use manual/platform/sniff/idle)"
 end
@@ -127,7 +158,7 @@ mode = mode:lower():gsub("^%s+", ""):gsub("%s+$", "")
 
 
 
-if (mode == "manual" or mode == "platform" or mode == "sniff") and mon.is_detecting() then
+if (mode == "manual" or mode == "platform" or mode == "sniff") and mon and mon.is_detecting() then
 return false, "BUSY: 正在识别通讯参数, 完成后自动开始旁听(或先 W:MODE=idle 放弃)"
 end
 if mode == "manual" or mode == "platform" then
@@ -141,7 +172,7 @@ if mode == "manual" or mode == "platform" then
 
 
 
-if mon.is_running() then
+if mon and mon.is_running() then
 stop_sniff()
 switch_delay()
 end
@@ -221,6 +252,9 @@ S.cur = "manual"  -- 34-fix: 记下当前 mode
 return true, "OK manual started"
 
 elseif mode == "sniff" then
+
+mon = monmod(true)
+if not mon then return false, "FAIL bus/mon 加载失败" end
 
 
 local pm2 = pollmod(false)
@@ -395,7 +429,8 @@ end
 
 function M.is_busy()
 local pm = pollmod(false)
-return (pm and pm.is_running()) or mon.is_running()
+local mm = monmod(false)
+return ((pm and pm.is_running()) or (mm and mm.is_running())) and true or false
 end
 
 
@@ -406,6 +441,7 @@ end
 
 function M.status()
 local pm = pollmod(false)
+local mm = monmod(false)
 return {
 mode = M.get_mode(),
 busy = M.is_busy(),
@@ -415,7 +451,7 @@ poll_src = (pm and pm.is_running() and pm.cur_slot()) or nil,
 pull_ready = cfgstore.pull_src(),
 pull = iot and iot.pull_status() or nil,
 poll = pm and pm.status() or EMPTY_POLL,
-mon = mon.status(),
+mon = (mm and mm.status()) or EMPTY_MON,
 write = pm and pm.write_status() or EMPTY_WRITE,
 }
 end
