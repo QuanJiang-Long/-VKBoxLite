@@ -32,7 +32,40 @@ local mqttcfg = require "iot/mqttcfg"
 local pubsched = require "iot/pubsched"   -- 12-fix-4: 统一上报调度(节奏都在那管)
 local collector = require "data/collector"
 local cfgstore = require "cfg"
-local mon = require "bus/mon"
+-- ⚠️ 2026-11-19: bus/mon 改成惰性 require(同 pullcfg / bus/poll 的思路)。
+--   嗅探模块 23.3KB 源码, 实测加载进 Lua 堆约 23KB。manual/platform 档只在
+--   "实时刷推断表"这类嗅探专用路径上碰它, 顶层 require 等于让这两个档白背
+--   23KB —— 60 点配置存不进的直接原因就是这 23KB。
+--   判据: 没加载过 => 一定没在嗅探/识别; 只问一句用 monmod(false), 绝不加载。
+local mon_mod
+local mon_tried = false
+local function monmod(load)
+    if load then
+        if not mon_tried then
+            mon_tried = true
+            local ok, m = pcall(require, "bus/mon")
+            mon_mod = ok and m or nil
+            if not mon_mod then log.warn("iot", "bus/mon 加载失败") end
+        end
+        return mon_mod
+    end
+    if not mon_tried then return nil end
+    return mon_mod
+end
+
+-- 没加载 mon 时用的空壳(status 字段名跟 mon.status() 一致)
+local EMPTY_MON = {
+    running = false, detecting = false, detected = nil, gen = 0, baud = 9600,
+    frames = 0, rsps = 0, reqs = 0, pending = 0, last_rx = 0, buf = 0,
+    rx_bytes = 0, errs = 0, alloc_err = 0, orphans = 0, paired = 0,
+    hist_aliases = 0, infer_rows = 0, infer_view_n = 32, infer_view_off = 0,
+    infer_clamped = 0, detect_round = 0, detect_fail = 0,
+}
+local function mon_status()
+    local m = monmod(false)
+    return (m and m.status()) or EMPTY_MON
+end
+
 local MqttUtil = require "util/mqtt_util"
 -- ⚠️ 12-fix-11 (2026-10-29): 拓扑的 JSON 拼装挪到独立模块。
 --   拓扑是本机最大的一块连续内存需求(现场就是死在这上面), 而且平台的
@@ -433,7 +466,8 @@ local function build_items()
     --   方案 A(阈值 160KB)无效：bfail 仍在 215.6KB 触发，GC 无法整理碎片
     --   改为每次 U4 构建前都清理，虽然增加 CPU 开销但能显著减少 bfail
     pcall(collector.trim_cache)
-    pcall(mon.trim_reqs)
+    local mon = monmod(false)          -- sniff 没跑过就没有"最近请求"要清
+    if mon then pcall(mon.trim_reqs) end
     collectgarbage("collect")
     collectgarbage("collect")
     -- ⚠️ 12-fix-3: 先取一次配置, 下面 alias_map(c) 复用它, 别再各自去
@@ -475,7 +509,7 @@ local function build_items()
             -- 原代码 reg<addr> 格式硬编码 slave=1, 多从机场景会错位
             local slave
             if sniff_mode then
-                local infer_data = mon.infer and mon.infer()
+                local infer_data = mon and mon.infer and mon.infer()
                 slave = (infer_data and infer_data.slave) or 1
             else
                 slave = cfg_slave
@@ -558,7 +592,7 @@ end
 -- 详见 lua/README.md「识别未成功前不上报」
 local function pub_blocked()
     if get_mode() ~= "sniff" then return false end
-    local st = mon.status()
+    local st = mon_status()
     if st.detecting then return true end
     local d = st.detected
     if not d or d.baud == nil then return true end
@@ -651,7 +685,7 @@ end
 --   fps/push 一升高, 就说明分配量又上去了。
 local function census()
     local cs = collector.stats()
-    local ms = mon.status()
+    local ms = mon_status()
     local ps = pubsched.status()
     -- 帧率/点率: 跟上一次普查比(上次的时间戳存在 census_prev.clock 里)
     local fps, push = 0, 0
@@ -898,6 +932,8 @@ local function build_topo(only_ids, max_props, skip_ids)
     -- V2: addr → prop_ids 索引映射，用于覆盖时定位正确位置
     local pos = {}
     if mode == "sniff" then
+        -- 走到这里 mon 必已加载(进 sniff 档就是它加载的), 这里只是取引用
+        local mon = monmod(true)
         -- 2026-11: sniff 持久化后, 推断表行里自带 name/id, 不再查 alias_map
         -- 优先用行里的 name/id, 没有则回退到 alias_map (兼容旧数据)
         local smap = cfgstore.alias_map()
@@ -1060,7 +1096,8 @@ local function topo_sig(only_ids)
     --   完整回收能把碎片并回大块(要现场验证, 所以加了日志)。
     -- 2026-11-03: 构建前强制 trim + 双次 GC，确保有足够连续块 (~4KB)
     pcall(collector.trim_cache)
-    pcall(mon.trim_reqs)
+    local mtr = monmod(false)          -- manual/platform 档没有 mon 的请求缓存可清
+    if mtr then pcall(mtr.trim_reqs) end
     collectgarbage("collect")
     collectgarbage("collect")
     reclaim_if_high()
@@ -2291,7 +2328,8 @@ local function task_main()
         --   路径就是新的碎片化来源(12-fix-5 的教训)。
         --   ⚠️ 必须放在【连接与否的分支之外】: 推给前端跟 MQTT 连没连
         --   没关系, 平台连不上时前端照样要看到新地址。
-        if mon.infer_watch() and mon.take_infer_dirty() then
+        local miw = monmod(false)      -- 没开 sniff 就没有推断表要推, 不为此加载
+        if miw and miw.infer_watch() and miw.take_infer_dirty() then
             local push = _G.cmd_push_infer
             if push then pcall(push) end
         end
@@ -2312,7 +2350,8 @@ local function task_main()
                             -- collector.trim_cache() 碰不到它, 少了这句清了
                             -- 缓存照样 OOM, 只是白等 30s
                             collector.trim_cache()
-                            mon.trim_reqs()
+                            local moom = monmod(false)
+                            if moom then moom.trim_reqs() end
                             collectgarbage("collect")
                             local h1, h2 = heap_info()
                             log.warn("iot", "oom, trim+gc done, heap total=" .. tostring(h1) .. " used=" .. tostring(h2))
@@ -2371,7 +2410,8 @@ local function task_main()
             --   15 秒减少碎片累积窗口，双次 GC 提高回收率（第一次标记，第二次释放）。
             if (os.clock() - (S.trim_at or -1e9)) >= 15 then
                 pcall(collector.trim_cache)
-                pcall(mon.trim_reqs)
+                local mtrim = monmod(false)
+                if mtrim then pcall(mtrim.trim_reqs) end
                 collectgarbage("collect")
                 collectgarbage("collect")
                 S.trim_at = os.clock()
@@ -2498,7 +2538,8 @@ local function task_main()
                     local smap = cfgstore.alias_map()
                     local mode = get_mode()
                     if mode == "sniff" then
-                        for _, r in ipairs((mon.infer() or {}).regs or {}) do
+                        local mtopo = monmod(true)   -- sniff 档: mon 必已加载
+                        for _, r in ipairs(((mtopo and mtopo.infer()) or {}).regs or {}) do
                             local sa = smap["reg" .. tostring(r.addr or "")]
                             local id = (sa and sa.id ~= "" and sa.id) or "reg" .. tostring(r.addr or "")
                             cur_pids[id] = true
@@ -2786,7 +2827,8 @@ function M.start()
                 S.want_run = want              -- 恢复用户原本的意图
                 if not want then break end
                 pcall(collector.trim_cache)
-                pcall(mon.trim_reqs)
+                local mredo = monmod(false)
+                if mredo then pcall(mredo.trim_reqs) end
                 collectgarbage("collect")
                 if sys then sys.wait(1000) end
             end

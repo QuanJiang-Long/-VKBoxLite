@@ -9,7 +9,6 @@ local mobile = util.try("mobile")
 
 local sn = require "sn/sn"
 local ctrl = require "bus/ctrl"
-local mon = require "bus/mon"
 local collector = require "data/collector"
 local cfgstore = require "cfg"
 local mqtt_cfg = require "iot/mqttcfg"
@@ -41,6 +40,34 @@ end
 -- 单元测试用: bus/poll 到底有没有被拉进来 (12-fix-8)
 function M.poll_loaded()
     return poll_mod ~= nil
+end
+
+-- ⚠️ 2026-11-19: bus/mon 同样改成惰性 require。
+--   它是嗅探专用模块(23.3KB 源码, 实测加载进 Lua 堆约 23KB), 而 manual/platform
+--   档从头到尾不会碰它 —— 之前的顶层 require 让这两个档白背 23KB, 正是 60 点
+--   配置"存不进 / 读不回"的直接原因(manual 档基线 287K, 60 行配置要 20K+)。
+--   判据与 poll 相同: 【没加载过 => 一定没在跑/没在识别】。所以
+--     "问在不在识别"用 monmod(false), 返回 nil 就当 false, 绝不为了问一句把它拉进来;
+--     "真要嗅探功能"(R:INFER/R:FRAMES/W:INFERWATCH)才 monmod(true)。
+local mon_mod
+local mon_tried = false
+local function monmod(load)
+    if load then
+        if not mon_tried then
+            mon_tried = true
+            local ok, m = pcall(require, "bus/mon")
+            mon_mod = ok and m or nil
+            if not mon_mod then log.warn("cmd", "bus/mon 加载失败") end
+        end
+        return mon_mod
+    end
+    if not mon_tried then return nil end
+    return mon_mod
+end
+
+-- 单元测试用: bus/mon 到底有没有被拉进来
+function M.mon_loaded()
+    return mon_mod ~= nil
 end
 
 -- 4 种工作模式提到模块顶部
@@ -139,7 +166,9 @@ end
 
 -- 识别期间挡住会动串口的命令
 local function blocked_while_detecting(cmd)
-    if not mon.is_detecting() then return false end
+    -- mon 没加载过 => 不可能正在识别(识别只发生在 sniff 档, 进 sniff 必先加载)
+    local m = monmod(false)
+    if not (m and m.is_detecting()) then return false end
     M.reply("RET:FAIL:" .. cmd .. ":BUSY: 正在识别通讯参数, 完成后自动开始旁"
         .. "听(或先 W:MODE=idle 放弃)")
     return true
@@ -370,6 +399,7 @@ end
 --   推同一页过去, 前端直接换掉那一页的缓存。
 --   推整张表的话, 64 个地址就是 8KB 的 JSON —— 正是现场崩掉的那个大小。
 function M.push_infer()
+    local mon = monmod(false)
     if not mon then return false end
     -- V1-1 修复 (2026-11-06): SN 烧写期间暂停推送，避免干扰产线工具
     local prov = package.loaded["sn/prov"]
@@ -1316,7 +1346,8 @@ local function reg_cmds()
         if not ok then return M.reply("RET:FAIL:SALIAS:" .. tostring(err)) end
         -- 2026-11: 同步更新内存推断表行, 自动保存时能拿到最新 name/id/dtype
         local addr = tonumber(key:match("^reg(%d+)$"))
-        if addr and mon.update_row_name then
+        local mon = monmod(false)   -- sniff 没跑过就没有推断行要改, 不为此加载
+        if addr and mon and mon.update_row_name then
             pcall(mon.update_row_name, addr, s(t.name), s(t.id), s(t.dtype))
         end
         M.reply("RET:SALIAS=OK")
@@ -1349,6 +1380,9 @@ local function reg_cmds()
         end
         if n < 1 then n = 1 end
         if n > 50 then n = 50 end
+        -- 总线报文是 sniff 档的面板: 真要看才把 bus/mon 拉进来
+        local mon = monmod(true)
+        if not mon then return reply_json("RET:FRAMES=", "[]") end
         reply_json("RET:FRAMES=", jencode(mon.recent_frames(n)))
     end)
 
@@ -1374,6 +1408,8 @@ local function reg_cmds()
                 if v then off = v end
             end
         end
+        local mon = monmod(true)
+        if not mon then return M.reply("RET:FAIL:INFER:bus/mon 加载失败") end
         -- 记下前端在看哪一页: 主动推送也推这一页
         mon.set_infer_view(off, n)
         reply_big("RET:INFER=", jencode(iot.attach_names(mon.infer_page(off, n))))
@@ -1387,6 +1423,8 @@ local function reg_cmds()
     --   (见 frontend/renderer/app.js 的 onSerialLine)。
     M.reg("W:INFERWATCH", function(arg)
         local on = (arg == "1" or arg == "on" or arg == "true")
+        local mon = monmod(true)
+        if not mon then return M.reply("RET:FAIL:INFERWATCH:bus/mon 加载失败") end
         mon.set_infer_watch(on)
         M.reply("RET:INFERWATCH=" .. tostring(on))
     end)
@@ -1400,8 +1438,10 @@ local function reg_cmds()
     --   新一轮推断), 再重扫 (2026-10)
     --   2026-11: restart 时同时清 ds_infer (持久化推断表), 做到真正的"重新识别"
     M.reg("R:AUTODETECT", function(arg)
+        -- 没加载过 bus/mon 就一定不在 sniff 档 —— 这条判定本身不需要把模块拉进来
+        local mon = monmod(false)
         if arg == "restart" then
-            if not mon.is_running() then
+            if not (mon and mon.is_running()) then
                 return M.reply("RET:FAIL:AUTODETECT:not in sniff mode")
             end
             -- A 方案 (2026-10): 重新识别 = 新一轮, 名字(别名表)一起清 ——
@@ -1415,7 +1455,7 @@ local function reg_cmds()
             end
             return M.reply("RET:AUTODETECT=BUSY")
         end
-        if not mon.is_running() then
+        if not (mon and mon.is_running()) then
             return M.reply("RET:FAIL:AUTODETECT:not in sniff mode")
         end
         if mon.is_detecting() then

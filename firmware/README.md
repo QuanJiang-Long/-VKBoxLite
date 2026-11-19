@@ -2660,3 +2660,23 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
   现场数据与"下一处卡点（`R:VAL` 的 `snapshot()` 本身要新建 60 行表）"
   见 `docs/real-device-e2e.md` §8。
 
+- **`bus/mon` 改成惰性加载：manual/platform 不再白背 23KB（2026-11-19）**。
+  A0 真机复测：16/24 点存得进也读得回（A0 生效），但 32 点起**保存阶段**就先挂
+  （`rx 丢弃` / `解码结果为空 pool 306912/307192`）。手工按片量下来的账很清楚：
+  manual 档基线 **287K**、每点常驻 **530B**（行哈希表 330 + plan 70 + 采集缓存 130），
+  60 点 ≈ 33KB 而池子只剩 20KB —— 不是碎片，是算术。
+  池子里有一笔白占：`bus/mon`（嗅探，23.3KB 源码 / 约 23KB 堆）被
+  `main.lua`、`bus/ctrl`、`svc/cmd`、`iot/iot` **四处顶层 `require`**，
+  而 manual/platform 档从头到尾不碰嗅探。改法与 12-fix-8 的 `bus/poll` 完全一致：
+  `monmod(load)` + 判据"没加载过 ⇒ 一定没在跑/没在识别"。
+  - 问一句（`ctrl.status()` / `is_busy()` / `stop_sniff()` / `blocked_while_detecting` /
+    `R:AUTODETECT` 未进 sniff / `iot` 的 `trim_reqs`、`census`、发布循环）**一律不加载**；
+    没加载时 `ctrl.status()` 的 `mon` 字段给 `EMPTY_MON` 空壳（字段名与
+    `mon.status()` 一致，前端不用改）。
+  - 真要用（`switch_mode("sniff")`、`R:INFER` / `R:FRAMES` / `W:INFERWATCH`、
+    拓扑里的推断行）才 `monmod(true)`。开机直进 sniff 时由 `main.lua` 补加载。
+  - 护栏：`tests/lua/test_mon_lazy.lua`（28 个检查点）—— 加载 `svc/cmd`+`bus/ctrl` 后
+    mon 必须仍未加载，`R:MODE`/`is_busy`/`switch_mode(manual|idle)`/`R:AUTODETECT`
+    都不许把它拉进来，而 `W:INFERWATCH`/`R:FRAMES`/`switch_mode(sniff)` 必须照常工作。
+  预计 manual 基线 287K → ~264K；真机复测口径见 `docs/real-device-e2e.md` §8。
+

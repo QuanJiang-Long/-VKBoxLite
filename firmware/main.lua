@@ -111,10 +111,13 @@ local ok, cfgstore = pcall(require, "cfg")
 cfgstore = mod("cfg", ok, cfgstore, nil)
 
 -- stage 4: 485 子系统 (默认 idle)
-local ok, monmod = pcall(require, "bus/mon")
-monmod = mod("485 mon+ctrl", ok, monmod, nil)
+-- ⚠️ 2026-11-19: bus/mon(嗅探, 23.3KB 源码 / 约 23KB 常驻堆) 不再无条件 require。
+--   manual/platform 档从头到尾不碰嗅探, 白背这 23KB 正是 60 点配置存不进/读不回的
+--   直接原因(manual 基线 287K, 60 行配置要 20K+)。现在由 bus/ctrl 在真正进 sniff
+--   档时惰性加载(ctrl.monmod), 这里只在【开机直进 sniff】时补一次加载 + 日志。
+--   判据与 bus/poll 的惰性加载(12-fix-8)一致: 没加载过 => 一定没在跑。
 local ok, ctrl = pcall(require, "bus/ctrl")
-ctrl = mod("bus/ctrl", ok, ctrl, nil)
+ctrl = mod("485 ctrl", ok, ctrl, nil)
 local gpio = util.try("gpio")
 if gpio then
     pcall(gpio.setup, mbus.DE_PIN, 0)
@@ -123,6 +126,11 @@ end
 if ctrl then
     local sysc = cfgstore and cfgstore.load_sys()
     local boot = sysc and sysc.boot_mode or "idle"
+    if boot == "sniff" then
+        -- 开机直进嗅探: 这时才把 mon 拉进来(manual/platform 不走这条路)
+        local okm, monmod = pcall(require, "bus/mon")
+        mod("485 mon", okm, monmod, nil)
+    end
     if boot == "manual" or boot == "platform" or boot == "sniff" then
         local ok, msg = ctrl.switch_mode(boot, true)
         log.info("boot", "  mode=" .. boot .. " -> " .. tostring(msg))

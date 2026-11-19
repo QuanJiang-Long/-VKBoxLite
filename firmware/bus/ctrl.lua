@@ -2,7 +2,35 @@ local util = require "util"
 local log = util.log()
 local sys = util.try("sys")
 
-local mon = require "bus/mon"
+-- ⚠️ 2026-11-19: bus/mon 改成惰性 require(理由同下面的 bus/poll, 见 12-fix-8)。
+--   嗅探模块 23.3KB 源码, 实测加载进 Lua 堆约 23KB; manual/platform 档一次都不
+--   会碰它, 顶层 require 等于让这两个档白背 23KB(60 点配置当场就存不进)。
+--   判据与 poll 完全相同: 【没加载过 => 一定没在跑/没在识别】。
+local mon_mod
+local mon_tried = false
+local function monmod(load)
+    if load then
+        if not mon_tried then
+            mon_tried = true
+            local ok, m = pcall(require, "bus/mon")
+            mon_mod = ok and m or nil
+            if not mon_mod then log.warn("ctrl", "bus/mon 加载失败") end
+        end
+        return mon_mod
+    end
+    if not mon_tried then return nil end    -- 从没加载 => 一定没在跑
+    return mon_mod
+end
+
+-- 没加载 mon 时给前端看的空壳(字段名跟 mon.status() 一致, 前端不用改)
+local EMPTY_MON = {
+    running = false, detecting = false, detected = nil, gen = 0, baud = 9600,
+    frames = 0, rsps = 0, reqs = 0, pending = 0, last_rx = 0, buf = 0,
+    rx_bytes = 0, errs = 0, alloc_err = 0, orphans = 0, paired = 0,
+    hist_aliases = 0, infer_rows = 0, infer_view_n = 32, infer_view_off = 0,
+    infer_clamped = 0, detect_round = 0, detect_fail = 0,
+}
+
 local cfgstore = require "cfg"
 local mqttcfg = require "iot/mqttcfg"
 local iot = util.try("iot/iot")
@@ -70,7 +98,8 @@ end
 --   名字只对当前这一轮有效: 退出 sniff 就抹干净, 下次进来是干净的表
 --   (clear_alias 空表不写 fskv, 所以"进 sniff 兜底再清一次"不费 flash)
 local function stop_sniff()
-    if not mon.is_running() then return end
+    local mon = monmod(false)       -- 没加载过 = 没在嗅探, 不为此把 23KB 拉进来
+    if not (mon and mon.is_running()) then return end
     -- 2026-11: 先收集推断表数据(同步, 在 mon.stop 前)
     local save_data = nil
     if cfgstore and mon.infer then
@@ -119,6 +148,8 @@ function M.switch_mode(mode, from_boot)
     --   跳过 platform 的 MQTT 连接前置检查 —— 开机时 iot.start 还没跑, MQTT
     --   还没连, 但 boot 路径应该正常进入, 连上后自动拉取
     from_boot = from_boot or false
+    -- mon 没加载过 = 没在嗅探/没在识别: 下面几处"问一句"都走这条不加载的路
+    local mon = monmod(false)
     if type(mode) ~= "string" then
         return false, "FAIL unknown mode (use manual/platform/sniff/idle)"
     end
@@ -127,7 +158,7 @@ function M.switch_mode(mode, from_boot)
     -- poll.start 等) 拒掉, 不需要再翻译。简单些。
     -- 识别期间串口正被反复 uart.setup, 切模式会和它抢串口, 扫出来的结果不可信。
     -- 只放行 idle/stop —— 那是用户主动放弃识别的唯一逃生口
-    if (mode == "manual" or mode == "platform" or mode == "sniff") and mon.is_detecting() then
+    if (mode == "manual" or mode == "platform" or mode == "sniff") and mon and mon.is_detecting() then
         return false, "BUSY: 正在识别通讯参数, 完成后自动开始旁听(或先 W:MODE=idle 放弃)"
     end
     if mode == "manual" or mode == "platform" then
@@ -141,7 +172,7 @@ function M.switch_mode(mode, from_boot)
         --     拉到了 auto_apply 调 poll.start("pull") 重启轮询
         --   - 即使 host/port 没配, 也让用户进来 (前端的 pMqttHint 黄条会提示)
         -- 开机路径 (from_boot=true) 本来就没这个检查, 不受影响
-        if mon.is_running() then
+        if mon and mon.is_running() then
             stop_sniff()
             switch_delay()
         end
@@ -221,6 +252,9 @@ function M.switch_mode(mode, from_boot)
         return true, "OK manual started"
 
     elseif mode == "sniff" then
+        -- 进 sniff 才真正加载 bus/mon(23KB): 从这一行往下 mon 一定非空
+        mon = monmod(true)
+        if not mon then return false, "FAIL bus/mon 加载失败" end
         -- sniff 档不跑轮询: poll 没加载过就说明它没在跑, 别为"问一句"
         -- 把 14KB 常驻堆拉进来(12-fix-8)
         local pm2 = pollmod(false)
@@ -395,7 +429,8 @@ end
 
 function M.is_busy()
     local pm = pollmod(false)
-    return (pm and pm.is_running()) or mon.is_running()
+    local mm = monmod(false)
+    return ((pm and pm.is_running()) or (mm and mm.is_running())) and true or false
 end
 
 -- 单元测试用: bus/poll 到底有没有被拉进来 (12-fix-8)。
@@ -406,6 +441,7 @@ end
 
 function M.status()
     local pm = pollmod(false)
+    local mm = monmod(false)
     return {
         mode = M.get_mode(),
         busy = M.is_busy(),
@@ -415,7 +451,7 @@ function M.status()
         pull_ready = cfgstore.pull_src(),
         pull = iot and iot.pull_status() or nil,
         poll = pm and pm.status() or EMPTY_POLL,
-        mon = mon.status(),
+        mon = (mm and mm.status()) or EMPTY_MON,
         write = pm and pm.write_status() or EMPTY_WRITE,
     }
 end
