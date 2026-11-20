@@ -2720,14 +2720,36 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
        读回逐字段一致、旧格式收得住。
   2. **块内偏移不再单独建表**（`bus/poll.lua`）：`{r=行, off=n}` 改成把 `off`
      挂到行**第 6 槽**，plan 里直接放行 → 每点省 64B，60 点省 3.8KB。
-  3. **上传期间关掉 MQTT 试连**：`iot.hold(bool)` + `W:CBEGIN` / `up_reset` /
-     `hold_restore` 收放。只挡"没连上时的试连"，已建立的连接不动；上传/落盘
-     结束立刻放开（`CFINISH` 提交那一步也保持盖着，`up_reset(..., true)`）。
+  3. **上传期间关掉 MQTT**：`iot.hold(bool)` + `W:CBEGIN` / `up_reset` /
+     `hold_restore` 收放。`hold(true)` 现在**连已连的 client 一起
+     `destroy_client()`**（原因见下面第一次真机复测）；`hold(false)` 只唤醒
+     `wait_kickable` 让 backoff 自己连回来，上报数据在 `pubsched` 里排着不丢。
+     调用点放在 `make_room()` **之前**，destroy 丢下的垃圾正好被双 GC 收走。
 
   回归：Lua **31/31**、前端 60/60、语法 21 文件 0 失败、模拟器 16 PASS / 5 SKIP / 0 FAIL。
   真机复测口径见 `docs/real-device-e2e.md` §8。
 
+  第一次真机复测（烧 `e826aa6`）**仍未过**，但卡点从"收片"挪到了"写盘"：
+
+  ```
+  [shard 2] lua 288120             ← 33 行紧凑行只花 7.1K（旧版这里 11.6K）
+  [shard 4] lua 292832  max 2048   ← 60 行 11.8K（实测 197B/行，不是 165B）
+  [CFINISH] ERR 设备返回失败：not enough memory
+  ```
+
+  由此改的三处（A2）：
+
+  1. `iot.hold(true)` 收掉**已连的** client —— 连接态本身常驻 ~10KB Lua，
+     真实部署（有卡、平台连得上）的基线就是 291K；那次 `[before]` 291736
+     还撞上一条正在飞的试连（sys 98K）。旧版"只挡新试连"这两笔都挡不住。
+  2. `shards_save` 不再按段攒普通对象（16 行 × 350B ≈ 5.6KB 临时表），改成
+     逐行 `json.encode` **只留串**（~70B/行），封段 `"[" .. concat .. "]"` 拼一次，
+     `kv_set` 写完立刻丢；`ensure_block` 按**实际段宽**预检。峰值 ~7KB → ~2.5KB。
+  3. "写盘前连续块不够"那道预检一个字没动 —— 宁可当场报内存不够，也不能把
+     header 留在 `st=w:`（11-17 真机 60 点就是这样把配置搞没的）。
+
   > 如果 60 点还差，**别再继续抠行**，下一处是 MQTT 的 U4 分组上报
-  > （60 点一份 JSON ≈ 5.4KB，96% 水位下拿不到这么大的连续块）。
+  > （60 点一份 JSON ≈ 5.4KB，96% 水位下拿不到这么大的连续块），
+  > 以及 `R:VAL` 的 `snapshot()`（每次新建 60 行表 ≈ 11K）。
 
 

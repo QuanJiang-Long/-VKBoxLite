@@ -944,11 +944,12 @@ local function reg_cmds()
         up_reset("W:CBEGIN")
         up.on, up.n, up.got, up.mode = true, n, 0, ctrl.get_mode()
         local used = lua_used()          -- 先取水位的数, 再去试分配(探测本身吃块)
+        -- 上传窗口里先掐掉 MQTT(在飞的试连 + 已连的客户端都收掉), 一次省
+        --   ~10KB Lua + 30KB sys。必须放在 make_room 之前: destroy_client 丢下
+        --   的垃圾正好被 make_room 的两轮 GC 收走
+        if iot and iot.hold then pcall(iot.hold, true) end
         local did = make_room()
         hold_arm()
-        -- 上传窗口里别再去试连 MQTT: 一次试连 ~10KB Lua + 30KB sys, 撞进来
-        --   就等于把刚腾出来的水又占回去(11-19 真机 60 点现场就是这样)
-        if iot and iot.hold then pcall(iot.hold, true) end
         local mx = max_block({ 1024, 2048, 3072, 4096, 6144, 8192 })
         log.info("cmd", "分片上传开场 n=" .. n .. " mode=" .. tostring(up.mode)
             .. " 腾出[" .. table.concat(did, " ") .. "] max=" .. mx

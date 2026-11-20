@@ -369,21 +369,25 @@ local function put_json(k, v, noflush)
     return kv_set(k, s, noflush)
 end
 
--- 按行收段: 每行先单独 encode 量一次尺寸(几百字节的小分配), 够了就封段。
---   段字节由 json.encode(整段) 再产一次 —— 一次分配正好一个段宽。
+-- 按行收段: 每行折成普通对象后单独 encode, **只留编码后的串**(~70B/行),
+--   封段时拼成一个 JSON 数组串。
+--   为什么不攒普通对象(11-20 真机现场): 一个段最多 16 行对象 ≈ 5.6KB 临时表,
+--   60 点上传时 CFINISH 正是卡在这 5.6KB 上("写盘前连续块不够")。
+--   现在峰值 = 一行对象 + 一行串 + 一个段串(~1.2KB)。
 local function shards_save(k, t)
     local rows = (type(t.regs) == "table") and t.regs or {}
     local segs, seg_sz, cur, cur_sz = {}, {}, {}, 2
     local function close_seg()
         if #cur == 0 then return true end
-        segs[#segs + 1] = cur
-        seg_sz[#seg_sz + 1] = cur_sz    -- 编码后的段宽(含 [ ] 和逗号), 预检用
+        local s = "[" .. table.concat(cur, ",") .. "]"
+        segs[#segs + 1] = s
+        seg_sz[#seg_sz + 1] = #s        -- 编码后的段宽(含 [ ] 和逗号), 预检用
         cur, cur_sz = {}, 2
         return true
     end
     for i = 1, #rows do
-        -- 紧凑行不能直接 encode(会变成数组), 先折成普通对象再量尺寸。
-        --   这是临时表, 封段后随 cur 一起丢 —— 一个段最多 16 行(~5KB)
+        -- 紧凑行不能直接 encode(会变成数组), 先折成普通对象再编码。
+        --   o 每轮都会被下一个覆盖, 不再按段攒着
         local o = M.row_out(rows[i])
         local ok, e = pcall(json.encode, o)
         -- ⚠️ "encode fail" 这个前缀和 save_json 那边一样, 一个字都不能动:
@@ -395,7 +399,7 @@ local function shards_save(k, t)
         if #cur > 0 and (cur_sz + #e + 1 > SHARD_MAX or #cur >= SHARD_ROWS) then
             close_seg()
         end
-        cur[#cur + 1] = o
+        cur[#cur + 1] = e
         cur_sz = cur_sz + #e + (#cur > 1 and 1 or 0)
     end
     close_seg()
@@ -431,7 +435,14 @@ local function shards_save(k, t)
     local ok1, err1 = put_json(k, head, true)
     if not ok1 then return false, err1 end
     for i = 1, n do
-        local ok2, err2 = put_json(shard_key(k, i), segs[i], true)
+        -- 段已经是编好的 JSON 串(put_json 会再 encode 一次, 把整段当字符串常量
+        --   再副本一遍) —— 这里直接 kv_set, 写完就把这一段串丢掉
+        local s = segs[i]
+        segs[i] = nil
+        if #s > FSKV_VALUE_MAX then
+            return false, "段 " .. #s .. "B 超 fskv 单值上限 " .. FSKV_VALUE_MAX .. "B"
+        end
+        local ok2, err2 = kv_set(shard_key(k, i), s, true)
         if not ok2 then
             return false, "分片" .. i .. "/" .. n .. "写入失败: " .. tostring(err2)
         end

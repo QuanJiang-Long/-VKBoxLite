@@ -2881,9 +2881,17 @@ function M.hold(on)
     on = on and true or false
     if S.hold == on then return end
     S.hold = on
-    if not on then
-        -- 放开: 只叫醒 wait_kickable, 【不】destroy_client —— 上传期间如果
-        --   平台是连着的, 那条连接本来就没动过, 不该在这里断一次
+    if on then
+        -- 上传窗口一开就把 client 收掉, 【包括已经连上的那条】。
+        --   理由: 连接态本身也常驻 ~10KB Lua(LuatOS 的 mqtt 客户端 + 订阅表),
+        --   60 点上传贴着天花板, 这 10KB 就是"第 3 片 rx 丢弃 / CFINISH
+        --   not enough memory"的那 10KB。代价是保存这几秒平台掉线, 保存
+        --   本来就会重启轮询, 连回来由 backoff 自己接管, 上报数据在 pubsched
+        --   里排着不会丢。destroy_client 自己会 GC, 但上层 make_room 还会再收
+        --   两轮 —— 所以调用点放在 make_room 之前(见 svc/cmd.lua W:CBEGIN)
+        destroy_client()
+    else
+        -- 放开: 只叫醒 wait_kickable, 下一轮就会重新连
         S.backoff = 1
         S.kick_flag = true
     end
