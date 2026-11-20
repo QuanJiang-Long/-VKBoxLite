@@ -1775,7 +1775,15 @@ n.interval_ms = base.interval_ms
 n.timeout_ms = base.timeout_ms
 
 local before = { slave = base.slave, baud = base.baud, regs = #(base.regs or {}) }
-local ok, serr = cfgstore.save_pull(n)
+
+
+
+
+
+local nr, nerr = cfgstore.normalize_poll(n, true)
+if not nr then return false, "配置非法: " .. tostring(nerr) end
+n = nr
+local ok, serr = cfgstore.save_pull_norm(n)
 if not ok then return false, "落盘失败: " .. tostring(serr) end
 
 local pe = get_poll()
