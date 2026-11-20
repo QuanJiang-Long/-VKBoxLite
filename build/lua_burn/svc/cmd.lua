@@ -11,6 +11,11 @@ local sn = require "sn/sn"
 local ctrl = require "bus/ctrl"
 local collector = require "data/collector"
 local cfgstore = require "cfg"
+
+
+
+local row_out = cfgstore.row_out or function(r) return r end
+local row_norm = cfgstore.row_norm or function(r) return r end
 local mqtt_cfg = require "iot/mqttcfg"
 local iot = util.try("iot/iot")
 local guard = util.try("svc/guard")
@@ -333,7 +338,8 @@ if not first then add(",") end
 add('"regs":[')
 for i = 1, #cfg.regs do
 if i > 1 then add(",") end
-local s, e = enc(cfg.regs[i], "第 " .. i .. " 行")
+
+local s, e = enc(row_out(cfg.regs[i]), "第 " .. i .. " 行")
 if not s then return abort(e) end
 add(s)
 end
@@ -363,7 +369,7 @@ st.add(key .. "[")
 if type(arr) == "table" then
 for i = 1, #arr do
 if i > 1 then st.add(",") end
-local s, e = jencode_err(arr[i])
+local s, e = jencode_err(row_out(arr[i]))
 if not s then return st.abort("第 " .. i .. " 行编码失败: " .. tostring(e)) end
 st.add(s)
 end
@@ -571,12 +577,17 @@ local up = { on = false, n = 0, got = 0, rows = {}, bytes = 0, mode = nil }
 
 
 
-local function up_reset(why)
+
+
+local function up_reset(why, keep_hold)
 if up.on and up.got > 0 then
 log.info("cmd", "分片暂存作废:", why or "-", "已收 " .. up.got .. "/" .. up.n)
 end
 up.on, up.n, up.got, up.bytes, up.mode = false, 0, 0, 0, nil
 up.rows = {}
+
+
+if not keep_hold and iot and iot.hold then pcall(iot.hold, false) end
 end
 
 
@@ -705,6 +716,9 @@ end
 
 hold_restore = function(why)
 hold_disarm()
+
+
+if iot and iot.hold then pcall(iot.hold, false) end
 if not hold.stopped then return end
 hold.stopped = false
 local m = ctrl.get_mode()
@@ -932,6 +946,9 @@ up.on, up.n, up.got, up.mode = true, n, 0, ctrl.get_mode()
 local used = lua_used()          -- 先取水位的数, 再去试分配(探测本身吃块)
 local did = make_room()
 hold_arm()
+
+
+if iot and iot.hold then pcall(iot.hold, true) end
 local mx = max_block({ 1024, 2048, 3072, 4096, 6144, 8192 })
 log.info("cmd", "分片上传开场 n=" .. n .. " mode=" .. tostring(up.mode)
 .. " 腾出[" .. table.concat(did, " ") .. "] max=" .. mx
@@ -1014,7 +1031,15 @@ if #up.rows >= UP_ROWS_MAX then
 up_reset("暂存行数超上限")
 return up_fail(i, "行数超上限 " .. UP_ROWS_MAX)
 end
-up.rows[#up.rows + 1] = rows[k]
+
+
+
+local nr, rerr = row_norm(rows[k])
+if not nr then
+up_reset("第 " .. k .. " 项非法")
+return up_fail(i, "第 " .. k .. " 项非法: " .. tostring(rerr))
+end
+up.rows[#up.rows + 1] = nr
 end
 up.got = i
 up.bytes = up.bytes + #body
@@ -1070,7 +1095,7 @@ end
 
 base.regs = up.rows
 local rows_n, bytes_n = #up.rows, up.bytes + #arg
-up_reset("CFINISH 提交")
+up_reset("CFINISH 提交", true)
 trc_begin(bytes_n)
 local ok, reason = commit_config(base)
 

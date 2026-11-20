@@ -200,7 +200,12 @@ end
 local function reset_state()
 S = {
 want_run = false, connected = false, subscribed = false,
-client = nil, dirty = false, backoff = 1,
+
+
+
+
+
+hold = false, client = nil, dirty = false, backoff = 1,
 published = 0, failed = 0, replied = 0, kick_flag = false,
 
 
@@ -2335,7 +2340,12 @@ if push then pcall(push) end
 end
 if pull_active() then pcall(pull_step) end
 if not S.connected then
-if net_ready() then
+if S.hold then
+
+
+
+wait_kickable(500)
+elseif net_ready() then
 local ok, err = try_connect()
 if not ok then
 if err == "no sn" then
@@ -2852,6 +2862,24 @@ function M.kick()
 destroy_client()
 S.backoff = 1
 S.kick_flag = true
+end
+
+
+
+
+
+
+function M.hold(on)
+on = on and true or false
+if S.hold == on then return end
+S.hold = on
+if not on then
+
+
+S.backoff = 1
+S.kick_flag = true
+end
+log.info("iot", "hold=" .. tostring(on))
 end
 
 function M.apply_cfg(c)

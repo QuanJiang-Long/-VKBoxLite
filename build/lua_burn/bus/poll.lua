@@ -241,12 +241,12 @@ log.warn("poll", "build fail", blk.addr, blk.qty, tostring(err))
 return
 end
 if single then
-local r = rows[1].r
+local r = rows[1]
 log.info("poll", string.format("Tx s%d fc3 addr=%d len=%d %s raw=[%s]",
 slave, r.addr, blk.qty, row_alias(r), hexspaced(frame)))
 else
 log.info("poll", string.format("Tx s%d fc3 addr=%d qty=%d rows=%d %s+%d raw=[%s]",
-slave, blk.addr, blk.qty, #rows, row_alias(rows[1].r), #rows - 1, hexspaced(frame)))
+slave, blk.addr, blk.qty, #rows, row_alias(rows[1]), #rows - 1, hexspaced(frame)))
 end
 local f = do_transaction(frame, lastCfg and lastCfg.timeout_ms or cfg.TIMEOUT_MS, slave, 3)
 if not f then
@@ -292,7 +292,7 @@ blk.addr, blk.qty, #rows, #data, want))
 end
 stat.ok = stat.ok + 1
 if single then
-local r = rows[1].r
+local r = rows[1]
 local n, hx, vv = extract_row(data, 0, r)
 if n == nil then
 log.warn("poll", string.format("Rx parse fail addr=%d %s hex=%s", r.addr, row_alias(r), hexs(data)))
@@ -305,7 +305,7 @@ end
 log.info("poll", string.format("Rx s%d addr=%d qty=%d rows=%d ok", slave, blk.addr, blk.qty, #rows))
 
 for _, it in ipairs(rows) do
-local r = it.r
+local r = it
 local n, hx, vv = extract_row(data, it.off, r)
 if n == nil then
 log.warn("poll", string.format("Rx parse fail addr=%d %s", r.addr, row_alias(r)))
@@ -333,7 +333,11 @@ while i <= #idx do
 local first = idx[i]
 local start_addr = first.addr
 local qty = first.count or 1
-local rows = { { r = first, off = 0 } }
+
+
+
+first.off = 0
+local rows = { first }
 local j = i + 1
 while j <= #idx do
 local nx = idx[j]
@@ -341,7 +345,8 @@ local w = nx.count or 1
 
 if nx.addr ~= start_addr + qty then break end
 if qty + w > MAX_BLOCK_QTY then break end
-rows[#rows + 1] = { r = nx, off = qty }
+nx.off = qty
+rows[#rows + 1] = nx
 qty = qty + w
 j = j + 1
 end

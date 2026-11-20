@@ -241,6 +241,60 @@ end
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+local ROW_IDX = { addr = 1, count = 2, dtype = 3, name = 4, alias = 5, off = 6 }
+
+
+local ROW_MT = {
+__index = function(t, k)
+local i = ROW_IDX[k]
+if i then return rawget(t, i) end
+end,
+__newindex = function(t, k, v) rawset(t, ROW_IDX[k] or k, v) end,
+}
+
+
+
+function M.row(addr, count, dtype, name, alias)
+return setmetatable({ addr, count, dtype, name, alias }, ROW_MT)
+end
+
+
+
+function M.row_out(r)
+if getmetatable(r) ~= ROW_MT then return r end
+return {
+addr = rawget(r, 1), count = rawget(r, 2), dtype = rawget(r, 3),
+name = rawget(r, 4), alias = rawget(r, 5),
+}
+end
+
+function M.is_row(r) return getmetatable(r) == ROW_MT end
+
+
+
+
+local function try_pack(r)
+if type(r) ~= "table" then return nil end
+local nm, al = r.name, r.alias
+if type(nm) ~= "string" or nm == "" then return nil end
+if type(al) ~= "string" or al == "" then return nil end
+if r.addr == nil or r.count == nil or type(r.dtype) ~= "string" then return nil end
+return M.row(r.addr, r.count, r.dtype, nm, al)
+end
+
 local SHARD_ROWS = 16
 local SHARD_MAX = 1024
 local SHARD_VER = 1
@@ -266,7 +320,7 @@ end
 
 
 
-local function shards_load(k, t)
+local function shards_load(k, t, compact)
 local n, st = shard_of(t)
 if st ~= SHARD_R then
 return nil, "分片未提交(应有 " .. n .. " 段, st=" .. st .. ")"
@@ -282,14 +336,31 @@ if not ok then return nil, "分片" .. i .. "读不出来: " .. brief(cs) end
 if cs == nil or cs == "" then return nil, "分片不全(" .. (i - 1) .. "/" .. n .. ")" end
 local ct = dec_json(cs)
 if ct == nil then return nil, "分片" .. i .. "解码失败" .. pool_tag() end
-for j = 1, #ct do rows[#rows + 1] = ct[j] end
+for j = 1, #ct do
+local r = ct[j]
+
+
+rows[#rows + 1] = (compact and try_pack(r)) or r
+end
 end
 t.regs = rows
 return t
 end
 
 local function put_json(k, v, noflush)
-local ok, s = pcall(json.encode, v)
+
+
+local enc = v
+if type(v) == "table" and type(v.regs) == "table" and M.is_row(v.regs[1]) then
+enc = {}
+for kk, vv in pairs(v) do
+if kk ~= "regs" then enc[kk] = vv end
+end
+local rs = {}
+for i = 1, #v.regs do rs[i] = M.row_out(v.regs[i]) end
+enc.regs = rs
+end
+local ok, s = pcall(json.encode, enc)
 if not ok then return false, "encode fail: " .. brief(s) end
 if not s then return false, "encode fail(无返回)" end
 if #s > FSKV_VALUE_MAX then
@@ -311,7 +382,10 @@ cur, cur_sz = {}, 2
 return true
 end
 for i = 1, #rows do
-local ok, e = pcall(json.encode, rows[i])
+
+
+local o = M.row_out(rows[i])
+local ok, e = pcall(json.encode, o)
 
 
 
@@ -321,7 +395,7 @@ if not e then return false, "encode fail(无返回)" end
 if #cur > 0 and (cur_sz + #e + 1 > SHARD_MAX or #cur >= SHARD_ROWS) then
 close_seg()
 end
-cur[#cur + 1] = rows[i]
+cur[#cur + 1] = o
 cur_sz = cur_sz + #e + (#cur > 1 and 1 or 0)
 end
 close_seg()
@@ -374,7 +448,7 @@ for i = n + 1, old_n do pcall(fskv.set, shard_key(k, i), "") end
 return true
 end
 
-local function load_json(k, default, shard)
+local function load_json(k, default, shard, compact)
 local cached = json_cache[k]
 if cached ~= nil then return cached end
 local s, rerr = kv_read(k)
@@ -401,7 +475,7 @@ end
 
 local pok, c, perr = pcall(function()
 if not shard or not shard_of(t) then return t end
-return shards_load(k, t)
+return shards_load(k, t, compact)
 end)
 if not pok then
 
@@ -573,6 +647,7 @@ end
 
 
 
+
 local function normalize_reg(r, reuse)
 if type(r) ~= "table" then return nil, "not table" end
 
@@ -581,13 +656,20 @@ if not ok then return nil, why end
 local addr, count = num(r.addr), num(r.count, 1)
 local dtype, name = str(r.dtype, "uint16"), r.name
 local alias = str(r.alias, r.name)
-if not reuse then
-return { addr = addr, count = count, dtype = dtype, name = name, alias = alias }
-end
-for k in pairs(r) do r[k] = nil end
-r.addr, r.count, r.dtype, r.name, r.alias = addr, count, dtype, name, alias
+if reuse and getmetatable(r) == ROW_MT then
+rawset(r, 1, addr)
+rawset(r, 2, count)
+rawset(r, 3, dtype)
+rawset(r, 4, name)
+rawset(r, 5, alias)
 return r
 end
+return M.row(addr, count, dtype, name, alias)
+end
+
+
+
+function M.row_norm(r) return normalize_reg(r, false) end
 
 local function normalize_common(c, d)
 c = c or {}
@@ -729,10 +811,11 @@ end
 
 
 local SECTIONS = {
-poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll, shard = true },
-pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll, shard = true },
+poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll, shard = true, compact = true },
+pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll, shard = true, compact = true },
 sys = { key = K_SYS, norm = M.normalize_sys, default = M.default_sys },
 alias = { key = K_ALIAS, norm = M.normalize_alias, default = M.default_alias },
+
 infer = { key = K_INFER, norm = M.normalize_infer, default = M.default_infer, shard = true },
 }
 
@@ -743,7 +826,7 @@ M["load_" .. name] = function()
 
 local nc = norm_cache[sec.key]
 if nc ~= nil then return nc end
-local raw, serr = load_json(sec.key, {}, sec.shard)
+local raw, serr = load_json(sec.key, {}, sec.shard, sec.compact)
 if serr then
 
 
