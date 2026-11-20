@@ -241,6 +241,60 @@ end
 --   前面几段又已经换成新内容 —— 这时候回滚救不回来(旧段已经没了), 唯一不能
 --   丢的是"说出来"。所以宁可下一次读取报"分片未提交", 也不能把新旧混在一起
 --   当有效配置: 用户会看见设备在采一批他从来没配过的地址。
+-- ==== 紧凑行 (2026-11-19) ====
+-- 问题: 寄存器行原来是 5 个字符串键的哈希表 —— 表头 56B + 8 个哈希槽 × 24B
+--   = 248B, 再加 name/alias 两条串, 真机实测每行约 350B。60 点就是 21KB,
+--   而池子(307192)跑过一轮采集后只剩约 20KB → 保存必死(11-19 A0 现场:
+--   第 4/5 片 rx 丢弃, used 289232/94%)。
+-- 做法: 行改成【定长数组】, 字段按固定槽号放 (1=addr 2=count 3=dtype
+--   4=name 5=alias, 第 6 槽留给 poll 存块内偏移)。表头 56B + 5 槽 × 8B = 96B,
+--   name/alias 两条串照旧 → 每行约 165B, 60 点约 10KB, 省下一半。
+--   ⚠️ 读侧(r.addr / r.name / r.off ...)【一行都不用改】: 靠 __index 查静态
+--   槽号表。写侧只发生在构造和归一化, __newindex 把键名折成槽号, 不会长出
+--   哈希节点; 走 __newindex 的写比 rawset 慢一点, 但每秒最多几十次。
+--   ⚠️ json.encode(紧凑行) 会编成数组而不是对象 —— 所有【编码出口】必须先过
+--   M.row_out(): 目前只有 cfg.shards_save / svc/cmd.lua 的两条流式应答。
+local ROW_IDX = { addr = 1, count = 2, dtype = 3, name = 4, alias = 5, off = 6 }
+-- __index 必须是函数而不是 ROW_IDX 本身: 表形式的 __index 是"取值"而不是
+--   "拿槽号回表里再取一次" —— 那样 r.alias 会返回 5 而不是 'V1'
+local ROW_MT = {
+    __index = function(t, k)
+        local i = ROW_IDX[k]
+        if i then return rawget(t, i) end
+    end,
+    __newindex = function(t, k, v) rawset(t, ROW_IDX[k] or k, v) end,
+}
+
+-- 紧凑行唯一的构造口。调用方保证 5 个值都已校验(非 nil) ——
+--   数组中间留空槽会把 #r 和后续槽位搞乱
+function M.row(addr, count, dtype, name, alias)
+    return setmetatable({ addr, count, dtype, name, alias }, ROW_MT)
+end
+
+-- 编码出口: 紧凑行 → 普通对象(临时表, 编码完就丢)。非紧凑表原样返回,
+--   所以"整表统一过一道 row_out"是安全的(推断表/别名表行不受影响)
+function M.row_out(r)
+    if getmetatable(r) ~= ROW_MT then return r end
+    return {
+        addr = rawget(r, 1), count = rawget(r, 2), dtype = rawget(r, 3),
+        name = rawget(r, 4), alias = rawget(r, 5),
+    }
+end
+
+function M.is_row(r) return getmetatable(r) == ROW_MT end
+
+-- 把解码出来的哈希行折成紧凑行。字段缺/类型不对的【不折】, 原样交给归一化
+--   去报错 —— 紧凑行的 5 个槽必须全非空, 中间留一个空槽会把数组搞坏。
+--   老固件存的表(比如没有 alias 那一格的)走原样路径, 归一化后照样变紧凑行。
+local function try_pack(r)
+    if type(r) ~= "table" then return nil end
+    local nm, al = r.name, r.alias
+    if type(nm) ~= "string" or nm == "" then return nil end
+    if type(al) ~= "string" or al == "" then return nil end
+    if r.addr == nil or r.count == nil or type(r.dtype) ~= "string" then return nil end
+    return M.row(r.addr, r.count, r.dtype, nm, al)
+end
+
 local SHARD_ROWS = 16
 local SHARD_MAX = 1024
 local SHARD_VER = 1
@@ -266,7 +320,7 @@ end
 
 -- 逐段取回, 拼成 t.regs。失败一律带原因回来 —— 调用方必须把原因传出去,
 --   不许再退回"当成没写过"那条老路(那就是 11-12 那两个假话的根)
-local function shards_load(k, t)
+local function shards_load(k, t, compact)
     local n, st = shard_of(t)
     if st ~= SHARD_R then
         return nil, "分片未提交(应有 " .. n .. " 段, st=" .. st .. ")"
@@ -282,14 +336,31 @@ local function shards_load(k, t)
         if cs == nil or cs == "" then return nil, "分片不全(" .. (i - 1) .. "/" .. n .. ")" end
         local ct = dec_json(cs)
         if ct == nil then return nil, "分片" .. i .. "解码失败" .. pool_tag() end
-        for j = 1, #ct do rows[#rows + 1] = ct[j] end
+        for j = 1, #ct do
+            local r = ct[j]
+            -- 读盘这一步就折成紧凑行: 解码出来的哈希行只活到这一句,
+            --   攒 60 行哈希行(~21KB)正是"存得进、读不回"的那 21KB
+            rows[#rows + 1] = (compact and try_pack(r)) or r
+        end
     end
     t.regs = rows
     return t
 end
 
 local function put_json(k, v, noflush)
-    local ok, s = pcall(json.encode, v)
+    -- 兜底: 不分片路径(sys/alias)本来没有寄存器行, 但万一以后有人把带紧凑行
+    --   的整份表交给这里, 先折成普通对象再编码 —— 不然会悄悄存成 JSON 数组
+    local enc = v
+    if type(v) == "table" and type(v.regs) == "table" and M.is_row(v.regs[1]) then
+        enc = {}
+        for kk, vv in pairs(v) do
+            if kk ~= "regs" then enc[kk] = vv end
+        end
+        local rs = {}
+        for i = 1, #v.regs do rs[i] = M.row_out(v.regs[i]) end
+        enc.regs = rs
+    end
+    local ok, s = pcall(json.encode, enc)
     if not ok then return false, "encode fail: " .. brief(s) end
     if not s then return false, "encode fail(无返回)" end
     if #s > FSKV_VALUE_MAX then
@@ -311,7 +382,10 @@ local function shards_save(k, t)
         return true
     end
     for i = 1, #rows do
-        local ok, e = pcall(json.encode, rows[i])
+        -- 紧凑行不能直接 encode(会变成数组), 先折成普通对象再量尺寸。
+        --   这是临时表, 封段后随 cur 一起丢 —— 一个段最多 16 行(~5KB)
+        local o = M.row_out(rows[i])
+        local ok, e = pcall(json.encode, o)
         -- ⚠️ "encode fail" 这个前缀和 save_json 那边一样, 一个字都不能动:
         --   上位机(sn-tools/pc_tool)按它认这条失败。分片把一次大编码拆成
         --   逐行小编码, 失败点挪了, 认法不能跟着挪
@@ -321,7 +395,7 @@ local function shards_save(k, t)
         if #cur > 0 and (cur_sz + #e + 1 > SHARD_MAX or #cur >= SHARD_ROWS) then
             close_seg()
         end
-        cur[#cur + 1] = rows[i]
+        cur[#cur + 1] = o
         cur_sz = cur_sz + #e + (#cur > 1 and 1 or 0)
     end
     close_seg()
@@ -374,7 +448,7 @@ local function shards_save(k, t)
     return true
 end
 
-local function load_json(k, default, shard)
+local function load_json(k, default, shard, compact)
     local cached = json_cache[k]
     if cached ~= nil then return cached end
     local s, rerr = kv_read(k)
@@ -401,7 +475,7 @@ local function load_json(k, default, shard)
     --   归一化里, 那一层有 pcall 兜着)
     local pok, c, perr = pcall(function()
         if not shard or not shard_of(t) then return t end
-        return shards_load(k, t)
+        return shards_load(k, t, compact)
     end)
     if not pok then
         -- raise: 连"这是不是分片"都没判出来。这和"配置内容非法"是两句话,
@@ -569,10 +643,11 @@ function M.clear_alias()
     return M.save_alias({ regs = {} })
 end
 
--- reuse=true: 【原地】把 r 收拾成归一化行并返回 r 本身, 不再新建一张表。
---   两条路径的键集合必须完全一致(addr/count/dtype/name/alias 五个) ——
---   W:CFG 走原地, 落进 fskv 的 JSON 不能比新建路径变长, 所以先把五个值
---   读进局部变量, 再清空整张表(顺带把用户多塞的键一起丢掉), 再写回去。
+-- reuse=true: 入参【已经是紧凑行】时原地改写槽位, 不再新建表。
+--   W:CSHARD 分片上传就是这条: 暂存进来的本来就是紧凑行(见 svc/cmd.lua),
+--   CFINISH 归一化不该再复制一份 60 行。
+--   哈希行(老格式 / json.decode 的产物)一律换成紧凑行 —— 复用会把已经分配
+--   掉的哈希槽留着(56+192B), 比新建一张紧凑行更占地方。
 local function normalize_reg(r, reuse)
     if type(r) ~= "table" then return nil, "not table" end
     -- 范围/格式校验委托给 util.validate_reg(抽离后 ds_poll/ds_pull 共享)
@@ -581,13 +656,20 @@ local function normalize_reg(r, reuse)
     local addr, count = num(r.addr), num(r.count, 1)
     local dtype, name = str(r.dtype, "uint16"), r.name
     local alias = str(r.alias, r.name)
-    if not reuse then
-        return { addr = addr, count = count, dtype = dtype, name = name, alias = alias }
+    if reuse and getmetatable(r) == ROW_MT then
+        rawset(r, 1, addr)
+        rawset(r, 2, count)
+        rawset(r, 3, dtype)
+        rawset(r, 4, name)
+        rawset(r, 5, alias)
+        return r
     end
-    for k in pairs(r) do r[k] = nil end
-    r.addr, r.count, r.dtype, r.name, r.alias = addr, count, dtype, name, alias
-    return r
+    return M.row(addr, count, dtype, name, alias)
 end
+
+-- 给分片上传的暂存口用: 校验 + 产出紧凑行。CSHARD 收一片就折一片,
+--   攒的行从"哈希行 350B/行"降到"紧凑行 165B/行", 60 点省 ~11KB
+function M.row_norm(r) return normalize_reg(r, false) end
 
 local function normalize_common(c, d)
     c = c or {}
@@ -729,10 +811,11 @@ end
 --   ds_sys 只有一个 boot_mode、ds_alias 已标"待废弃"(推断表行里自带
 --   name/id), 分片只是多两次写、给一段没人用的代码加迁移, 不动。
 local SECTIONS = {
-    poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll, shard = true },
-    pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll, shard = true },
+    poll = { key = K_POLL, norm = M.normalize_poll, default = M.default_poll, shard = true, compact = true },
+    pull = { key = K_PULL, norm = M.normalize_poll, default = M.default_poll, shard = true, compact = true },
     sys = { key = K_SYS, norm = M.normalize_sys, default = M.default_sys },
     alias = { key = K_ALIAS, norm = M.normalize_alias, default = M.default_alias },
+    -- infer 行是另一副样子(带 fc/id), 不走紧凑行: compact 不给它
     infer = { key = K_INFER, norm = M.normalize_infer, default = M.default_infer, shard = true },
 }
 
@@ -743,7 +826,7 @@ for name, sec in pairs(SECTIONS) do
         --   normalize 还要再造一张 ~12KB 的表, 而当时池子只剩 6.7KB。
         local nc = norm_cache[sec.key]
         if nc ~= nil then return nc end
-        local raw, serr = load_json(sec.key, {}, sec.shard)
+        local raw, serr = load_json(sec.key, {}, sec.shard, sec.compact)
         if serr then
             -- 段没取齐/还没提交。这时 flash 里那几行很可能一个字没坏, 只是
             --   拼不出来 —— 这句话必须原样传出去, 混进"配置坏了"就等于骗用户

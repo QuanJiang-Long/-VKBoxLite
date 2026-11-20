@@ -11,6 +11,11 @@ local sn = require "sn/sn"
 local ctrl = require "bus/ctrl"
 local collector = require "data/collector"
 local cfgstore = require "cfg"
+-- 紧凑行(2026-11-19): 编码出口要先把行折成普通对象。
+--   单测里 cfg 是 package.preload 的最小桩(只有 load_poll/... ), 没有这两个口
+--   → 这里取一次、缺了就退化成"原样返回"(桩里的行本来就是普通对象)
+local row_out = cfgstore.row_out or function(r) return r end
+local row_norm = cfgstore.row_norm or function(r) return r end
 local mqtt_cfg = require "iot/mqttcfg"
 local iot = util.try("iot/iot")
 local guard = util.try("svc/guard")
@@ -333,7 +338,8 @@ local function cfg_reply_stream(cfg, slot, src)
         add('"regs":[')
         for i = 1, #cfg.regs do
             if i > 1 then add(",") end
-            local s, e = enc(cfg.regs[i], "第 " .. i .. " 行")
+            -- 紧凑行必须先折成普通对象(否则 json.encode 会编成数组)
+            local s, e = enc(row_out(cfg.regs[i]), "第 " .. i .. " 行")
             if not s then return abort(e) end
             add(s)
         end
@@ -363,7 +369,7 @@ local function reply_array_stream(key, arr)
     if type(arr) == "table" then
         for i = 1, #arr do
             if i > 1 then st.add(",") end
-            local s, e = jencode_err(arr[i])
+            local s, e = jencode_err(row_out(arr[i]))
             if not s then return st.abort("第 " .. i .. " 行编码失败: " .. tostring(e)) end
             st.add(s)
         end
@@ -571,12 +577,17 @@ local up = { on = false, n = 0, got = 0, rows = {}, bytes = 0, mode = nil }
 
 -- 会话作废。why 只进日志: 现场要能回答"我明明发了 8 片, 怎么说没会话",
 --   答案通常是"中间插了一条 W:MODE / W:CFG, 那 8 片是被谁清掉的"
-local function up_reset(why)
+-- keep_hold=true: 会话虽然结束, 但 MQTT 闸门要继续盖着 —— 只有 CFINISH
+--   那一句用(它紧接着就要 commit_config 落盘, 那一段同样贴着天花板)。
+local function up_reset(why, keep_hold)
     if up.on and up.got > 0 then
         log.info("cmd", "分片暂存作废:", why or "-", "已收 " .. up.got .. "/" .. up.n)
     end
     up.on, up.n, up.got, up.bytes, up.mode = false, 0, 0, 0, nil
     up.rows = {}
+    -- 会话一结束就放开 MQTT 试连(见 W:CBEGIN 里 hold 的说明)。幂等:
+    --   hold_restore 后面还会再放一次, iot.hold 自己判重
+    if not keep_hold and iot and iot.hold then pcall(iot.hold, false) end
 end
 
 -- ==== 上传期间的"轮询占用" ====
@@ -705,6 +716,9 @@ end
 -- 把 CBEGIN 停掉的轮询交还回去。幂等, 三条路都敢重复调。
 hold_restore = function(why)
     hold_disarm()
+    -- 放开 MQTT 试连(见 CBEGIN 里 hold 的说明)。放在 stopped 判断之前:
+    --   上传失败/作废时 hold.stopped 可能已经是 false, 但闸门必须放开
+    if iot and iot.hold then pcall(iot.hold, false) end
     if not hold.stopped then return end
     hold.stopped = false
     local m = ctrl.get_mode()
@@ -932,6 +946,9 @@ local function reg_cmds()
         local used = lua_used()          -- 先取水位的数, 再去试分配(探测本身吃块)
         local did = make_room()
         hold_arm()
+        -- 上传窗口里别再去试连 MQTT: 一次试连 ~10KB Lua + 30KB sys, 撞进来
+        --   就等于把刚腾出来的水又占回去(11-19 真机 60 点现场就是这样)
+        if iot and iot.hold then pcall(iot.hold, true) end
         local mx = max_block({ 1024, 2048, 3072, 4096, 6144, 8192 })
         log.info("cmd", "分片上传开场 n=" .. n .. " mode=" .. tostring(up.mode)
             .. " 腾出[" .. table.concat(did, " ") .. "] max=" .. mx
@@ -1014,7 +1031,15 @@ local function reg_cmds()
                 up_reset("暂存行数超上限")
                 return up_fail(i, "行数超上限 " .. UP_ROWS_MAX)
             end
-            up.rows[#up.rows + 1] = rows[k]
+            -- 收一片就折一片: 攒 60 行【哈希行】约 21KB, 正是 11-19 现场
+            --   "第 4/5 片 rx 丢弃"(used 289232/94%)的直接原因。折成紧凑行
+            --   后同样 60 行只要 ~10KB, 而且校验失败当场就能报给前端
+            local nr, rerr = row_norm(rows[k])
+            if not nr then
+                up_reset("第 " .. k .. " 项非法")
+                return up_fail(i, "第 " .. k .. " 项非法: " .. tostring(rerr))
+            end
+            up.rows[#up.rows + 1] = nr
         end
         up.got = i
         up.bytes = up.bytes + #body
@@ -1070,7 +1095,7 @@ local function reg_cmds()
         --   上的那张表不受影响, 后面 commit_config 原地归一化用的就是它
         base.regs = up.rows
         local rows_n, bytes_n = #up.rows, up.bytes + #arg
-        up_reset("CFINISH 提交")
+        up_reset("CFINISH 提交", true)
         trc_begin(bytes_n)
         local ok, reason = commit_config(base)
         -- 校验/落盘失败的原因仍挂 CFG: 那是"这份配置被拒了", 与 W:CFG 逐字节同一句

@@ -439,7 +439,7 @@ do
         (function()
             for _, b in ipairs(plan) do
                 for _, row in ipairs(b.rows) do
-                    if row.off + (row.r.count or 1) > b.qty then return false end
+                    if row.off + (row.count or 1) > b.qty then return false end
                 end
             end
             return true

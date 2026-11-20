@@ -2679,4 +2679,55 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
     mon 必须仍未加载，`R:MODE`/`is_busy`/`switch_mode(manual|idle)`/`R:AUTODETECT`
     都不许把它拉进来，而 `W:INFERWATCH`/`R:FRAMES`/`switch_mode(sniff)` 必须照常工作。
   预计 manual 基线 287K → ~264K；真机复测口径见 `docs/real-device-e2e.md` §8。
+  ⚠️ **2026-11-20 实测推翻了这个预期**：`9319273` 烧进去后，
+  `W:MODE=sniff`（这时才 `require bus/mon`）只涨 **568B**，回 idle 又还回去；
+  而 `W:MODE=manual`（require `bus/poll` + `data/collector`）涨 7168B。
+  原因是**Lua 脚本不是"require 才占池"**：开机时整个脚本区已经在池里
+  （225.7KB 瘦身源码 ≈ 271K 池水位 − 46K 运行态，数字正好对上），
+  `require` 只是挂进 `package.loaded` + 建模块表，增量只有几百字节。
+  所以"mon 源码 23.3KB = 23KB 常驻"这条推论是错的（`bus/poll` 那 7KB 的大头
+  同样是 collector 模块 + 运行态表，不是源码体积）。惰性化本身没白做
+  （sniff 之外不建 mon 的常驻状态），但它**买不到 23KB**，60 点的账得另算。
+
+- **紧凑寄存器行：350B → 165B（+ plan 去包装 + 上传期关 MQTT 试连，2026-11-20）**。
+  `9319273` 的 60 点复测（`mem_scale_e2e.js --sizes 60`，干净现场）：
+  ```
+  [N=60] FAIL  rows=60  读回=0  Lua=289232/307192 (94%)  max=4096
+         保存失败：第 4/5 片没有送达：设备返回失败：rx 丢弃, 请重发
+  ```
+  这时才量清真正的两笔账：
+  1. **每行 ~350B**：五个字符串键 = 表头 56B + 8 个哈希槽 × 24B = 248B
+     + name/alias 两条串；60 行 ≈ 21KB —— 光这一项就吃掉了上传时能腾的余量。
+  2. **MQTT 试连的 ±10KB 抖动**：4G 通、平台连不上时（无卡/无平台）每 30~60 秒
+     试一次连接，一次 ~10KB Lua + 30KB sys，失败再还回来，空闲水位在
+     **279K ↔ 289.5K** 之间来回跳（`sys` 66K ↔ 98K 同步跳）。上传撞进高点
+     就凭空少 10KB。
+
+  这一版三处改动：
+
+  1. **紧凑寄存器行**（`cfg.lua`）：行改成定长数组
+     `{addr,count,dtype,name,alias[,off]}`，表头 56B + 5 槽 × 8B = 96B，
+     加 name/alias 两条串 ≈ **165B/行**（60 行 21KB → 10KB）。
+     `__index`/`__newindex` 按槽号映射，**读侧代码一行没改**（`r.addr` / `r.name`
+     照写），只有**构造口和编码出口**要过 `cfg.row()` / `cfg.row_out()`：
+     - `W:CSHARD` 收一片就折一片（`cfg.row_norm`）—— 不再攒 60 行哈希行
+       （死的时候攒了 48 行 ≈ 17KB，这正是"第 4 片 rx 丢弃"的直接原因）；
+     - 读盘 `shards_load` 解一段折一段；`compact` 只给 poll/pull，
+       infer 行是另一副样子（带 fc/id），不走紧凑行；
+     - **编码出口**：`shards_save` + `R:CFG`/`R:REG` 流式应答全部 `row_out()`
+       —— 否则 `json.encode(紧凑行)` 会把它编成 **数组** `[100,1,"uint16",...]`。
+       `tests/lua/test_cfg_compact.lua` 钉住"落盘必须是对象（不是数组）"、
+       读回逐字段一致、旧格式收得住。
+  2. **块内偏移不再单独建表**（`bus/poll.lua`）：`{r=行, off=n}` 改成把 `off`
+     挂到行**第 6 槽**，plan 里直接放行 → 每点省 64B，60 点省 3.8KB。
+  3. **上传期间关掉 MQTT 试连**：`iot.hold(bool)` + `W:CBEGIN` / `up_reset` /
+     `hold_restore` 收放。只挡"没连上时的试连"，已建立的连接不动；上传/落盘
+     结束立刻放开（`CFINISH` 提交那一步也保持盖着，`up_reset(..., true)`）。
+
+  回归：Lua **31/31**、前端 60/60、语法 21 文件 0 失败、模拟器 16 PASS / 5 SKIP / 0 FAIL。
+  真机复测口径见 `docs/real-device-e2e.md` §8。
+
+  > 如果 60 点还差，**别再继续抠行**，下一处是 MQTT 的 U4 分组上报
+  > （60 点一份 JSON ≈ 5.4KB，96% 水位下拿不到这么大的连续块）。
+
 

@@ -200,7 +200,12 @@ end
 local function reset_state()
     S = {
         want_run = false, connected = false, subscribed = false,
-        client = nil, dirty = false, backoff = 1,
+        -- hold: 分片上传/换配置窗口里【不发起新的 MQTT 连接尝试】。
+        --   12-fix 时期的观察: 4G 通但平台连不上时, 每 30~60 秒试一次连接,
+        --   一次要占 ~10KB Lua + 30KB sys, 失败后再还回来。11-19 真机实测
+        --   空闲水位就在 279K/289K 之间来回跳 —— 上传正好撞进去就少 10KB,
+        --   60 点那种"差几 KB"就是被这一下顶死的(见 docs/real-device-e2e.md)
+        hold = false, client = nil, dirty = false, backoff = 1,
         published = 0, failed = 0, replied = 0, kick_flag = false,
         -- 12-fix-7: build_fail = 大包拼不出来(U4/拓扑)的次数。
         --   现场那次 U4 停发, 而 pub=60/0 完全看不出来(失败走 pcall 跳过,
@@ -2335,7 +2340,12 @@ local function task_main()
         end
         if pull_active() then pcall(pull_step) end
         if not S.connected then
-            if net_ready() then
+            if S.hold then
+                -- 上传/换配置窗口: 这一轮不试连(见 reset_state 里 hold 的说明)。
+                --   已经连上的不动它 —— 稳态连接不制造那 10KB 抖动, 断开反而
+                --   会影响用户正在看的平台数据
+                wait_kickable(500)
+            elseif net_ready() then
                 local ok, err = try_connect()
                 if not ok then
                     if err == "no sn" then
@@ -2852,6 +2862,24 @@ function M.kick()
     destroy_client()
     S.backoff = 1
     S.kick_flag = true
+end
+
+-- 分片上传窗口闸门(2026-11-19)。on=true 之后, 没连上时【不再发起新的连接
+--   尝试】, 直到 on=false。已经连上的连接不动 —— 稳态连接不制造抖动, 而且
+--   用户可能正看着平台数据。
+--   为什么要这个: 试连一次占 ~10KB Lua + 30KB sys, 失败再还回去, 空闲水位
+--   因此在 279K/289K 之间来回跳; 60 点上传本来就贴着天花板, 撞上就少 10KB。
+function M.hold(on)
+    on = on and true or false
+    if S.hold == on then return end
+    S.hold = on
+    if not on then
+        -- 放开: 只叫醒 wait_kickable, 【不】destroy_client —— 上传期间如果
+        --   平台是连着的, 那条连接本来就没动过, 不该在这里断一次
+        S.backoff = 1
+        S.kick_flag = true
+    end
+    log.info("iot", "hold=" .. tostring(on))
 end
 
 function M.apply_cfg(c)

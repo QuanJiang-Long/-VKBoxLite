@@ -79,7 +79,7 @@ local function plan_str(pl)
 end
 local function offs_str(b)
     local t = {}
-    for i, it in ipairs(b.rows) do t[i] = it.r.addr .. "@" .. it.off end
+    for i, it in ipairs(b.rows) do t[i] = it.addr .. "@" .. it.off end
     return table.concat(t, ",")
 end
 local function R(addr, count, dtype)
@@ -162,7 +162,7 @@ local solo = pushed[1]
 pushed = {}
 local blk = poll._build_plan({ R(100), R(101), R(102) })[1]
 for _, it in ipairs(blk.rows) do
-    poll._extract_row(data, it.off, it.r)
+    poll._extract_row(data, it.off, it)
 end
 local inblk = nil
 for _, x in ipairs(pushed) do if x.addr == 101 then inblk = x end end
@@ -207,7 +207,7 @@ check("32 位值 push 在起始 addr", pushed[1] and pushed[1].addr == 100,
 pushed = {}
 data = string.char(0, 7, 0, 8)
 blk = poll._build_plan({ R(100), R(101), R(102) })[1]
-for _, it in ipairs(blk.rows) do poll._extract_row(data, it.off, it.r) end
+for _, it in ipairs(blk.rows) do poll._extract_row(data, it.off, it) end
 check("少回字时解出 2 个值不越界", #pushed == 2, #pushed)
 check("越界那行不脏数据", pushed[2].addr == 101 and pushed[2].value == 8,
     pushed[2] and pushed[2].addr)
