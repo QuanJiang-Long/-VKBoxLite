@@ -371,13 +371,17 @@ end
 
 
 
+
+
+
 local function shards_save(k, t)
 local rows = (type(t.regs) == "table") and t.regs or {}
 local segs, seg_sz, cur, cur_sz = {}, {}, {}, 2
 local function close_seg()
 if #cur == 0 then return true end
-segs[#segs + 1] = cur
-seg_sz[#seg_sz + 1] = cur_sz    -- 编码后的段宽(含 [ ] 和逗号), 预检用
+local s = "[" .. table.concat(cur, ",") .. "]"
+segs[#segs + 1] = s
+seg_sz[#seg_sz + 1] = #s        -- 编码后的段宽(含 [ ] 和逗号), 预检用
 cur, cur_sz = {}, 2
 return true
 end
@@ -395,7 +399,7 @@ if not e then return false, "encode fail(无返回)" end
 if #cur > 0 and (cur_sz + #e + 1 > SHARD_MAX or #cur >= SHARD_ROWS) then
 close_seg()
 end
-cur[#cur + 1] = o
+cur[#cur + 1] = e
 cur_sz = cur_sz + #e + (#cur > 1 and 1 or 0)
 end
 close_seg()
@@ -431,7 +435,14 @@ head.v, head.n, head.st = SHARD_VER, n, SHARD_W
 local ok1, err1 = put_json(k, head, true)
 if not ok1 then return false, err1 end
 for i = 1, n do
-local ok2, err2 = put_json(shard_key(k, i), segs[i], true)
+
+
+local s = segs[i]
+segs[i] = nil
+if #s > FSKV_VALUE_MAX then
+return false, "段 " .. #s .. "B 超 fskv 单值上限 " .. FSKV_VALUE_MAX .. "B"
+end
+local ok2, err2 = kv_set(shard_key(k, i), s, true)
 if not ok2 then
 return false, "分片" .. i .. "/" .. n .. "写入失败: " .. tostring(err2)
 end

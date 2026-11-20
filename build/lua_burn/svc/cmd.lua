@@ -944,11 +944,12 @@ end
 up_reset("W:CBEGIN")
 up.on, up.n, up.got, up.mode = true, n, 0, ctrl.get_mode()
 local used = lua_used()          -- 先取水位的数, 再去试分配(探测本身吃块)
-local did = make_room()
-hold_arm()
+
 
 
 if iot and iot.hold then pcall(iot.hold, true) end
+local did = make_room()
+hold_arm()
 local mx = max_block({ 1024, 2048, 3072, 4096, 6144, 8192 })
 log.info("cmd", "分片上传开场 n=" .. n .. " mode=" .. tostring(up.mode)
 .. " 腾出[" .. table.concat(did, " ") .. "] max=" .. mx

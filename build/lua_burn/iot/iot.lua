@@ -2881,8 +2881,16 @@ function M.hold(on)
 on = on and true or false
 if S.hold == on then return end
 S.hold = on
-if not on then
+if on then
 
+
+
+
+
+
+
+destroy_client()
+else
 
 S.backoff = 1
 S.kick_flag = true
