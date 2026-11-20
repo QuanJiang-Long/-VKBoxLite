@@ -1775,7 +1775,15 @@ local function auto_apply(r)
     n.timeout_ms = base.timeout_ms
 
     local before = { slave = base.slave, baud = base.baud, regs = #(base.regs or {}) }
-    local ok, serr = cfgstore.save_pull(n)
+    -- 2026-11-20: 先在 n 上【原地】归一化, 再落盘 —— 和 W:CFINISH 的
+    --   commit_config 同一条路。两个理由:
+    --   1) 落盘走 _norm 口, 不再在 save_pull 内部把 60 行造第二遍;
+    --   2) 下面 apply_cfg(n) 交给 poll 的必须是紧凑行(165B/行),
+    --      否则平台档的 60 点还是 350B/行, 等于这条路径没吃到紧凑行的便宜
+    local nr, nerr = cfgstore.normalize_poll(n, true)
+    if not nr then return false, "配置非法: " .. tostring(nerr) end
+    n = nr
+    local ok, serr = cfgstore.save_pull_norm(n)
     if not ok then return false, "落盘失败: " .. tostring(serr) end
 
     local pe = get_poll()
