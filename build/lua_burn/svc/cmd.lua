@@ -1045,6 +1045,12 @@ end
 up.got = i
 up.bytes = up.bytes + #body
 hold_touch()      -- 有进展就把"静默 60 秒"的计时归零
+
+
+
+
+
+collectgarbage("collect")
 M.reply("RET:CSHARD=" .. i .. "=OK")
 end)
 
@@ -1097,6 +1103,11 @@ end
 base.regs = up.rows
 local rows_n, bytes_n = #up.rows, up.bytes + #arg
 up_reset("CFINISH 提交", true)
+
+
+
+collectgarbage("collect")
+collectgarbage("collect")
 trc_begin(bytes_n)
 local ok, reason = commit_config(base)
 

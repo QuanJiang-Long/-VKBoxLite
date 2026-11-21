@@ -295,8 +295,13 @@ if r.addr == nil or r.count == nil or type(r.dtype) ~= "string" then return nil 
 return M.row(r.addr, r.count, r.dtype, nm, al)
 end
 
-local SHARD_ROWS = 16
-local SHARD_MAX = 1024
+
+
+
+
+
+local SHARD_ROWS = 8
+local SHARD_MAX = 640
 local SHARD_VER = 1
 local SHARD_W, SHARD_R = "w", "r"
 
@@ -374,15 +379,29 @@ end
 
 
 
+
+
+
+
+
+
+
+
+local function join_parts(parts, n)
+local s = parts[1]
+for i = 2, n do s = s .. "," .. parts[i] end
+return "[" .. s .. "]"
+end
+
 local function shards_save(k, t)
 local rows = (type(t.regs) == "table") and t.regs or {}
-local segs, seg_sz, cur, cur_sz = {}, {}, {}, 2
+local segs, seg_sz, cur, cur_sz, cur_n = {}, {}, {}, 2, 0
 local function close_seg()
-if #cur == 0 then return true end
-local s = "[" .. table.concat(cur, ",") .. "]"
+if cur_n == 0 then return true end
+local s = join_parts(cur, cur_n)
 segs[#segs + 1] = s
 seg_sz[#seg_sz + 1] = #s        -- 编码后的段宽(含 [ ] 和逗号), 预检用
-cur, cur_sz = {}, 2
+cur, cur_sz, cur_n = {}, 2, 0
 return true
 end
 for i = 1, #rows do
@@ -396,11 +415,12 @@ local ok, e = pcall(json.encode, o)
 if not ok then return false, "encode fail: " .. brief(e) end
 if not e then return false, "encode fail(无返回)" end
 
-if #cur > 0 and (cur_sz + #e + 1 > SHARD_MAX or #cur >= SHARD_ROWS) then
+if cur_n > 0 and (cur_sz + #e + 1 > SHARD_MAX or cur_n >= SHARD_ROWS) then
 close_seg()
 end
-cur[#cur + 1] = e
-cur_sz = cur_sz + #e + (#cur > 1 and 1 or 0)
+cur_n = cur_n + 1
+cur[cur_n] = e
+cur_sz = cur_sz + #e + (cur_n > 1 and 1 or 0)
 end
 close_seg()
 
@@ -506,6 +526,19 @@ if not json then return false, "no json lib" end
 norm_cache[k] = nil
 if shard then
 local ok, err = shards_save(k, t)
+
+
+
+
+
+if not ok and type(err) == "string"
+and (err:find("memory", 1, true) or err:find("连续块", 1, true)) then
+collectgarbage("collect")
+collectgarbage("collect")
+M.drop_cache()
+log.warn("cfg", "分片写失败, 收垃圾重试一次:", brief(err))
+ok, err = shards_save(k, t)
+end
 
 
 
