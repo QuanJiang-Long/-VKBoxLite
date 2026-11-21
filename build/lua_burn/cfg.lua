@@ -150,8 +150,20 @@ local FSKV_VALUE_MAX = 4096
 
 
 
+local PROBE_SRC
 local function probe_block(n)
 collectgarbage("collect")          -- 上一轮的碎渣先收掉, 否则探不准
+
+
+
+
+
+
+if n <= 1024 then
+PROBE_SRC = PROBE_SRC or string.rep("x", 1024)
+local ok, s = pcall(string.sub, PROBE_SRC, 1, n)
+return ok and type(s) == "string" and #s == n
+end
 local ok, s = pcall(string.rep, "x", n)
 return ok and type(s) == "string" and #s == n
 end
@@ -431,9 +443,13 @@ if key ~= "regs" then head[key] = val end
 end
 
 
+
+
+
+
 local old_n = 0
-local oh = dec_json(kv_get(k))
-if oh then
+local okh, oh = pcall(dec_json, kv_get(k))
+if okh and oh then
 local on = shard_of(oh)
 if on and on > 0 then old_n = on end
 end
