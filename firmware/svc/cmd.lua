@@ -1045,6 +1045,12 @@ local function reg_cmds()
         up.got = i
         up.bytes = up.bytes + #body
         hold_touch()      -- 有进展就把"静默 60 秒"的计时归零
+        -- 收完这一片就收一次垃圾: 这片解码出来的 14~17 张哈希行(~5KB)+临时串
+        --   到这儿已经没人引用了, 但 Lua 的增量 GC 在池子贴顶时不一定及时收。
+        --   不收的后果是"最后几片 + CFINISH 全压在没回收的渣上"(11-21 现场
+        --   shard4 used 293464, 其中好几 KB 是上一片的)。片数是个位数,
+        --   一次全量 GC 几十毫秒, 上传本来就是秒级操作。
+        collectgarbage("collect")
         M.reply("RET:CSHARD=" .. i .. "=OK")
     end)
 
@@ -1097,6 +1103,11 @@ local function reg_cmds()
         base.regs = up.rows
         local rows_n, bytes_n = #up.rows, up.bytes + #arg
         up_reset("CFINISH 提交", true)
+        -- 提交前收两轮: 上一片(以及 CFINISH 自己那半截解码)的垃圾都在这儿死。
+        --   这一次全量 GC 是 CFINISH 唯一"白捡"的连续块, 不收等于顶着一堆
+        --   已死对象去写盘 —— 11-21 现场就是在这个水位上炸的
+        collectgarbage("collect")
+        collectgarbage("collect")
         trc_begin(bytes_n)
         local ok, reason = commit_config(base)
         -- 校验/落盘失败的原因仍挂 CFG: 那是"这份配置被拒了", 与 W:CFG 逐字节同一句

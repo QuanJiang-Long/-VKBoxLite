@@ -295,8 +295,13 @@ local function try_pack(r)
     return M.row(r.addr, r.count, r.dtype, nm, al)
 end
 
-local SHARD_ROWS = 16
-local SHARD_MAX = 1024
+-- 段宽/段行数: 越小越不怕"最大连续块只剩 1~2KB"的现场。
+--   写盘路径的每一次分配都要一块连续内存: probe_block 的 string.rep 会
+--   按 2 的幂扩(见 shards_save 上面那段), 段宽 1.2KB 时探针实际要 2048。
+--   取 640/8: 一行 ~70B, 8 行 ≈ 560B, 探针最多要 1024, 在这条水位线上稳得多。
+--   代价只是段数变多(60 点 = 8 段, 128 点 = 16 段), fskv 键完全够用。
+local SHARD_ROWS = 8
+local SHARD_MAX = 640
 local SHARD_VER = 1
 local SHARD_W, SHARD_R = "w", "r"
 
@@ -373,16 +378,30 @@ end
 --   封段时拼成一个 JSON 数组串。
 --   为什么不攒普通对象(11-20 真机现场): 一个段最多 16 行对象 ≈ 5.6KB 临时表,
 --   60 点上传时 CFINISH 正是卡在这 5.6KB 上("写盘前连续块不够")。
---   现在峰值 = 一行对象 + 一行串 + 一个段串(~1.2KB)。
+--   现在峰值 = 一行对象 + 一行串 + 一个段串(~600B)。
+--
+-- ⚠️ 11-21 真机: 封段**不许用 table.concat**。LuatOS 把 Lua 的 luaL_Buffer
+--   改成了"按 2 的幂扩 userdata"(见 lauxlib 里那句 not enough memory for
+--   buffer allocation): 拼 1.2KB 的段会依次要 256/512/1024/2048 的
+--   连续块, 池子只剩 14KB、最大连续块 2048 时正好在最后一步炸掉 ——
+--   现场就是 `RET:FAIL:CFINISH=not enough memory for buffer allocation`
+--   (连我们自己的 "分片i/n写入失败" 前缀都没来得及加, 因为它是 raise)。
+--   改用 `..` 折: 每次只分配"当前长度+新行"那么大, 峰值就是一个段宽。
+local function join_parts(parts, n)
+    local s = parts[1]
+    for i = 2, n do s = s .. "," .. parts[i] end
+    return "[" .. s .. "]"
+end
+
 local function shards_save(k, t)
     local rows = (type(t.regs) == "table") and t.regs or {}
-    local segs, seg_sz, cur, cur_sz = {}, {}, {}, 2
+    local segs, seg_sz, cur, cur_sz, cur_n = {}, {}, {}, 2, 0
     local function close_seg()
-        if #cur == 0 then return true end
-        local s = "[" .. table.concat(cur, ",") .. "]"
+        if cur_n == 0 then return true end
+        local s = join_parts(cur, cur_n)
         segs[#segs + 1] = s
         seg_sz[#seg_sz + 1] = #s        -- 编码后的段宽(含 [ ] 和逗号), 预检用
-        cur, cur_sz = {}, 2
+        cur, cur_sz, cur_n = {}, 2, 0
         return true
     end
     for i = 1, #rows do
@@ -396,11 +415,12 @@ local function shards_save(k, t)
         if not ok then return false, "encode fail: " .. brief(e) end
         if not e then return false, "encode fail(无返回)" end
         -- 加这行会撑破段宽(或撑破行数)就先封段, 再把它起成新段的第一行
-        if #cur > 0 and (cur_sz + #e + 1 > SHARD_MAX or #cur >= SHARD_ROWS) then
+        if cur_n > 0 and (cur_sz + #e + 1 > SHARD_MAX or cur_n >= SHARD_ROWS) then
             close_seg()
         end
-        cur[#cur + 1] = e
-        cur_sz = cur_sz + #e + (#cur > 1 and 1 or 0)
+        cur_n = cur_n + 1
+        cur[cur_n] = e
+        cur_sz = cur_sz + #e + (cur_n > 1 and 1 or 0)
     end
     close_seg()
 
@@ -506,6 +526,19 @@ local function save_json(k, t, shard, norm_out)
     norm_cache[k] = nil
     if shard then
         local ok, err = shards_save(k, t)
+        -- 内存类失败【收垃圾重试一次】。分片写是幂等的(同一组 key 重写一遍),
+        --   失败点只有三种: 预检不过(一个字节没动) / 某段写失败(header 还停在
+        --   st=w) / header 提交失败 —— 三种都能安全重跑。现场教训: 60 点差
+        --   的往往就是"上一片没回收的几 KB", 收两轮再存就过了, 让用户重传
+        --   一整份 60 点反而是最贵的(要重新烧/重新点保存)。
+        if not ok and type(err) == "string"
+            and (err:find("memory", 1, true) or err:find("连续块", 1, true)) then
+            collectgarbage("collect")
+            collectgarbage("collect")
+            M.drop_cache()
+            log.warn("cfg", "分片写失败, 收垃圾重试一次:", brief(err))
+            ok, err = shards_save(k, t)
+        end
         -- ⚠️ 2026-11-18 (真机 60 点读不回): 写成功后把【已归一化】的这份挂进
         --   norm_cache。kv_set 落盘时会作废 json_cache(原始表), 于是紧接着的
         --   第一次 R:CFG 要重读 fskv + 重解 + 再 normalize 一遍 —— 60 点就是
