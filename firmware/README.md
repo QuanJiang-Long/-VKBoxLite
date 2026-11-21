@@ -2752,4 +2752,33 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
   > （60 点一份 JSON ≈ 5.4KB，96% 水位下拿不到这么大的连续块），
   > 以及 `R:VAL` 的 `snapshot()`（每次新建 60 行表 ≈ 11K）。
 
+- **CFINISH 炸在 `luaL_Buffer`：段拼接不许用 `table.concat`，段宽降到 640B（2026-11-21）**。
+  A2（`98ab055`）烧进去后 60 点的死法：
+  ```
+  [CBEGIN]  used 281712  max 6144      ← hold(true) 生效，没有 10K 抖动
+  [shard 4] used 293464  max 2048
+  [CFINISH] RET:FAIL:CFINISH=not enough memory for buffer allocation
+  [R:CTRACE] enter 294416 / norm 295848 / freed 293696   ← 没有 saved 段
+  ```
+  判读三条：
+  1. 应答键是 `CFINISH`、而且**没有**我们自己的 `分片i/n写入失败` 前缀
+     —— 不是 `shards_save` 返回的错，是某处 **raise** 被命令分发器兜住；
+  2. 那句话不是 Lua 的 `not enough memory`，是 LuatOS 改写过的 **`luaL_Buffer`
+     扩容失败**（`luaL_prepbuffsize`）。它在 PC 模拟器的 Lua 核心里能直接搜到；
+  3. A2 里唯一"没 pcall + 用 luaL_Buffer"的地方就是 `shards_save` 封段的
+     `table.concat(cur, ",")`。
+  为什么 1.2KB 的段会要不到：LuatOS 的 `luaL_Buffer` **按 2 的幂扩 userdata**，
+  拼 1.2KB 依次要 256/512/1024/**2048** 的连续块，而现场最大连续块正好 2048。
+  （同一机制也解释了 `string.rep` 探针在 n 略大于 1KB 时要 2KB 的怪事。）
+
+  A3 四处改动：
+  1. 封段改 `..` 折（`join_parts`）—— 每次只分配"当前长度 + 新行"，峰值一个段宽；
+  2. `SHARD_ROWS 16 → 8`、`SHARD_MAX 1024 → 640`：段 ~560B，`string.rep` 探针
+     最多要 1KB；60 点 = 8 段，fskv 键够用；
+  3. `W:CSHARD` 每收一片 `collectgarbage("collect")`；`W:CFINISH` 提交前再收两轮
+     —— 那 60 张解码哈希行刚死，不收就是顶着垃圾写盘；
+  4. `save_json` 分片写遇 `memory` / `连续块` 类失败**收垃圾重试一次**：
+     分片写幂等（预检失败一个字节没动；中途失败只是 header 停在 `st=w`），
+     重跑一遍就齐 —— 比让用户重传一整份 60 点便宜得多。
+  回归：Lua **31/31**。真机口径见 `docs/real-device-e2e.md` §8（11-21 小节）。
 
