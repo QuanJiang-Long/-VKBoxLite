@@ -2782,3 +2782,23 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
      重跑一遍就齐 —— 比让用户重传一整份 60 点便宜得多。
   回归：Lua **31/31**。真机口径见 `docs/real-device-e2e.md` §8（11-21 小节）。
 
+- **探针自己把自己探死：`string.rep` 的 5 倍放大器（2026-11-21 下午）**。
+  A3 烧进真机后死在 `RET:FAIL:CFINISH=not enough memory`（纯 Lua OOM），
+  CTRACE 仍停在 `freed` 之后。把 PC 模拟器**人为压到同样水位**（临时
+  `W:BALLAST`，只在 staging）后 100% 复现，dbg 日志直指：
+  ```
+  eb probe n=734 → E/mem ... alloc 3712 → sa ret ok=false
+  ```
+  `ensure_block(734)` 里 `string.rep("x", 734)` 让分配器收到的是 **3712B**
+  （LuatOS 的 `luaL_Buffer` 按 2 的幂扩 userdata）。于是"预检说要 3.7KB
+  连续块"→ 判不够 → 整次保存被自己的预检否掉，而真正要写的段只有 561B。
+  两条改动：
+  1. `probe_block` 改成**要多少分配多少**：≤1KB 用 `string.sub(缓存 1KB 串)`
+     （一次分配正好 n 字节），>1KB 才退回 `string.rep`；
+  2. "读老 header 只为清残段"包进 `pcall` —— LuatOS 的 C json 解码也按输入
+     长度的几倍要连续块，解不出来只影响多留几个残段键（读侧只认 header.n），
+     不该让整次保存失败。
+  模拟器在 `max:3072` 下复测：`CFINISH=OK` + `R:CFG` 读回 60 行；
+  `tests/lua/test_cfg_shard.lua` 的探针替身同步改成同时拦 `string.rep`/
+  `string.sub`（否则"写盘前预检"这条路测不到）。
+

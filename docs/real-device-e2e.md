@@ -486,6 +486,31 @@ A2（`98ab055`）烧进去后 60 点的死法又变了，这次信息量最大�
 - `save_json` 分片写遇 `memory` / `连续块` 类失败**收垃圾重试一次** —— 分片写幂等：
   预检失败一个字节没动，中途失败只是 header 停在 `st=w`，重跑一遍就齐。
 
+> **A3 之后又抓到一个：探针自己把自己探死（2026-11-21 下午）**
+>
+> A3 烧进真机后 60 点的死在 `RET:FAIL:CFINISH=not enough memory`（纯 Lua 的
+> `not enough memory`，不再是 buffer allocation），CTRACE 仍然停在
+> `freed` 之后。真机看不到栈，于是把 PC 模拟器**人为压到同样水位**复现：
+>
+> - 模拟器加一条临时 `W:BALLAST=<保留字节>`（只在 staging，不进仓库）压池子；
+> - 分片探针在 `W:CFINISH` 之前压到 `max:3072`，**100% 复现**同一句失败；
+> - 打开 `dbg` 日志后凶手很明确：
+>   ```
+>   s2b kv_get done → eb probe n=734 → E/mem ... alloc 3712 → sa ret ok=false
+>   ```
+>   即 `ensure_block(734)` 里的 `string.rep("x", 734)` 让分配器收到的是
+>   **3712B（5 倍）** —— LuatOS 的 `luaL_Buffer` 按 2 的幂扩 userdata。
+>   于是"预检说要 3.7KB 连续块"→ 判"连续块不够"→ 整次保存被自己的预检否掉，
+>   而真正要写的段只有 561B。
+>
+> 改法：`probe_block` 改成 **要多少分配多少** —— 对一块缓存的 1KB 串做
+> `string.sub`（≤1KB 时），一次分配正好 n 字节；>1KB 才退回 `string.rep`。
+> 顺手把"读老 header 只为清残段"包进 pcall（LuatOS 的 C json 解码也按输入
+> 长度的几倍要连续块，解不出来只影响多留几个残段键，不该让保存失败）。
+>
+> 模拟器复测（`W:BALLAST` 留 4KB / `max:3072`）：`CFINISH=OK`，
+> `R:CFG` 读回 60 行；Lua 31/31、模拟器 17 PASS / 4 SKIP / 0 FAIL。
+
 **A3 的真机验收顺序**（断电重插建议保留，但不是硬要求）：
 
 | 步骤 | 期望 |

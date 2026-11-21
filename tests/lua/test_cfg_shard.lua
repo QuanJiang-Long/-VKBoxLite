@@ -212,16 +212,25 @@ package.preload['json'] = function()
 end
 
 -- ===== "连续块"探针替身 =====
--- cfg.lua 写盘前用 string.rep 真分配一次探连续块(和真机 R:MEM / W:CBEGIN 同源),
---   这里让它在 REP_ENFORCE 打开时按 LIMIT 抛, 才能测到"写盘前预检"这条路。
+-- cfg.lua 写盘前真分配一次探连续块. 2026-11-21 起探针改成"≤1KB 用
+--   string.sub(缓存串), >1KB 才用 string.rep"(rep 在 LuatOS 上会按 2 的幂
+--   扩 buffer, 探 734B 实际要 3712B, 池子贴顶时自己把自己探死)。
+--   所以这里两个都要能按 LIMIT 抛, 否则"写盘前预检"这条路测不到了。
 --   默认关闭: 用例 6/8 要往 flash 里塞 3700B 的假老配置, 那不是固件分配。
 local real_rep = string.rep
+local real_sub = string.sub
 local REP_ENFORCE = false
 string.rep = function(s, n, ...)
   if REP_ENFORCE and type(n) == 'number' and n > LIMIT then
     error('not enough memory for buffer allocation')
   end
   return real_rep(s, n, ...)
+end
+string.sub = function(s, i, j, ...)
+  if REP_ENFORCE and type(j) == 'number' and (j - (i or 1) + 1) > LIMIT then
+    error('not enough memory for buffer allocation')
+  end
+  return real_sub(s, i, j, ...)
 end
 
 -- cfg.lua 里 json_cache/cfg_ver 是模块级状态, 换用例要拿一份干净的实例;

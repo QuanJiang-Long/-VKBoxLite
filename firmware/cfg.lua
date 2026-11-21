@@ -150,8 +150,20 @@ local FSKV_VALUE_MAX = 4096
 --     · 探法必须和 R:MEM / W:CBEGIN 同源(string.rep), 总空闲不是连续块;
 --     · 不够就先丢"马上要被换掉"的那份解码缓存, 再收两轮垃圾;
 --     · 还不够就【在动 header 之前】失败, 把老配置原样留着。
+local PROBE_SRC
 local function probe_block(n)
     collectgarbage("collect")          -- 上一轮的碎渣先收掉, 否则探不准
+    -- ⚠️ 探针必须"要多少就分配多少"(2026-11-21 真机/模拟器都撞到):
+    --   `string.rep` 在 LuatOS 上走 luaL_Buffer, 会按 2 的幂扩 userdata ——
+    --   实测探 734B 时分配器收到的是 **3712B**(5 倍)。池子贴顶时探针等于
+    --   把自己探死: 明明 734B 拿得到, 它去要 3.7KB 于是失败,
+    --   接着 ensure_block 判"连续块不够", 整次保存被自己的预检否掉。
+    --   改成对一块缓存串做 string.sub: 一次分配正好 n 字节。
+    if n <= 1024 then
+        PROBE_SRC = PROBE_SRC or string.rep("x", 1024)
+        local ok, s = pcall(string.sub, PROBE_SRC, 1, n)
+        return ok and type(s) == "string" and #s == n
+    end
     local ok, s = pcall(string.rep, "x", n)
     return ok and type(s) == "string" and #s == n
 end
@@ -431,9 +443,13 @@ local function shards_save(k, t)
     end
 
     -- 旧段数(只为回收残段): 上一份本来就是分片才有, 老格式/没写过就是 0
+    --   ⚠️ 这一步纯属"顺手打扫", 解不出来必须当没解 (11-21 模拟器实测:
+    --   LuatOS 的 C json 解码按输入长度的几倍要连续块, 池子贴顶时它会 raise)。
+    --   老 header 读不出来只会让残段键多留几个 —— 读侧只认 header 里的 n,
+    --   正确性一点不受影响, 绝不能因此让整次保存失败。
     local old_n = 0
-    local oh = dec_json(kv_get(k))
-    if oh then
+    local okh, oh = pcall(dec_json, kv_get(k))
+    if okh and oh then
         local on = shard_of(oh)
         if on and on > 0 then old_n = on end
     end
