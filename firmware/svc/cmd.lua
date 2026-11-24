@@ -522,8 +522,17 @@ local function commit_config(t)
     local ok, serr
     -- 落归一化后的 n, 不再用 save_poll(t): 后者会在内部再 normalize 一遍,
     --   等于把 128 个寄存器表(~30KB)白造第二次
-    if slot == SLOT_PULL then ok, serr = cfgstore.save_pull_norm(n)
-    else ok, serr = cfgstore.save_poll_norm(n) end
+    -- ⚠️ 外面套 pcall 只为【诊断】: 保存路径万一 raise(真机只回一句
+    --   "not enough memory", 看不到栈), 把 cfgstore.stage 带进应答里,
+    --   现场就能看出死在哪一步("@shard.seg7" = 第 7 段写盘)。
+    --   归一化产物照样原样交给保存函数, 语义一点没改。
+    local saver = (slot == SLOT_PULL) and cfgstore.save_pull_norm or cfgstore.save_poll_norm
+    local pok, a1, a2 = pcall(saver, n)
+    if pok then
+        ok, serr = a1, a2
+    else
+        ok, serr = false, "保存路径异常@" .. tostring(cfgstore.stage or "?") .. ": " .. tostring(a1)
+    end
     -- 落盘内部那份 jencode 字符串已经还掉了, used 看不见它; 靠 max 的涨幅
     trc_sample("saved")
     if not ok then return false, tostring(serr or "写入失败") end

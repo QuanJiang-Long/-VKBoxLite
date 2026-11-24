@@ -75,8 +75,12 @@ local function oneline(s, what)
 end
 
 -- ===== 1) json.encode 抛异常: 真原因必须进应答 =====
+--   ⚠️ 2026-11-24 起 ds_poll 的写盘路径**不再调 C 编码器**(紧凑行/header 都是
+--   自己拼的串, 见 cfg.lua 的 row_json/flat_json), 所以"encode 失败"这条路
+--   只剩不分片的槽(ds_infer/ds_alias/ds_sys)。契约本身一个字没变:
+--   前缀 + 真原因必须一起回到应答里。
 ENC = 'raise'
-local ok, err = cfg.save_poll({ slave = 1, regs = { { addr = 100, name = 'a', dtype = 'uint16' } } })
+local ok, err = cfg.save_sys({ boot_mode = 'idle' })
 eq(ok, false, 'encode 抛异常时保存判失败')
 has(err, 'encode fail', '前缀 encode fail 原样保留(上位机按它认这条)')
 has(err, 'not enough memory', 'C 层那句内存不足跟着回应答')
@@ -84,7 +88,7 @@ oneline(err, 'encode 失败原因')
 
 -- 超长/带换行的原因: 压成一行并截断(现场那句 E/mem 是一整行, 但别的 bsp 未必)
 ENC_MSG = 'memory allocation failed total 307192,\r\n used 298576, alloc 3791 ' .. string.rep('x', 200)
-ok, err = cfg.save_poll({ slave = 1, regs = {} })
+ok, err = cfg.save_sys({ boot_mode = 'idle' })
 eq(ok, false, '超长原因同样失败')
 oneline(err, '超长原因')
 -- 80 是 brief 的默认上限, 整条应答 = 前缀 + 最多 80 字节
@@ -94,16 +98,35 @@ end
 
 -- ===== 2) json.encode 不抛异常只回 nil: 分开报, 但前缀还在 =====
 ENC, ENC_MSG = 'nil', ''
-ok, err = cfg.save_poll({ slave = 1, regs = {} })
+ok, err = cfg.save_sys({ boot_mode = 'idle' })
 eq(ok, false, 'encode 无返回也判失败')
 has(err, 'encode fail', '无返回同样带 encode fail 前缀')
 has(err, '无返回', '无返回和抛异常说得开')
 
 -- ===== 3) 落盘这一步仍然正常(前缀改动没把成功路径带歪) =====
 ENC = 'ok'
-ok, err = cfg.save_poll({ slave = 1, regs = { { addr = 100, name = 'a', dtype = 'uint16' } } })
+ok, err = cfg.save_poll({ slave = 1, regs = { { addr = 100, name = 'a', dtype = 'uint16', alias = 'A1' } } })
 eq(ok, true, '小配置照样存得下')
 eq(err, nil, '成功时一个原因都不带')
+
+-- ===== 3b) 紧凑行的写盘路径【不碰 C 编码器】: encode 全坏也能存进去 =====
+--   这是 2026-11-24 的真机教训: 60 点保存死在 C 层编码/分配上。
+--   现在行和 header 都是自己拼的串, 编码器只在非紧凑行/不分片槽才用。
+ENC = 'raise'
+local writes0 = 0
+do
+  local fskvm = require('fskv')
+  local real_set = fskvm.set
+  fskvm.set = function(k, v) writes0 = writes0 + 1 return real_set(k, v) end
+  ok, err = cfg.save_poll({ slave = 1, regs = { { addr = 101, name = 'b', dtype = 'uint16', alias = 'B1' } } })
+  fskvm.set = real_set
+end
+eq(ok, true, '编码器抛错时紧凑行照样存得下')
+eq(err, nil, '成功时不带原因')
+if writes0 < 3 then
+  print(string.format('FAIL: 一次带行保存该是 header+段+提交 3 次写, 实际 %d', writes0)); fails = fails + 1
+end
+ENC = 'ok'
 
 -- 换一个场景: 把 fskv 里的值和解码缓存重新灌一遍。
 -- kv_set 成功后才清缓存, 这里借一次正常保存把 ds_poll 的解码缓存顶掉, 再换 DECODED

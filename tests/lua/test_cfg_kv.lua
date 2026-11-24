@@ -65,20 +65,25 @@ local ok, err = cfg.save_poll({ slave = 1, regs = { { addr = 100, name = 'a', dt
 eq(ok, true, '小配置能存')
 eq(err, nil, '成功时不带原因')
 eq(set_calls - before, 3, '一行寄存器: header + 1 段 + 提交, 共 3 次写')
-eq(store['ds_poll'], string.rep('a', 24), '值真进了 fskv')
+-- ⚠️ 2026-11-24 起 header 不再过 json.encode(自己拼串, 见 cfg.lua flat_json),
+--   所以这里钉的是"真进 fskv 的那串是【已提交】的 header": st=r + n=段数
+has(store['ds_poll'], '"st":"r"', 'header 真进了 fskv 且已提交(st=r)')
+has(store['ds_poll'], '"n":1', 'header 记了 1 段')
 eq(cfg.poll_src(), 'fskv', 'poll_src 认出已保存过')
 
 -- 上限边界: 正好 4096 该放过去, 超一个字节必须在进 fskv 之前拦下
+--   ⚠️ 用不分片的 ds_sys: 那条路整表还走 json.encode, blob_len 才控得住长度。
+--   分片槽(poll/pull/infer)现在每段 ≤640B, 结构上就撞不到 4096 这把闸。
 before = set_calls
 blob_len = FSKV_MAX
-ok = cfg.save_poll({ slave = 1, regs = {} })
+ok = cfg.save_sys({ boot_mode = 'idle' })
 eq(ok, true, '正好 4096B 允许写')
-eq(set_calls - before, 2, '4096B 真的发给了 fskv')
+eq(set_calls - before, 1, '4096B 真的发给了 fskv')
 
 before = set_calls
 blob_len = FSKV_MAX + 1
 local v_before = cfg.version()
-ok, err = cfg.save_poll({ slave = 1, regs = {} })
+ok, err = cfg.save_sys({ boot_mode = 'idle' })
 eq(ok, false, '4097B 必须失败')
 has(err, '4096', '失败原因带单值上限')
 has(err, '4097', '失败原因带实际字节数')
@@ -89,19 +94,19 @@ eq(cfg.version(), v_before, '写失败不得涨配置版本号 (缓存白失效)
 blob_len = 3900   -- 低于 4096, 拦不住, 只能看返回值
 set_ret = false
 v_before = cfg.version()
-ok, err = cfg.save_poll({ slave = 1, regs = {} })
+ok, err = cfg.save_sys({ boot_mode = 'idle' })
 eq(ok, false, 'fskv 返回 false 必须判失败')
 has(err, '拒写', '失败原因说明是被 fskv 拒的')
 eq(cfg.version(), v_before, '同样的失败不触发缓存失效')
 
 -- 某版 bsp 成功时不返值: 只认【明确的 false】, 这条守住不能把正常保存判死
 set_ret = nil
-ok, err = cfg.save_poll({ slave = 1, regs = {} })
+ok, err = cfg.save_sys({ boot_mode = 'idle' })
 eq(ok, true, 'fskv.set 无返回值时按成功处理 (不能误伤所有保存)')
 
 -- C 层 raise 也不能把整条 W:CFG 打崩
 set_ret = 'raise'
-ok, err = cfg.save_poll({ slave = 1, regs = {} })
+ok, err = cfg.save_sys({ boot_mode = 'idle' })
 eq(ok, false, 'fskv.set 抛错时返回失败而不是冒泡')
 has(err, '拒写', '抛错也走同一条失败原因')
 -- ⚠️ 真实原因必须跟着回应答: 11-12 现场 3774B(远小于 4096)保存失败, 前端只
@@ -109,12 +114,13 @@ has(err, '拒写', '抛错也走同一条失败原因')
 has(err, 'not enough memory', '失败原因带上 C 层那句话')
 has(err, '3900', '原因里既有字节数也有原因')
 
--- 其它槽共用同一个闸: ds_infer(sniff 推断表)一样会超 4096
+-- 其它槽共用同一个闸: ds_sys 一样会超 4096(ds_infer 是分片槽, 每段 ≤640B,
+--   结构上撞不到这把闸 —— 那正是分片的意义)
 set_ret = true
 blob_len = 6000
-ok, err = cfg.save_infer({ slave = 1, regs = {} })
-eq(ok, false, '推断表同样受 4096 闸约束')
-has(err, '4096', '推断表的失败原因也带上限')
+ok, err = cfg.save_sys({ boot_mode = 'idle' })
+eq(ok, false, 'ds_sys 同样受 4096 闸约束')
+has(err, '4096', '失败原因也带上限')
 
 if fails > 0 then
   print(string.format('FAIL: %d 个断言不过', fails))
