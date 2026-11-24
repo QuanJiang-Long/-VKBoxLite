@@ -11,6 +11,12 @@ local M = {}
 
 
 
+
+M.stage = ""
+
+
+
+
 local MODE_MANUAL, MODE_PLATFORM, MODE_IDLE, MODE_SNIFF = "manual", "platform", "idle", "sniff"
 
 local K_POLL, K_SYS = "ds_poll", "ds_sys"
@@ -405,38 +411,63 @@ for i = 2, n do s = s .. "," .. parts[i] end
 return "[" .. s .. "]"
 end
 
+
+
+
+
+
+local JESC = { ['"'] = '\\"', ['\\'] = '\\\\', ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t' }
+
+local function jstr(s)
+s = tostring(s)
+if s:find('[%c"\\]') then
+s = s:gsub('[%c"\\]', function(c)
+return JESC[c] or string.format('\\u%04x', string.byte(c))
+end)
+end
+return '"' .. s .. '"'
+end
+
+
+
+local function row_json(r)
+if not M.is_row(r) then
+local ok, e = pcall(json.encode, M.row_out(r))
+if not ok then return nil, e end
+return e
+end
+return '{"addr":' .. tostring(rawget(r, 1))
+.. ',"count":' .. tostring(rawget(r, 2))
+.. ',"dtype":' .. jstr(rawget(r, 3))
+.. ',"name":' .. jstr(rawget(r, 4))
+.. ',"alias":' .. jstr(rawget(r, 5)) .. '}'
+end
+
+
+
+local function flat_json(t)
+local p = {}
+for k, v in pairs(t) do
+local tv = type(v)
+if tv == "table" then return nil end
+p[#p + 1] = jstr(k) .. ":" .. ((tv == "string") and jstr(v) or tostring(v))
+end
+return "{" .. table.concat(p, ",") .. "}"
+end
+
+
+local function put_head(k, head, noflush)
+local s = flat_json(head)
+if s then return kv_set(k, s, noflush) end
+return put_json(k, head, noflush)
+end
+
+
+
+
+
 local function shards_save(k, t)
 local rows = (type(t.regs) == "table") and t.regs or {}
-local segs, seg_sz, cur, cur_sz, cur_n = {}, {}, {}, 2, 0
-local function close_seg()
-if cur_n == 0 then return true end
-local s = join_parts(cur, cur_n)
-segs[#segs + 1] = s
-seg_sz[#seg_sz + 1] = #s        -- 编码后的段宽(含 [ ] 和逗号), 预检用
-cur, cur_sz, cur_n = {}, 2, 0
-return true
-end
-for i = 1, #rows do
-
-
-local o = M.row_out(rows[i])
-local ok, e = pcall(json.encode, o)
-
-
-
-if not ok then return false, "encode fail: " .. brief(e) end
-if not e then return false, "encode fail(无返回)" end
-
-if cur_n > 0 and (cur_sz + #e + 1 > SHARD_MAX or cur_n >= SHARD_ROWS) then
-close_seg()
-end
-cur_n = cur_n + 1
-cur[cur_n] = e
-cur_sz = cur_sz + #e + (cur_n > 1 and 1 or 0)
-end
-close_seg()
-
-local n = #segs
 local head = {}
 for key, val in pairs(t) do
 if key ~= "regs" then head[key] = val end
@@ -448,6 +479,7 @@ end
 
 
 local old_n = 0
+M.stage = "shard.old"
 local okh, oh = pcall(dec_json, kv_get(k))
 if okh and oh then
 local on = shard_of(oh)
@@ -458,40 +490,64 @@ end
 
 
 
-local worst = 0
-for i = 1, #seg_sz do
-if seg_sz[i] > worst then worst = seg_sz[i] end
-end
-local okb, berr = ensure_block(worst + 96)
+M.stage = "shard.probe"
+local okb, berr = ensure_block(SHARD_MAX + 96)
 if not okb then
-return false, "写盘前连续块不够(最宽一段 " .. worst .. "B): " .. tostring(berr)
+return false, "写盘前连续块不够(段宽 " .. SHARD_MAX .. "B): " .. tostring(berr)
 end
 
-head.v, head.n, head.st = SHARD_VER, n, SHARD_W
-local ok1, err1 = put_json(k, head, true)
+M.stage = "shard.head.w"
+head.v, head.n, head.st = SHARD_VER, 0, SHARD_W
+local ok1, err1 = put_head(k, head, true)
 if not ok1 then return false, err1 end
-for i = 1, n do
 
-
-local s = segs[i]
-segs[i] = nil
+local n = 0
+local cur, cur_sz = {}, 2
+local function flush()
+if #cur == 0 then return true end
+M.stage = "shard.join"
+local s = join_parts(cur, #cur)
+cur, cur_sz = {}, 2
+n = n + 1
 if #s > FSKV_VALUE_MAX then
 return false, "段 " .. #s .. "B 超 fskv 单值上限 " .. FSKV_VALUE_MAX .. "B"
 end
-local ok2, err2 = kv_set(shard_key(k, i), s, true)
+M.stage = "shard.seg" .. n
+local ok2, err2 = kv_set(shard_key(k, n), s, true)
 if not ok2 then
-return false, "分片" .. i .. "/" .. n .. "写入失败: " .. tostring(err2)
+return false, "分片" .. n .. "写入失败: " .. tostring(err2)
 end
 
 collectgarbage("collect")
+return true
 end
-head.st = SHARD_R
-local ok3, err3 = put_json(k, head) -- 提交: 只有这一次 flush
+M.stage = "shard.rows"
+for i = 1, #rows do
+local e, eerr = row_json(rows[i])
+
+
+if not e then return false, "encode fail: " .. brief(eerr) end
+
+if #cur > 0 and (cur_sz + #e + 1 > SHARD_MAX or #cur >= SHARD_ROWS) then
+local okf, errf = flush()
+if not okf then return false, errf end
+end
+cur[#cur + 1] = e
+cur_sz = cur_sz + #e + (#cur > 1 and 1 or 0)
+end
+local okf, errf = flush()
+if not okf then return false, errf end
+
+M.stage = "shard.commit"
+head.n, head.st = n, SHARD_R
+local ok3, err3 = put_head(k, head) -- 提交: 只有这一次 flush
 if not ok3 then return false, "分片提交失败: " .. tostring(err3) end
 
 
 
+M.stage = "shard.clean"
 for i = n + 1, old_n do pcall(fskv.set, shard_key(k, i), "") end
+M.stage = ""
 return true
 end
 

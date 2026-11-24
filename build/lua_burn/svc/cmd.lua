@@ -522,8 +522,17 @@ local slot = (cur_mode == "platform") and SLOT_PULL or SLOT_POLL
 local ok, serr
 
 
-if slot == SLOT_PULL then ok, serr = cfgstore.save_pull_norm(n)
-else ok, serr = cfgstore.save_poll_norm(n) end
+
+
+
+
+local saver = (slot == SLOT_PULL) and cfgstore.save_pull_norm or cfgstore.save_poll_norm
+local pok, a1, a2 = pcall(saver, n)
+if pok then
+ok, serr = a1, a2
+else
+ok, serr = false, "保存路径异常@" .. tostring(cfgstore.stage or "?") .. ": " .. tostring(a1)
+end
 
 trc_sample("saved")
 if not ok then return false, tostring(serr or "写入失败") end
