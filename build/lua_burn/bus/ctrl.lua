@@ -203,13 +203,19 @@ have_cfg, why = cfgstore and cfgstore.has_pull_cfg and cfgstore.has_pull_cfg()
 end
 if have_cfg then
 
-local cfg = (slot == SLOT_PULL) and cfgstore.load_pull() or cfgstore.load_poll()
-if cfg and pm then
-local n, err = cfgstore.normalize_poll(cfg)
-if n then pm.apply_cfg(n) end
-end
 
-if not (pm and pm.start(slot)) then return false, "FAIL poll start" end
+
+
+
+
+
+
+local cfg = (slot == SLOT_PULL) and cfgstore.load_pull() or cfgstore.load_poll()
+local n = nil
+if cfg and pm then n = cfgstore.normalize_poll(cfg, true) end
+
+
+if not (pm and pm.start(slot, n)) then return false, "FAIL poll start" end
 else
 
 
