@@ -203,13 +203,19 @@ function M.switch_mode(mode, from_boot)
         end
         if have_cfg then
             -- 2026-11: 先加载配置到 poll 运行时, 再启动 (否则 R:REG 返回空)
+            -- ⚠️ 11-24 真机 60 点: 这段原来会归一化出【两整份新表】——
+            --   这里一次, start() 里 reload_cfg 又一次, 每份 60 行 ≈ 12KB。
+            --   池子只剩 ~13KB 时第一份刚放下, 第二份就把 uart.setup 那 1KB
+            --   接收缓冲挤掉, ensure_uart 里的 uart.setup 直接 raise →
+            --   W:MODE=manual 回 "FAIL poll start"(现场看像"轮询起不来")。
+            --   现在: 就地归一化(load_* 回来的本来就是归一化产物, 原地做幂等)
+            --   + 把结果直接交给 start(start 拿到 c 就不再 reload_cfg), 全程零副本。
             local cfg = (slot == SLOT_PULL) and cfgstore.load_pull() or cfgstore.load_poll()
-            if cfg and pm then
-                local n, err = cfgstore.normalize_poll(cfg)
-                if n then pm.apply_cfg(n) end
-            end
+            local n = nil
+            if cfg and pm then n = cfgstore.normalize_poll(cfg, true) end
             -- pm 为 nil = bus/poll 加载失败(模块缺失), 当成起不来
-            if not (pm and pm.start(slot)) then return false, "FAIL poll start" end
+            -- (n 可能为 nil: 归一化不过, start 里会退回 reload_cfg 自己再来一次)
+            if not (pm and pm.start(slot, n)) then return false, "FAIL poll start" end
         else
             -- ⚠️ "没配过"和"读不出来"是两句话。11-12 现场这句 log 骗掉了
             --   一整轮排障: used 304K 时 flash 里那 56 行一个字没少, 只是

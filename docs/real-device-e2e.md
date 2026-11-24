@@ -530,6 +530,16 @@ A2（`98ab055`）烧进去后 60 点的死法又变了，这次信息量最大�
 >
 > 本地（模拟器压到"总空闲 9.4KB / `max:4096`"）：`CFINISH=OK`、
 > `R:CFG` 读回 60 行；Lua 31/31、前端 60/60、模拟器 17 PASS / 4 SKIP / 0 FAIL。
+>
+> **紧接着的第二格（同日）：`W:MODE=manual` → `FAIL poll start`。**
+> 存盘已成功（`R:CFG` 读得回 60 行），死在**模式切换**：`ctrl.lua` 里
+> `load_poll()` 之后又 `normalize_poll(cfg)` 造一整份新表（≈12KB），
+> 而 `poll.start(slot)` 内部 `reload_cfg` 再来一遍 —— 两份 12KB 把
+> `uart.setup` 的 1KB 接收缓冲挤掉。改成**就地归一化 + 结果直传 start**
+> （`normalize_poll(cfg, true)` → `pm.start(slot, n)`），零副本。
+>
+> 验收时要连带看这条：存 60 点后切 manual 必须回 `MODE=OK`，
+> `R:MODE` 里 `poll.running=true` 且 `poll.regs=60`。
 
 **A3 的真机验收顺序**（断电重插建议保留，但不是硬要求）：
 

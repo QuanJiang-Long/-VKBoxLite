@@ -127,6 +127,23 @@ eq(legacy.regs[1].alias, 'Old', '缺 alias 时退回 name')
 eq(legacy.regs[1].addr, 9, 'addr 字符串转数字')
 ok(legacy.regs[1].desc == nil and legacy.regs[1].fc == nil, '多余字段被丢掉')
 
+-- ===== 8. 就地归一化必须幂等且复用行对象 (模式切换路径靠这条不复制 60 行)=====
+--   11-24 真机: W:MODE=manual 在 60 点时"FAIL poll start" —— 根因是模式切换
+--   连做两次"归一化出一整份新表"(每份 60 行 ≈ 12KB), 池子只剩 13KB 时把
+--   uart.setup 的 1KB 接收缓冲挤掉。现在 ctrl 改成 normalize_poll(cfg, true)
+--   并把结果直接交给 poll.start(slot, n), 所以这条性质必须钉住:
+--   同一个表、同一批行对象, 一个都不许新造。
+local c8 = cfg.normalize_poll({ slave = 1, interval_ms = 1000, regs = {
+  { addr = 1, count = 1, dtype = 'uint16', name = 'A', alias = 'a' },
+  { addr = 2, count = 1, dtype = 'uint16', name = 'B', alias = 'b' },
+} })
+local r8a, r8b = c8.regs[1], c8.regs[2]
+local c8b = cfg.normalize_poll(c8, true)
+ok(c8b == c8, '就地归一化返回同一个表')
+ok(c8b.regs[1] == r8a and c8b.regs[2] == r8b, '就地归一化复用原来的行对象(不造第二份 60 行)')
+eq(#c8b.regs, 2, '就地归一化行数不变')
+eq(c8b.slave, 1, '就地归一化保留配置值')
+
 if fails > 0 then
   print(string.format('FAIL: %d 个检查点不过', fails))
   os.exit(1)

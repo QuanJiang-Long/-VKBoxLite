@@ -2827,3 +2827,17 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
   契约改用不分片的 `ds_sys` 测（分片槽每段 ≤640B，结构上撞不到 4096），
   并新增一条"编码器全坏也能存下紧凑行"的护栏。
 
+  真机接着又暴露下一格（同一天）：存盘成功后 `W:MODE=manual` 回
+  **`RET:FAIL:MODE:FAIL poll start`**。根因不在存盘，在**模式切换**——
+  `bus/ctrl.lua` 先 `load_poll()` 再 `normalize_poll(cfg)` 造一整份新表
+  （60 行 ≈ 12KB），`pm.start(slot)` 里 `reload_cfg` **又**来一遍；
+  池子只剩 ~13KB 时第二份把 `uart.setup` 那 1KB 接收缓冲挤掉，
+  `ensure_uart` 里 `uart.setup` raise → 上层只看到"轮询起不来"。
+  改法：**就地归一化 + 把结果直接交给 start**：
+  `n = cfgstore.normalize_poll(cfg, true)` → `pm.start(slot, n)`，
+  全程零副本（`start` 拿到 `c` 就不再 `reload_cfg`）。
+  `test_cfg_compact` 加一条护栏钉住"就地归一化幂等且复用行对象"
+  （`c8b == c8`、`regs[i]` 是同一批对象），否则这条优化会悄悄退化成再复制一份。
+  模拟器复测（压到 `max:3072`）：`W:MODE=manual` → `MODE=OK`、
+  `R:MODE` 正常应答且 `poll.regs=60`、`R:MEM` 通过。
+
