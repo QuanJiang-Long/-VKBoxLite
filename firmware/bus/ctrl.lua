@@ -215,7 +215,17 @@ function M.switch_mode(mode, from_boot)
             if cfg and pm then n = cfgstore.normalize_poll(cfg, true) end
             -- pm 为 nil = bus/poll 加载失败(模块缺失), 当成起不来
             -- (n 可能为 nil: 归一化不过, start 里会退回 reload_cfg 自己再来一次)
-            if not (pm and pm.start(slot, n)) then return false, "FAIL poll start" end
+            -- ⚠️ 起轮询前收一轮垃圾: 上一档留下的表/计划/串都是死的, 池子没合并
+            --   之前 max 连续块抬不起来 —— 60 点现场切 manual 时 uart.setup 要
+            --   1KB 连续块, 这一轮往往就是它能给出来的那一块。
+            collectgarbage("collect")
+            local sok, serr = false, nil
+            if pm then sok, serr = pm.start(slot, n) end
+            if not sok then
+                -- 把真原因带出去: 11-24 现场只看到 "FAIL poll start", 实际是
+                --   ensure_uart 里 uart.setup 抛了(内存), 为此白查了一轮。
+                return false, "FAIL poll start" .. (serr and (": " .. tostring(serr)) or "")
+            end
         else
             -- ⚠️ "没配过"和"读不出来"是两句话。11-12 现场这句 log 骗掉了
             --   一整轮排障: used 304K 时 flash 里那 56 行一个字没少, 只是

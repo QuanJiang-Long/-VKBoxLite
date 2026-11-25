@@ -637,7 +637,9 @@ function M.start(src, c)
     local ok, err = ensure_uart()
     if not ok then
         log.error("poll", "setup failed:", tostring(err))
-        return false
+        -- 第二个返回值 = 真原因。ctrl 会把它拼进 RET:FAIL:MODE:,
+        --   现场就不用再从"轮询起不来"倒推是内存还是串口
+        return false, err
     end
     pcall(uart.on, mbus.UART_ID, "receive", on_receive)
     running = true

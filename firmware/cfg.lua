@@ -952,8 +952,25 @@ for name, sec in pairs(SECTIONS) do
             log.error("cfg", name, "read fail:", brief(serr))
             return sec.default, brief(serr)
         end
-        local ok, c, err = pcall(sec.norm, raw)
-        if ok and c then return c end
+        -- 11-25 真机 60 点: 冷读也必须"只留一份"。
+        --   分片段读回来的 raw 已经被 shards_load 折成紧凑行, 就地归一化
+        --   (inplace=true) 复用的就是同一批行对象 —— 不再造第二张 60 行表。
+        --   归完把 raw 那条缓存丢掉, 只把归一化结果挂 norm_cache:
+        --   原来 json_cache 里那份紧凑行表(≈10KB) 和 normalize 出来的新表
+        --   (≈12KB) 长期并存, 60 点现场池子只剩 ~13KB, 后面每一条
+        --   (切模式 / R:CFG / uart.setup 的 1KB 缓冲)都差的就是这 10KB。
+        local ok, c, err = pcall(sec.norm, raw, sec.compact and true or nil)
+        if ok and c then
+            if sec.shard then
+                json_cache[sec.key] = nil
+                norm_cache[sec.key] = c
+            end
+            return c
+        end
+        -- 就地归一化中途失败时 raw 可能已经被 "清空再填" 过一半 —— 留着它
+        --   等于把一次失败固化成一棵残表(下次 load 命中它, 配置凭空变少)。
+        --   丢掉, 让下一次重新从 flash 读。
+        if sec.compact then json_cache[sec.key] = nil end
         -- ⚠️ 两种失败【话不一样】, 不能混成一句"配置坏了"(2026-11-12 现场):
         --   ok==false      = 归一化【抛异常】。那次是 used 304848/307192 时连
         --                    160B 都分配不出来 —— flash 里那 56 行一个字没少。

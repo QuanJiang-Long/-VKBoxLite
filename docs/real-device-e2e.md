@@ -540,6 +540,26 @@ A2（`98ab055`）烧进去后 60 点的死法又变了，这次信息量最大�
 >
 > 验收时要连带看这条：存 60 点后切 manual 必须回 `MODE=OK`，
 > `R:MODE` 里 `poll.running=true` 且 `poll.regs=60`。
+>
+> **第三格（11-25，烧 `96a2782` 后实测的真机账本）**：模式切换不报错了，
+> 但真机池子的水位比模拟器紧得多，量出来是这样：
+>
+> | 状态 | `R:MEM` | 余量 | `max` |
+> |---|---|---|---|
+> | 开机 idle | 271992/307192 | ~35KB | 8192 |
+> | 进 manual（0 点） | 285240/307192 | ~22KB | 6144 |
+> | 存 60 点（紧凑行 + 归一化表两份） | 293400+ | ~13KB | 4096 |
+> | 无 SIM 时 MQTT 试连抖动（`R:IOT` 里 `err:conack timeout`） | 297700+ | ~9KB | 2048 |
+>
+> 于是 `R:CFG` 时而 `RET:FAIL:not enough memory for buffer allocation`、
+> `W:MODE=manual` 起不来。**修法：冷读也只留一份**——分片段读回来的 raw
+> 已经是紧凑行，`load_*` 改成就地归一化（复用行对象）并只挂 `norm_cache`，
+> `json_cache` 里那份随即丢掉；就地失败时也丢，避免残表被下次 load 当配置。
+> 另外 `poll.start` 现在把 `ensure_uart` 的真原因带回给 `W:MODE`
+> （`FAIL poll start: uart setup fail: ...`），起轮询前先收一轮垃圾。
+>
+> 验收脚本仍按原序列跑；切 manual 那一步如果失败，应答里会直接带
+> `uart setup fail: ...` 这类真原因，不用再猜。
 
 **A3 的真机验收顺序**（断电重插建议保留，但不是硬要求）：
 

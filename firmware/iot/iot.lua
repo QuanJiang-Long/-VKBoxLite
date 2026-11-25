@@ -1562,7 +1562,15 @@ end
 -- 能否建连: 只有"明确知道没注册"才算不能。mobile 库缺失时返回 true ——
 -- 没有依据就不能拦着连接, 那是把"测不出"当成"连不上"
 local function net_ready()
-    return net_registered(MqttUtil.mcall(mobile, "csq"))
+    -- 11-25: CSQ=99 是 3GPP 的"未知/检测不到", 和 0(未注册) 一样【连不上】。
+    --   原来只挡 0, 无卡/无信号的设备可能被当成"已注册"→ 反复建客户端去撞
+    --   conack timeout; 真机实测稳态被试连占到只剩 ~9KB(60 点连 uart.setup
+    --   的 1KB 都拿不到)。这里只影响"要不要发起连接", 上报给平台的
+    --   netRegister 字段仍走 net_registered 原算法。csq 变回真实值后
+    --   下面的 wait_kickable(10000) 会自然接上, 不是一次性判定。
+    local csq = MqttUtil.mcall(mobile, "csq")
+    if type(csq) == "number" and csq == 99 then return false end
+    return net_registered(csq)
 end
 
 local function try_connect()

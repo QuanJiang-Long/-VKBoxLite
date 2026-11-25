@@ -216,24 +216,28 @@ d = {}
 diff(snap2, keep2, 'fail-input', d)
 report(d, '失败时也不许动入参')
 
--- ⑦load_poll 走的是 SECTIONS 里 pcall(sec.norm, raw) —— 只有一个参数,
---   拿到的是【缓存 raw】: 归一化必须没污染它, 且每次调用各得一张新表
+-- ⑦ 11-25 起 load_poll 走【就地归一化 + 结果常驻】: 分片段读回来的 raw 已经
+--   是紧凑行, 就地归一化复用它, 归完把 raw 那条缓存丢掉 —— 只留一份。
+--   原来这里钉的是"每次调用各得一张新表、缓存里的 raw 不许动"(纯函数契约),
+--   那条契约换成了"同一份、且只一份": 真机 60 点池子只剩 ~13KB,
+--   紧凑行(≈10KB)+归一化新表(≈12KB)并存时, 切模式/R:CFG/uart.setup 都差那 10KB。
 FLASH_RAW = { slave = '5', interval_ms = '1200', regs = {
   row('42', 'x', { alias = 'VX', fc = 3, desc = '导表列' }),
   row('42', 'x2'), row('43', 'y') } }
-local before = clone(FLASH_RAW)
 eq(cfg.save_poll({ slave = 5, interval_ms = 1200, regs = { row(42, 'x') } }), true, 'save_poll 落盘')
 local p1 = cfg.load_poll()
 eq(p1.slave, 5, 'load_poll 的 slave')
 eq(#p1.regs, 2, '缓存 raw 去重后 2 行')
 eq(p1.regs[1].alias, 'VX', 'alias 取传入的')
 local p2 = cfg.load_poll()
-ok(p1 ~= p2, '两次 load 返回两张不同的表(归一化每次新建, 缓存只存 raw)')
-ok(p1.regs[1] ~= p2.regs[1], '连寄存器行都是各自独立的一份')
-d = {}
-diff(before, FLASH_RAW, 'cached-raw', d)
-report(d, '缓存里那份 raw 没被归一化改过')
-eq(#p2.regs, 2, '第二次 load 行数一样(raw 若被改脏, 这里就对不上)')
+eq(p1, p2, '两次 load 返回同一张表(只留一份常驻, 不再每次新造)')
+eq(#p2.regs, 2, '第二次 load 行数一样')
+-- 就地归一化必须幂等: 丢掉缓存重读一遍(decode 拿回的正是刚才那张表),
+--   行数/去重结果不许变 —— 变了说明就地路径留下了残表
+cfg.drop_cache()
+local p3 = cfg.load_poll()
+eq(p3 and #p3.regs or -1, 2, 'drop_cache 后重读仍是 2 行(就地归一化幂等)')
+eq(p3 and p3.regs[1].alias or nil, 'VX', '重读后 alias 还是传入的那个')
 
 if fails > 0 then
   print(string.format('FAIL: %d 个断言不过', fails))

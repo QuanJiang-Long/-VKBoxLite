@@ -2841,3 +2841,27 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
   模拟器复测（压到 `max:3072`）：`W:MODE=manual` → `MODE=OK`、
   `R:MODE` 正常应答且 `poll.regs=60`、`R:MEM` 通过。
 
+  **11-25 真机（烧 `96a2782` 之后）把最后一格量出来了**：存 60 点仍然 OK，
+  但真机池子的真实账本是——
+  - 开机 idle：`lua 271992/307192`（余 ~35KB），`max:8192`
+  - 进 manual（0 点）：`285240`（余 ~22KB，`max` 掉到 6144）——iot 任务/
+    MQTT 客户端那一套占的
+  - **冷读 60 行**：`shards_load` 折出来的紧凑行表（≈10KB）挂在 `json_cache`，
+    `load_poll` 再 `normalize` 一份新表（≈12KB）→ 两份并存，余 ~13KB
+  - 这台设备没有 SIM：`R:IOT` 显示 `err:conack timeout`、`bo:4`，MQTT 试连
+    反复抖动，稳态比开机还低 ~10KB（`R:MQTT.heap.used` 100K/198K 系统池）
+
+  于是 `R:CFG` 时而成功时而 `RET:FAIL:not enough memory for buffer allocation`，
+  `W:MODE=manual` 干脆起不来。**修法**（`cfg.lua` 的 `load_*`）：
+  - 分片段读回来的 raw 已经是紧凑行 → `pcall(sec.norm, raw, sec.compact and true)`
+    **就地**归一化，复用同一批行对象
+  - 归完 `json_cache[k] = nil`、`norm_cache[k] = c` —— **冷读也只留一份**
+  - 就地归一化中途失败时同样丢掉 raw 缓存（否则残表会被下次 load 当成配置）
+
+  `bus/poll.lua` 的 `M.start` 现在把 `ensure_uart` 的真原因当第二返回值交回去，
+  `ctrl` 拼成 `FAIL poll start: uart setup fail: ...`；起轮询前先 `collectgarbage`。
+  这一天现场只看到 "FAIL poll start"、白查了一轮，就是为了不再发生。
+
+  护栏：`test_cfg_shard` 4b/4c（60 行两次 load 是**同一张表**、就地归一化幂等、
+  失败后不留残表）、`test_cfg_normalize` ⑦ 改成新契约（同一份、且只一份）。
+

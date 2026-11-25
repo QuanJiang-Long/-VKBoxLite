@@ -377,6 +377,39 @@ do
   eq(c and #c.regs or -1, 5, '缩表后读回来是 5 行(残段没混进来)')
 end
 
+-- ===== 4b) 11-25: 冷读只留一份 (60 点"存得进、读不回"的最后一格) =====
+--   分片段读回来的 raw 已经是紧凑行表, load_poll 就地归一化(inplace)并挂
+--   norm_cache: 第二次 load 必须拿到【同一个表】。真机 60 点池子只剩 ~13KB,
+--   两份(紧凑行 ≈10KB + 归一化新表 ≈12KB)并存时, 后面每条命令
+--   (切 manual / R:CFG / uart.setup 那 1KB 接收缓冲)都差的就是这 10KB。
+do
+  local cfg = fresh()
+  local ok, err = cfg.save_poll({ slave = 1, interval_ms = 5000, regs = rows(60, 1) })
+  eq(ok, true, '60 行存得下: ' .. tostring(err))
+  local c1, w1 = cfg.load_poll()
+  ok_(w1, '60 行读回来不该带原因')
+  eq(c1 and #c1.regs or -1, 60, '60 行读回行数')
+  local c2 = cfg.load_poll()
+  eq(c2, c1, '第二次 load_poll 复用同一份(只留一份常驻, 不再造第二张 60 行表)')
+  eq(cfg.is_row(c1.regs[1]), true, '就地归一化后仍是紧凑行(行对象没有复制成哈希行)')
+  eq(c1.regs[60].addr, 61, '就地归一化保留顺序/内容(rows(60,1) 的 addr 是 2..61)')
+end
+
+-- ===== 4c) 就地归一化失败时, raw 缓存必须丢掉(否则残表被当成配置) =====
+do
+  local cfg = fresh()
+  store['ds_poll'] = encode({ slave = 1,
+    regs = { { addr = 70000, count = 1, dtype = 'uint16', name = 'bad' } } })
+  local c, why = cfg.load_poll()
+  if why == nil then print('FAIL: 坏行却读成功了') fails = fails + 1 end
+  eq(c == cfg.default_poll, true, '坏行回默认表')
+  local ok = cfg.save_poll({ slave = 1, regs = rows(3, 1) })
+  eq(ok, true, '坏行之后还能存好配置')
+  local c2, w2 = cfg.load_poll()
+  ok_(w2, '重存后读回不带原因')
+  eq(c2 and #c2.regs or -1, 3, '重存后读回 3 行(失败那次的残表没留在缓存里)')
+end
+
 -- ===== 5) 老格式(整份 JSON 一个键)照样能读, 下一次保存自然迁成分片 =====
 -- 迁移期最长一次保存, 所以不做双写兼容层: 这条钉的就是"读到就用"
 do
