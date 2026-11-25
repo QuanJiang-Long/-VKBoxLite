@@ -952,8 +952,25 @@ if serr then
 log.error("cfg", name, "read fail:", brief(serr))
 return sec.default, brief(serr)
 end
-local ok, c, err = pcall(sec.norm, raw)
-if ok and c then return c end
+
+
+
+
+
+
+
+local ok, c, err = pcall(sec.norm, raw, sec.compact and true or nil)
+if ok and c then
+if sec.shard then
+json_cache[sec.key] = nil
+norm_cache[sec.key] = c
+end
+return c
+end
+
+
+
+if sec.compact then json_cache[sec.key] = nil end
 
 
 

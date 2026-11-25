@@ -637,7 +637,9 @@ end
 local ok, err = ensure_uart()
 if not ok then
 log.error("poll", "setup failed:", tostring(err))
-return false
+
+
+return false, err
 end
 pcall(uart.on, mbus.UART_ID, "receive", on_receive)
 running = true

@@ -215,7 +215,17 @@ local n = nil
 if cfg and pm then n = cfgstore.normalize_poll(cfg, true) end
 
 
-if not (pm and pm.start(slot, n)) then return false, "FAIL poll start" end
+
+
+
+collectgarbage("collect")
+local sok, serr = false, nil
+if pm then sok, serr = pm.start(slot, n) end
+if not sok then
+
+
+return false, "FAIL poll start" .. (serr and (": " .. tostring(serr)) or "")
+end
 else
 
 

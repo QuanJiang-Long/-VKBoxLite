@@ -1562,7 +1562,15 @@ end
 
 
 local function net_ready()
-return net_registered(MqttUtil.mcall(mobile, "csq"))
+
+
+
+
+
+
+local csq = MqttUtil.mcall(mobile, "csq")
+if type(csq) == "number" and csq == 99 then return false end
+return net_registered(csq)
 end
 
 local function try_connect()
