@@ -1155,7 +1155,12 @@ local function reg_cmds()
 
     M.reg("R:REG", function()
         -- poll 没加载 = 没起过轮询, 回空表即可(前端 manual 档下 poll 必然已加载)
-        local pm = pollmod(false)
+        -- ⚠️ 这里必须是 pollmod(true): cmd 自己的 poll_tried 只有被
+        --   pollmod(true) 打通过。11-26 真机 60 点现场: ctrl 已经加载并跑着
+        --   poll(regs=60), 但 cmd 从没问过 → pollmod(false) 回 nil →
+        --   RET:REG=[] , 前端"从设备读取"读到一张空表。模块已在
+        --   package.loaded 里, 这次 require 是命中缓存, 不额外占堆。
+        local pm = pollmod(true)
         local regs = pm and pm.get_regs() or nil
         -- 同 R:CFG: 拼不出来就如实报, 不许回 RET:REG={} 冒充"一个寄存器都没有";
         --   60 点整表 encode 要 ~7KB 连续块, 这里改成逐行 encode + 流式写。
@@ -1171,9 +1176,33 @@ local function reg_cmds()
     M.reg("R:VAL", function()
         -- 编码不出来时必须单独报, 不能回 RET:VAL={} —— 见上面 jencode_err 的
         -- 说明: 那会把"应答拼不出来"说成"设备里没有数据"
-        local s, err = jencode_err(collector.snapshot())
-        if not s then return M.reply("RET:FAIL:VAL:" .. err) end
-        reply_json("RET:VAL=", s)
+        --
+        -- 2026-11-26 真机: 60 点 manual 档下这条每秒一次, snapshot() 先复制
+        --   60 张 5 字段表(≈11KB), 再整段 json.encode(≈5.4KB + 临时串),
+        --   18KB 余量时实测 RET:FAIL:handler error:not enough memory, 前端
+        --   读不到值还每秒重试。改成和 R:CFG / R:REG 同一条路子:
+        --   逐行 encode + tx_stream 流式写, 内存与点数无关。
+        --   行的来源换成 each_by_addr() 的迭代器 —— 不复制行数据。
+        local st = tx_stream("R:VAL")
+        st.add("RET:VAL=[")
+        local i = 0
+        for alias, d in collector.each_by_addr() do
+            i = i + 1
+            if i > 1 then st.add(",") end
+            local s, e = jencode_err({ name = alias, addr = d.addr,
+                                       value = d.value, ts = d.ts, dtype = d.dtype })
+            if not s then
+                -- e 已经过 brief() + pool_tag(): 单行、≤80B、带池水位
+                local sent, msg = st.abort("第 " .. i .. " 行编码失败: " .. tostring(e))
+                if not sent then return M.reply("RET:FAIL:VAL:" .. tostring(msg)) end
+                return true
+            end
+            st.add(s)
+        end
+        st.add("]\r\n")
+        st.flush()
+        log.debug("cmd", "tx:", st.sent, "B:", "RET:VAL=(流式)")
+        return true
     end)
 
     -- R:STAT 的片段表。单独抽出来是为了让单测能直接验结构

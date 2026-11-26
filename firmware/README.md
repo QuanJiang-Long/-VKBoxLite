@@ -2865,3 +2865,48 @@ I/pullcfg:   name 原始字节 B5 E7 D1 B9 (4B) 未见 EFBFBD(GBK 原样字节, 
   护栏：`test_cfg_shard` 4b/4c（60 行两次 load 是**同一张表**、就地归一化幂等、
   失败后不留残表）、`test_cfg_normalize` ⑦ 改成新契约（同一份、且只一份）。
 
+- **60 点 manual 的最后一格不在轮询, 在应答构造（2026-11-26）**。
+  烧 `39bde26` 后真机实测把"复位"钉死了：
+  - **直连串口（不开前端）**：60 点 manual 完全正常 —— `MODE=OK`、
+    `poll.regs=60`、`rounds` 持续增长、`R:MEM` 稳定 `288720/307192`（余 18.5KB），
+    不复位。所以"60 点跑不动"这个结论不成立。
+  - **前端接上**就复位：前端首页每秒读 `R:VAL`，而
+    `json.encode(collector.snapshot())` 在 18.5KB 余量下必失败
+    （`RET:FAIL:handler error:not enough memory`），每秒重试一次。
+
+  三处改动（都在"应答怎么拼"这一侧，轮询/存盘一行没动）：
+
+  1. `data/collector.lua` 新增 `M.each_by_addr()`：只排 60 个 alias 引用
+     （≈1KB），行数据仍是 `dataCache` 里那张表 —— 不再复制 60 张 5 字段表（≈11KB）。
+     `snapshot()` 保留（测试与 iot 还在用）。
+  2. `svc/cmd.lua` 的 `R:VAL` 改成 `tx_stream("RET:VAL=")` + 逐行 `jencode_err`
+     （峰值 = 一行 ≈200B，与点数无关）。**输出格式不变**（`RET:VAL=[{name,addr,
+     value,ts,dtype},...]`，仍按 addr 升序），前端一行都不用改。
+     行编码失败仍走 `RET:FAIL:VAL:<真原因 + 池水位>`，绝不发半张表。
+  3. `svc/cmd.lua` 的 `R:REG` 由 `pollmod(false)` 改 `pollmod(true)`：
+     `poll_tried` 只有被 `pollmod(true)` 打通过，于是 ctrl 明明在跑 60 点、
+     `R:REG` 却回 `[]`（前端"从设备读取"读到空表）。模块已在
+     `package.loaded` 里，这次 require 是命中缓存。
+
+  另外两处现场修：
+
+  - **`guard` 的陈旧 stall**（"切 manual 后 1–3 秒自己重启"的真因）：
+    `stall_of(mode)` 原来第一行就 `return`，idle 时**不更新** `was_running/
+    was_mode`；走一遍 "manual → idle（停几分钟）→ manual" 后两条重定基判据
+    都不成立，于是拿停机期间的陈旧 `last_alive` 算差值，stall 一报几百秒
+    > `STALL_LIMIT_S=120` → `AUTO_REBOOT`。现在 `stall_of` 先 `sync_running`
+    再看档位（idle 也把 `was_running` 清掉），`poll.M.start` 在
+    `running=true` 之后显式 `guard.alive()` 再定一次基（关掉"切档到下一拍
+    monitor 之间"那个时间窗）。看门狗语义不变：引擎在跑却不喂心跳，stall 照常累积。
+  - **`R:ID` 的 uid 是二进制**：`mcu.unique_id()` 在 PC 模拟器上带 `\n`，
+    前端按 `\n` 切行只拿到半条 `RET:ID=`，之后每条指令都撞
+    "上一条指令尚未返回"（模拟器 e2e 第 3 步必挂）。`sn.lua` 现在在**取值
+    那一刻**把控制字符转成 `%XX`；`R:INFO` 的 JSON 也带同一个 uid，而
+    `json.encode` 碰到 `0x00` 会按 C 字符串截断，一并治好。
+
+  回归：Lua **31/31**、前端 **60/60**、模拟器 **16 PASS / 5 SKIP / 0 FAIL**、
+  `mem_scale` 16/24/32/48/60 全 PASS。新增护栏：`test_cmd_valfail`（流式契约：
+  行编码失败不发半张表、空缓存才回 `[]`、60 行分多次写、不依赖 `snapshot()`）、
+  `test_cmd_reg` 第 0 条（没人先加载 poll 时 `R:REG` 自己拉）、
+  `test_guard_modes`（manual→idle→manual 必须重定基、monitor 不得重启）。
+

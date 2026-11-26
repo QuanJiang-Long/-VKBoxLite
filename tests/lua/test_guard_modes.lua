@@ -154,6 +154,29 @@ eq(guard.stall_of('manual'), 5, '同档连续拍: stall 正常按秒累积')
 mode_now = 'platform'
 eq(guard.stall_of('platform'), 0, '切档那一拍也重定基')
 
+-- ============ manual → idle → manual 也要重定基 (2026-11-26 真机) ============
+-- 现场: 设备在 manual 跑过一段 → 切 idle 停几分钟 → 切回 manual。
+-- 修前 stall_of('idle') 第一行就 return, was_running/was_mode 停在上一档的
+--   (true, 'manual'); 切回 manual 时 "引擎刚起来" 和 "换了档" 两条判据都不成立
+--   → 直接拿停机期间那个陈旧的 last_alive 算差值, stall 一报就是几百秒
+--   → monitor 一拍就 AUTO_REBOOT(用户看到的是"切 manual 后 3 秒设备自己重启")。
+-- 修法: stall_of 先 sync 再看档位, idle 时也把 was_running 清掉。
+mode_now = 'manual'
+engine_running = true
+guard.stall_of('manual')            -- 先让 sync 把档位记成 manual 并重定基
+advance(3)
+eq(guard.stall_of('manual'), 3, '前提: manual 档心跳停了 3 秒就是 stall=3')
+mode_now = 'idle'
+engine_running = false              -- 切 idle, 轮询停
+eq(guard.stall_of('idle'), nil, 'idle 不判 stall')
+advance(600)                        -- 停 10 分钟
+mode_now = 'manual'
+engine_running = true               -- 重新起轮询
+rebooted = 0
+eq(guard.stall_of('manual'), 0, 'manual→idle→manual: 重定基为 0 (修前是 600+)')
+timers[1]()
+eq(rebooted, 0, '这条路径上 monitor 不得重启')
+
 -- ============ Lua 池保险丝 (2026-11-13) ============
 -- 起因: 现场那台 SN 为空的设备, 60 点第一轮采集后 used 302528/307192, 一个
 --   672 字节的分配拿不到 → prov.poll 抛 not enough memory → Lua VM exit,

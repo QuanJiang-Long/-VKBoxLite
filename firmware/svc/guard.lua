@@ -89,8 +89,17 @@ end
 
 -- 本档位当前的 stall 秒数; nil = 不该判 stall(没采集在跑)
 local function stall_of(mode)
+    -- ⚠️ 先 sync 再看档位(2026-11-26): idle 时也得把 was_running/was_mode 更新掉。
+    --   原来这里第一行就 return, 于是 "manual → idle → manual" 这条路上
+    --   was_running 还留着上一档的 true、was_mode 还等于 "manual",
+    --   重定基判据 (not was_running or mode ~= was_mode) 两条都不成立 →
+    --   直接拿停机期间那个陈旧的 last_alive 算差值。
+    --   真机现场: idle 停几分钟后切 manual, RET:MODE=OK 之后 3 秒内自己重启
+    --   (stall 一下报到几百秒, 超过 STALL_LIMIT_S=120 → AUTO_REBOOT)。
+    --   注意: 这不削弱看门狗 —— 引擎在跑却不喂心跳时 r 仍为 true, stall 照常累积。
+    local r = sync_running(mode)
     if not is_active_mode(mode) then return nil end
-    if not sync_running(mode) then return nil end
+    if not r then return nil end
     return ticks - last_alive
 end
 -- 导出: 单元测试用 (tests/lua/test_guard_modes.lua)

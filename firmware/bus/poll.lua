@@ -644,6 +644,12 @@ function M.start(src, c)
     pcall(uart.on, mbus.UART_ID, "receive", on_receive)
     running = true
     gen = gen + 1
+    -- 2026-11-26: 起轮询这一刻就把 stall 时钟重定基。
+    --   guard.sync_running 已经能在"引擎刚起来"时归零, 但它只在 monitor /
+    --   status 被调用的那一拍才采样; 而 monitor 是 10 秒一拍 —— 切档后
+    --   到下一拍之间, 任何 R:STAT/R:MODE 都会先算一次 stall。显式喂一次
+    --   心跳, 把这条路径上的时间窗彻底关掉 (切档后秒重启的现场就是这么来的)。
+    if guard and guard.alive then pcall(guard.alive) end
     if sys then sys.taskInit(poll_task) end
     log.info("poll", string.format("started(%s), regs=%d slave=%d baud=%d parity=%d timeout=%dms",
         curSlot, #regs, lastCfg and lastCfg.slave or cfg.SLAVE_ADDR,

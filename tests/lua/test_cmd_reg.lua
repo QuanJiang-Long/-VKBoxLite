@@ -113,6 +113,16 @@ local function ask(line)
     return table.concat(writes, "")
 end
 
+-- ===== 0) 没人先加载 bus/poll 时, R:REG 要自己拉 (2026-11-26 真机) =====
+-- 现场: ctrl 已经加载并跑着 poll(regs=60), 但 cmd 自己的 poll_tried 还是
+--   false → pollmod(false) 回 nil → RET:REG=[] , 前端「从设备读取」读到
+--   一张空表, 而 R:MODE 明明写着 regs=60。
+check("0 前提: cmd 还没问过 bus/poll", cmd.poll_loaded() == false, "已经被拉进来了")
+local out0 = ask("R:REG")
+check("0 R:REG 自己把 bus/poll 拉进来", cmd.poll_loaded() == true, "poll 没被拉进来")
+check("0 有 60 行(不是 RET:REG=[])", out0:sub(1, 9) == "RET:REG=[" and #out0 > 100,
+    string.format("%q", out0:sub(1, 30)))
+
 -- 把 bus/poll 拉进来: 真机开机起轮询时就有, 单测里借 W:RAWTEST 触发一次
 --   (它只调 pollmod(true), 应答内容与本用例无关)
 FAIL_ON = {}

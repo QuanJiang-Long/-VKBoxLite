@@ -173,13 +173,31 @@ local function grab(lib, key)
     return nil
 end
 
+-- 一行协议里的字段必须自己保证"不会把这一行切开"(2026-11-26)。
+--   uid 来自 mcu.unique_id(), 是二进制(PC 模拟器上是随机字节, 真机也可能
+--   带控制字节); 一旦里面出现 \r 或 \n, 前端按 \n 切行时只拿到半条应答,
+--   剩下半条会一直躺在它那边, 之后每条指令都撞"上一条指令尚未返回"。
+--   实测: 模拟器 fskv 全新(没有 SN)时 R:ID 必现 —— 设备日志里那行
+--   "RET:ID=imei:...;uid:" 后面直接接了下一句, 就是被 0x0a 切断了。
+--   处理: 控制字符换成 %XX(可打印字符原样保留, 正常设备格式不变)。
+--   在【取值那一刻】就洗干净: R:INFO 的 JSON 也带着同一个 uid, 而 json.encode
+--   碰到 0x00 会按 C 字符串截断 —— 那样连 RET:INFO 都拼不完整。
+local function line_safe(s)
+    return (tostring(s or ""):gsub("%c", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
 local imei_cache, uid_cache = nil, nil
 
 local function try_identity()
     local mobile = util.try("mobile")
     local mcu = util.try("mcu")
     if not imei_cache then imei_cache = grab(mobile, "imei") end
-    if not uid_cache then uid_cache = grab(mcu, "unique_id") end
+    if not uid_cache then
+        local u = grab(mcu, "unique_id")
+        uid_cache = u and line_safe(u) or nil
+    end
     return imei_cache and uid_cache
 end
 
@@ -200,8 +218,8 @@ end
 
 function M.info_line()
     return string.format("imei:%s;uid:%s;sn:%s;state:%s;lock:%d",
-        imei_cache or "", uid_cache or "",
-        sn_cache or "", state, M.locked() and 1 or 0)
+        line_safe(imei_cache), line_safe(uid_cache),
+        line_safe(sn_cache), state, M.locked() and 1 or 0)
 end
 
 return M

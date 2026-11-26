@@ -207,6 +207,28 @@ function M.snapshot()
     return out
 end
 
+-- 按 addr 升序逐行迭代 (2026-11-26, 60 点 manual 档 R:VAL 实测 OOM)
+--   为什么不用 snapshot(): 它给每一行复制一张 5 字段表 —— 60 行 = 60 张表
+--   (≈11KB 常驻), 再交给 json.encode 拼整段串。manual 档 60 点只剩 18KB
+--   余量时, 这一步直接 not enough memory, 前端每秒一读就把设备压死。
+--   这里只排一份 alias 引用表(60 个引用 ≈1KB), 行数据仍旧指向 dataCache
+--   里那张表 —— 调用方(cmd 的 R:VAL)逐行 encode + 流式写, 峰值只剩一行。
+--   返回闭包: 每次调用 yield (alias, d), 取完返回 nil。
+function M.each_by_addr()
+    local keys = {}
+    for alias in pairs(dataCache) do keys[#keys + 1] = alias end
+    table.sort(keys, function(a, b)
+        return (dataCache[a].addr or 0) < (dataCache[b].addr or 0)
+    end)
+    local i = 0
+    return function()
+        i = i + 1
+        local k = keys[i]
+        if not k then return nil end
+        return k, dataCache[k]
+    end
+end
+
 function M.on_update(cb) updateCbs[#updateCbs + 1] = cb end
 
 function M.trim_cache()

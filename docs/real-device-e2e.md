@@ -571,6 +571,44 @@ A2（`98ab055`）烧进去后 60 点的死法又变了，这次信息量最大�
 | 保存后 `R:REG` | 60 行 JSON 对象（不是数组） |
 | `R:MODE=sniff` + `R:FRAMES` | `mon.running=true`、帧数在涨 |
 
+> **第四格（11-26，烧 `39bde26` 后实测：60 点 manual + 前端接上就复位）**
+>
+> 这一轮把"复位"从"轮询起不来"里摘出来了：**直连串口（不开前端）时 60 点
+> manual 完全正常** —— `RET:MODE=OK`、`poll.regs=60`、`rounds` 一直涨、
+> `R:MEM` 稳定在 288720/307192（余 18.5KB）、设备不复位。复位只在
+> **前端接上**时出现，因为前端首页每秒读一次 `R:VAL`。
+>
+> 三个病灶，都是"应答构造"这一侧的，跟轮询本身无关：
+>
+> | # | 现象 | 真因 | 修法 |
+> |---|---|---|---|
+> | 1 | `R:VAL` → `RET:FAIL:handler error:not enough memory` | `collector.snapshot()` 先复制 60 张 5 字段表（≈11KB），再整段 `json.encode`（≈5.4KB + 临时串）；18.5KB 余量下必失败，前端每秒重试 | `collector.each_by_addr()` 只排 60 个 alias 引用（≈1KB），`R:VAL` 逐行 `jencode_err` + `tx_stream` 流式写（峰值 = 一行 ≈200B），输出格式 `RET:VAL=[...]` 不变 |
+> | 2 | `R:REG` → `RET:REG=[]`（`R:MODE` 明明 `regs:60`） | `cmd` 里的 `pollmod(false)`：`poll_tried` 只有被 `pollmod(true)` 打通过；ctrl 加载并跑着 poll，cmd 却从没问过 → 回 nil | `R:REG` 改 `pollmod(true)`（`package.loaded` 命中，不额外占堆） |
+> | 3 | `W:MODE=manual` 回 OK 后 1–3 秒设备自己重启 | `guard.stall_of(mode)` 第一行就 `return`，idle 时**不更新** `was_running/was_mode`；"manual → idle → manual" 后两条重定基判据都不成立 → 拿停机期间的陈旧 `last_alive` 算差值，stall 一报几百秒 > `STALL_LIMIT_S=120` → `AUTO_REBOOT` | `stall_of` 先 `sync_running` 再看档位；`poll.M.start` 里 `running=true` 之后显式 `guard.alive()` 再定一次基 |
+>
+> 顺带修掉一条**只在模拟器上必现**的一行协议缺陷：`R:ID` 的 `uid` 来自
+> `mcu.unique_id()`，是二进制。PC 模拟器的 uid 里带 `\n`，前端按 `\n` 切行
+> 只拿到半条 `RET:ID=`，之后每条指令都撞"上一条指令尚未返回"（模拟器 e2e
+> 第 3 步必挂）。现在 `sn.lua` 在**取值那一刻**就把控制字符转成 `%XX`
+> （`R:INFO` 的 JSON 也带同一个 uid，`json.encode` 碰到 `0x00` 会按 C 字符串
+> 截断，一并治好）。
+>
+> 本轮本地回归：Lua **31/31**、前端 **60/60**、模拟器 **16 PASS / 5 SKIP /
+> 0 FAIL**、`mem_scale` 16/24/32/48/60 全 PASS。
+>
+> **烧录后的验收顺序（第 7 次烧录）**：
+>
+> | 步骤 | 期望 |
+> | --- | --- |
+> | `R:MEM`（idle） | 记基线 |
+> | `node tools/mem_scale_e2e.js --port COM4 --launch --sizes 60` | 保存 OK、读回 60 |
+> | 连测 `--sizes 16,24,32,48,60` | 全过 |
+> | 前端打开串口 → 切 manual | `R:MODE` 里 `poll.running=true`、`regs=60`，**设备不复位** |
+> | 首页看值 1 分钟 | `R:VAL` 不再 `not enough memory`；无 `PORT-CLOSED` |
+> | `R:REG` | 60 个 `{"addr":...}` 对象（不是 `[]`） |
+> | 切 idle → 等 2 分钟 → 切 manual | 不复位（第 3 条病灶的现场入口） |
+
+
 
 
 
