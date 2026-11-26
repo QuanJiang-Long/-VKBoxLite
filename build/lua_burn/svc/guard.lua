@@ -89,8 +89,17 @@ end
 
 
 local function stall_of(mode)
+
+
+
+
+
+
+
+
+local r = sync_running(mode)
 if not is_active_mode(mode) then return nil end
-if not sync_running(mode) then return nil end
+if not r then return nil end
 return ticks - last_alive
 end
 

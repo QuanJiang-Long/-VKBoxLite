@@ -644,6 +644,12 @@ end
 pcall(uart.on, mbus.UART_ID, "receive", on_receive)
 running = true
 gen = gen + 1
+
+
+
+
+
+if guard and guard.alive then pcall(guard.alive) end
 if sys then sys.taskInit(poll_task) end
 log.info("poll", string.format("started(%s), regs=%d slave=%d baud=%d parity=%d timeout=%dms",
 curSlot, #regs, lastCfg and lastCfg.slave or cfg.SLAVE_ADDR,

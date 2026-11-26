@@ -207,6 +207,28 @@ table.sort(out, function(a, b) return (a.addr or 0) < (b.addr or 0) end)
 return out
 end
 
+
+
+
+
+
+
+
+function M.each_by_addr()
+local keys = {}
+for alias in pairs(dataCache) do keys[#keys + 1] = alias end
+table.sort(keys, function(a, b)
+return (dataCache[a].addr or 0) < (dataCache[b].addr or 0)
+end)
+local i = 0
+return function()
+i = i + 1
+local k = keys[i]
+if not k then return nil end
+return k, dataCache[k]
+end
+end
+
 function M.on_update(cb) updateCbs[#updateCbs + 1] = cb end
 
 function M.trim_cache()

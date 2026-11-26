@@ -1155,7 +1155,12 @@ end)
 
 M.reg("R:REG", function()
 
-local pm = pollmod(false)
+
+
+
+
+
+local pm = pollmod(true)
 local regs = pm and pm.get_regs() or nil
 
 
@@ -1171,9 +1176,33 @@ end)
 M.reg("R:VAL", function()
 
 
-local s, err = jencode_err(collector.snapshot())
-if not s then return M.reply("RET:FAIL:VAL:" .. err) end
-reply_json("RET:VAL=", s)
+
+
+
+
+
+
+
+local st = tx_stream("R:VAL")
+st.add("RET:VAL=[")
+local i = 0
+for alias, d in collector.each_by_addr() do
+i = i + 1
+if i > 1 then st.add(",") end
+local s, e = jencode_err({ name = alias, addr = d.addr,
+value = d.value, ts = d.ts, dtype = d.dtype })
+if not s then
+
+local sent, msg = st.abort("第 " .. i .. " 行编码失败: " .. tostring(e))
+if not sent then return M.reply("RET:FAIL:VAL:" .. tostring(msg)) end
+return true
+end
+st.add(s)
+end
+st.add("]\r\n")
+st.flush()
+log.debug("cmd", "tx:", st.sent, "B:", "RET:VAL=(流式)")
+return true
 end)
 
 

@@ -173,13 +173,31 @@ if type(v) == "string" and v ~= "" then return v end
 return nil
 end
 
+
+
+
+
+
+
+
+
+
+local function line_safe(s)
+return (tostring(s or ""):gsub("%c", function(c)
+return string.format("%%%02X", string.byte(c))
+end))
+end
+
 local imei_cache, uid_cache = nil, nil
 
 local function try_identity()
 local mobile = util.try("mobile")
 local mcu = util.try("mcu")
 if not imei_cache then imei_cache = grab(mobile, "imei") end
-if not uid_cache then uid_cache = grab(mcu, "unique_id") end
+if not uid_cache then
+local u = grab(mcu, "unique_id")
+uid_cache = u and line_safe(u) or nil
+end
 return imei_cache and uid_cache
 end
 
@@ -200,8 +218,8 @@ end
 
 function M.info_line()
 return string.format("imei:%s;uid:%s;sn:%s;state:%s;lock:%d",
-imei_cache or "", uid_cache or "",
-sn_cache or "", state, M.locked() and 1 or 0)
+line_safe(imei_cache), line_safe(uid_cache),
+line_safe(sn_cache), state, M.locked() and 1 or 0)
 end
 
 return M
