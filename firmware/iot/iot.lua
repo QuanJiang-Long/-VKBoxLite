@@ -1568,8 +1568,17 @@ local function net_ready()
     --   的 1KB 都拿不到)。这里只影响"要不要发起连接", 上报给平台的
     --   netRegister 字段仍走 net_registered 原算法。csq 变回真实值后
     --   下面的 wait_kickable(10000) 会自然接上, 不是一次性判定。
+    --
+    -- 11-26 真机补刀: 【拿不到 csq】也必须算"不能连"。
+    --   无卡时 mobile 库在, 但 csq 回 nil(模组没注册/没卡), 而 mcall 的 nil
+    --   和"库不存在"是同一个 nil → net_registered(nil) = true → 放行去
+    --   mqtt.create。实测代价: idle 264952 → 285448(+20.5KB, 一次性且不归还),
+    --   60 点分片上传当场挂在第 4/5 片(93% 水位, max 6144)。
+    --   有 mobile 却量不到 csq, 就是没有"能连"的依据 —— 拦下来, 每 10s 再看。
+    if not mobile then return true end
     local csq = MqttUtil.mcall(mobile, "csq")
-    if type(csq) == "number" and csq == 99 then return false end
+    if type(csq) ~= "number" then return false end
+    if csq == 99 then return false end
     return net_registered(csq)
 end
 

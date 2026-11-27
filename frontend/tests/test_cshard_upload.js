@@ -11,7 +11,7 @@
 // 测什么(全在 vm 里跑真的 cfg.js, 不拿正则读源码):
 // 1. 小配置仍然一条 W:CFG 走完, 不切分片 —— 但【照样先开场】: 从 60 行删到
 //    12 行那份整行 ~1.1KB, 撞的还是轮询中 max:1024 那堵墙
-// 2. 60 行切成 N 片: 每片整行 <= 1200B, 片数 <= 32, 行序和内容一字不差
+// 2. 60 行切成 N 片: 每片整行 <= SHARD_LIMIT(640), 片数 <= 32, 行序和内容一字不差
 // 3. 收尾片带的是【除 regs 外】的字段, regs 不许多发一遍
 // 4. 第 k 片重试两次仍失败 -> 发 W:CSABORT, 报错里说清是第几片
 // 5. 字节数按 UTF-8 算: 中文行名不能按字符数低估(低估 = 片切大 = 现场又收不下)
@@ -134,7 +134,7 @@ async function main() {
     const b = makeBox();
     const regs = rows(60);
     const whole = JSON.stringify(Object.assign({}, CFG, { regs: regs }));
-    assertTrue(bytes('W:CFG=' + whole) > 1200, '② 这份该超阈值, 实际 ' + bytes('W:CFG=' + whole) + 'B');
+    assertTrue(bytes('W:CFG=' + whole) > 640, '② 这份该超阈值, 实际 ' + bytes('W:CFG=' + whole) + 'B');
     const mode = await b.ctx.writeCfgUp(CFG, regs);
     assertEq(mode, 'shard', '② 该走分片');
     const shards = b.sent.filter(l => l.indexOf('W:CSHARD=') === 0);
@@ -142,7 +142,7 @@ async function main() {
     assertEq(fin.length, 1, '② 收尾一条');
     // 开场只发一次, 而且报的是【片数 + 分片预算】: 设备按这个数试分配,
     //   报错了就是"腾出来的水接不住要发的行", 现场看到的就是白等一场
-    assertEq(b.sent[0], 'W:CBEGIN=' + shards.length + ',1200', '② 开场报的片数和预算');
+    assertEq(b.sent[0], 'W:CBEGIN=' + shards.length + ',640', '② 开场报的片数和预算');
     // 一条不多不少 = 没有任何一次重发。上一版现场就是靠这条看出来的:
     // 应答键错位 → 收尾被重发两次 → sent 比 n+1 多。设备回得对但【没人认领】,
     // 只看"最后有没有报错"是看不出来的(它报的是失败, 而配置其实存进去了)
@@ -150,7 +150,7 @@ async function main() {
     assertTrue(shards.length >= 4, '② 60 行至少 4 片, 实际 ' + shards.length);
     assertTrue(shards.length <= 32, '② 片数不超过设备上限 32');
     for (const l of shards) {
-      assertTrue(bytes(l) <= 1200, '② 单行超过 1200B: ' + bytes(l) + 'B');
+      assertTrue(bytes(l) <= 640, '② 单行超过 640B: ' + bytes(l) + 'B');
       const arg = splitLine(l).arg;
       const comma = arg.indexOf(',');
       const head = arg.slice(0, comma).split('/');
@@ -202,7 +202,7 @@ async function main() {
       const line = 'W:CSHARD=' + (i + 1) + '/' + ps.length + ',' + JSON.stringify(p);
       if (bytes(line) > max) max = bytes(line);
     });
-    assertTrue(max <= 1200, '④ 含中文的片也没超预算, 最大 ' + max + 'B');
+    assertTrue(max <= 640, '④ 含中文的片也没超预算, 最大 ' + max + 'B');
   }
 
   // ===== 6) 一行就超预算: 明说, 不切半行 =====

@@ -592,8 +592,13 @@ local function up_reset(why, keep_hold)
     if up.on and up.got > 0 then
         log.info("cmd", "分片暂存作废:", why or "-", "已收 " .. up.got .. "/" .. up.n)
     end
+    -- 11-26: 真有暂存行要丢时才收垃圾。没有上传会话的 up_reset(W:CFG 每次
+    --   都会走一遍)不该多出一次全量 GC —— test_cmd_ctrace 钉的就是
+    --   "普通保存只多 freed 那一次 GC", 这条护栏别弄丢了。
+    local had_rows = up.on and up.got > 0
     up.on, up.n, up.got, up.bytes, up.mode = false, 0, 0, 0, nil
     up.rows = {}
+    if had_rows then collectgarbage("collect") end
     -- 会话一结束就放开 MQTT 试连(见 W:CBEGIN 里 hold 的说明)。幂等:
     --   hold_restore 后面还会再放一次, iot.hold 自己判重
     if not keep_hold and iot and iot.hold then pcall(iot.hold, false) end
