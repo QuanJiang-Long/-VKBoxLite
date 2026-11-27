@@ -592,8 +592,13 @@ local function up_reset(why, keep_hold)
 if up.on and up.got > 0 then
 log.info("cmd", "分片暂存作废:", why or "-", "已收 " .. up.got .. "/" .. up.n)
 end
+
+
+
+local had_rows = up.on and up.got > 0
 up.on, up.n, up.got, up.bytes, up.mode = false, 0, 0, 0, nil
 up.rows = {}
+if had_rows then collectgarbage("collect") end
 
 
 if not keep_hold and iot and iot.hold then pcall(iot.hold, false) end

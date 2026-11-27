@@ -1568,8 +1568,17 @@ local function net_ready()
 
 
 
+
+
+
+
+
+
+
+if not mobile then return true end
 local csq = MqttUtil.mcall(mobile, "csq")
-if type(csq) == "number" and csq == 99 then return false end
+if type(csq) ~= "number" then return false end
+if csq == 99 then return false end
 return net_registered(csq)
 end
 
